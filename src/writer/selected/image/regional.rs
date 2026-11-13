@@ -104,7 +104,7 @@ impl<'a> Input<'a> {
     pub fn preparation(&self) -> Uuid {
         match self {
             Self::Capture(r) => r.preparation(),
-            Self::Regional(r) => stage(r.operation, "target-normalization-admission"),
+            Self::Regional(r) => normalization_preparations(r.operation)[1],
         }
     }
     pub fn preparation_fingerprint(

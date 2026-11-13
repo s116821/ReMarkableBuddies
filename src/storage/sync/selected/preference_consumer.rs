@@ -217,6 +217,16 @@ impl RequestPreferences {
         self.deadline
     }
 
+    /// Pure time check, safe while Store publication holds its own mutex.
+    pub(crate) fn writer_image_phase_time(&self, phase: NotebookPhase) -> Result<()> {
+        let deadline = match phase {
+            NotebookPhase::Admission => self.admission_deadline,
+            NotebookPhase::Handoff | NotebookPhase::Publication => self.deadline,
+        };
+        ensure!(Instant::now() < deadline, "Writer image phase expired");
+        Ok(())
+    }
+
     pub(crate) fn capture_writer_handwriting(
         &self,
         writer: &SelectedAdmission,

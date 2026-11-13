@@ -204,11 +204,10 @@ impl SelectedAdmission {
             accepted,
             req,
             (&fingerprint, ms),
-            Some(reads),
-            || {
-                let objects = BTreeMap::from([(regional.derived.sha256.clone(), masked.to_vec())]);
-                progress()?;
-                Ok(objects)
+            WriterPublication {
+                reads: Some(reads),
+                objects: BTreeMap::from([(regional.derived.sha256.clone(), masked.to_vec())]),
+                check: Some(progress),
             },
         )
     }

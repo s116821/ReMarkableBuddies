@@ -14,6 +14,18 @@ pub(crate) use image::regional::{
 pub(crate) use image::{run_image, run_target};
 pub use image::{WriterImageRequest, WriterTargetRequest};
 
+pub(crate) fn normalization_preparations(operation: Uuid) -> [Uuid; 2] {
+    [
+        stage(operation, "source-normalization-admission"),
+        stage(operation, "target-normalization-admission"),
+    ]
+}
+
+pub(crate) fn normalization_prerequisites(operation: Uuid) -> [Uuid; 3] {
+    let [capture, regional] = normalization_preparations(operation);
+    [operation, capture, regional]
+}
+
 pub struct Selection {
     pub accepted: SelectionToken,
     pub root: IntentRecordRef,

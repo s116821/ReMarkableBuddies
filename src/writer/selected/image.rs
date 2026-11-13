@@ -53,7 +53,7 @@ impl WriterImageRequest {
     }
 
     pub(crate) fn preparation(&self) -> Uuid {
-        stage(self.operation, "source-normalization-admission")
+        normalization_preparations(self.operation)[0]
     }
 
     pub(crate) fn preparation_fingerprint(
@@ -79,6 +79,7 @@ type Memory<'a> = (
 pub(super) struct Continuation<'a> {
     preferences: &'a RequestPreferences,
     original: &'a SelectionToken,
+    operation: Uuid,
     source: SourceProof<'a>,
     canceled: Option<&'a dyn Fn() -> bool>,
     completed: Cell<u8>,
@@ -116,6 +117,15 @@ impl Continuation<'_> {
             );
         }
         Ok(())
+    }
+
+    fn check_storage_time(&self, phase: NotebookPhase) -> Result<()> {
+        if self.source.regional() {
+            self.check_phase_time(Some(phase))
+        } else {
+            ensure!(!self.canceled.is_some_and(|c| c()), "Writer image canceled");
+            self.preferences.writer_image_phase_time(phase)
+        }
     }
 
     pub(super) fn memory_view(&mut self) -> Option<crate::memory::QueryResult> {
@@ -222,12 +232,33 @@ impl Continuation<'_> {
                     "selected Writer handoff already attempted"
                 );
                 self.stage.set(stage + 1);
-                self.phase(writer, selection, NotebookPhase::Handoff, memory, |_, _| {
-                    ensure!(regional::now() < deadline, "Writer image model deadline");
-                    submit()?;
-                    self.submitted.set(stage + 1);
-                    Ok(())
-                })
+                self.phase(
+                    writer,
+                    selection,
+                    NotebookPhase::Handoff,
+                    memory,
+                    |store, reads| {
+                        let mut check = || {
+                            self.check_storage_time(NotebookPhase::Handoff)?;
+                            ensure!(regional::now() < deadline, "Writer image model deadline");
+                            Ok(())
+                        };
+                        if stage == 0 {
+                            store.with_selected_operation_absent(
+                                selection.0,
+                                self.operation,
+                                reads,
+                                &mut check,
+                                submit,
+                            )?;
+                        } else {
+                            check()?;
+                            submit()?;
+                        }
+                        self.submitted.set(stage + 1);
+                        Ok(())
+                    },
+                )
             },
             deadline,
         )?;
@@ -292,7 +323,7 @@ impl Continuation<'_> {
                     finish,
                     Some(reads),
                     |_| Ok(()),
-                    || self.check_phase_time(Some(NotebookPhase::Publication)),
+                    || self.check_storage_time(NotebookPhase::Publication),
                 )
             },
         )
@@ -362,15 +393,14 @@ fn run_input<E: LLMEngine>(
         None,
         None,
         |store, reads| {
-            ensure!(
-                store
-                    .selected_receipt_with_budget(writer.scope(), input.preparation(), reads)?
-                    .is_none()
-                    && store
-                        .selected_receipt_with_budget(writer.scope(), fields.operation, reads)?
+            for operation in normalization_prerequisites(fields.operation) {
+                ensure!(
+                    store
+                        .selected_receipt_with_budget(writer.scope(), operation, reads)?
                         .is_none(),
-                "selected Writer image operation already has original evidence"
-            );
+                    "selected Writer image operation already has original evidence"
+                );
+            }
             input.resolve(
                 writer,
                 store,
@@ -420,10 +450,9 @@ fn run_input<E: LLMEngine>(
     let receiving = Continuation {
         preferences: &preferences,
         original: &selection.accepted,
+        operation: fields.operation,
         source: frozen,
-        canceled: input
-            .regional()
-            .then_some(&is_canceled as &dyn Fn() -> bool),
+        canceled: Some(&is_canceled as &dyn Fn() -> bool),
         completed: Cell::new(0),
         document: document_id,
         handwriting,
@@ -449,7 +478,8 @@ fn run_input<E: LLMEngine>(
                 (&selection.accepted, &selection.root),
                 (input.preparation(), &fingerprint, now()),
                 reads,
-                &mut || receiving.check_phase_time(Some(NotebookPhase::Admission)),
+                &normalization_prerequisites(fields.operation),
+                &mut || receiving.check_storage_time(NotebookPhase::Admission),
             )
         },
     )?;
@@ -536,7 +566,14 @@ fn run_input<E: LLMEngine>(
                     &mut || receiving.check_cutoff(150),
                 )
             } else {
-                writer.prepare_normalized_writer_locked(store, &token, &prepare, now(), reads)
+                writer.prepare_normalized_writer_locked(
+                    store,
+                    &token,
+                    &prepare,
+                    now(),
+                    reads,
+                    &mut || receiving.check_storage_time(NotebookPhase::Publication),
+                )
             }
         },
     );

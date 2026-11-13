@@ -90,6 +90,12 @@ struct ImageCommand {
     request: ImageRequest,
 }
 impl ImageRequest {
+    fn operation(&self) -> Uuid {
+        match self {
+            Self::Capture(r) => r.operation,
+            Self::Regional(r) => r.operation,
+        }
+    }
     fn preparation(&self) -> Uuid {
         match self {
             Self::Capture(r) => r.preparation(),
@@ -616,6 +622,11 @@ fn run_image_command(
     let mut reads = allowance();
     // An acknowledged original is terminal, even when the saved selection is stale.
     let original = SelectedAdmission::with_gates(&[&writer], |store| {
+        for preparation in selected::normalization_preparations(input.request.operation()) {
+            if preparation != input.request.preparation() {
+                ensure!(store.selected_receipt_with_budget(writer.scope(), preparation, &mut reads)?.is_none(), "Writer parent already has a sibling normalization original; inspect that original without replay");
+            }
+        }
         writer.recover_writer_normalization_locked(
             store,
             input.request.preparation(),

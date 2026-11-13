@@ -93,6 +93,12 @@ pub struct SelectedWriterInput {
     pub history: Vec<Turn>,
 }
 
+struct WriterPublication<'a> {
+    reads: Option<&'a mut SelectedReadBudget>,
+    objects: BTreeMap<String, Vec<u8>>,
+    check: Option<&'a mut dyn FnMut() -> Result<()>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedWriterImage {
@@ -626,6 +632,7 @@ impl SelectedAdmission {
         selection: (&SelectionToken, &IntentRecordRef),
         request: (Uuid, &str, u64),
         reads: &mut SelectedReadBudget,
+        prerequisites: &[Uuid],
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<WriterNormalizationPrepared> {
         progress()?;
@@ -701,7 +708,15 @@ impl SelectedAdmission {
             .map(pending::pin)
             .collect::<Result<Vec<_>>>()?;
         progress()?;
-        let publication = store.commit_selected(accepted, operation, records, BTreeMap::new())?;
+        let publication = store.commit_selected_guarded(
+            accepted,
+            operation,
+            records,
+            BTreeMap::new(),
+            reads,
+            prerequisites,
+            progress,
+        )?;
         let original = store
             .selected_receipt_with_budget(self.scope(), operation, reads)?
             .context("Writer normalization preparation acknowledgment absent")?;
@@ -864,9 +879,17 @@ impl SelectedAdmission {
                 return Ok(history);
             }
             let _mode = self.reader_mode_lease()?;
-            self.prepare_writer_current(store, accepted, &req, (&fingerprint, ms), None, || {
-                Ok(BTreeMap::new())
-            })
+            self.prepare_writer_current(
+                store,
+                accepted,
+                &req,
+                (&fingerprint, ms),
+                WriterPublication {
+                    reads: None,
+                    objects: BTreeMap::new(),
+                    check: None,
+                },
+            )
         })
     }
 
@@ -877,6 +900,7 @@ impl SelectedAdmission {
         req: &SelectedWriterPrepare,
         ms: u64,
         reads: &mut SelectedReadBudget,
+        progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<SelectedWriterPreparation> {
         ensure!(
             store
@@ -894,8 +918,11 @@ impl SelectedAdmission {
             accepted,
             req,
             (&fingerprint, ms),
-            Some(reads),
-            || Ok(BTreeMap::new()),
+            WriterPublication {
+                reads: Some(reads),
+                objects: BTreeMap::new(),
+                check: Some(progress),
+            },
         )
     }
 
@@ -905,10 +932,18 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         req: &SelectedWriterPrepare,
         metadata: (&str, u64),
-        mut reads: Option<&mut SelectedReadBudget>,
-        objects: impl FnOnce() -> Result<BTreeMap<String, Vec<u8>>>,
+        publication: WriterPublication<'_>,
     ) -> Result<SelectedWriterPreparation> {
         let (fingerprint, ms) = metadata;
+        let WriterPublication {
+            mut reads,
+            objects,
+            check,
+        } = publication;
+        ensure!(
+            reads.is_some() == check.is_some(),
+            "selected Writer publication guard correspondence"
+        );
         ensure!(
             std::ptr::eq(store, self.writer_store().as_ref()) && accepted.scope() == self.scope(),
             "foreign Writer selection"
@@ -933,8 +968,20 @@ impl SelectedAdmission {
             reads.as_deref_mut(),
         )?;
         // Unknown commit acknowledgment cannot mint a fresh model permit.
-        let objects = objects()?;
-        let published = store.commit_selected(accepted, req.operation, records.clone(), objects)?;
+        let published = if let (Some(reads), Some(check)) = (reads.as_deref_mut(), check) {
+            check()?;
+            store.commit_selected_guarded(
+                accepted,
+                req.operation,
+                records.clone(),
+                objects,
+                reads,
+                &[],
+                check,
+            )?
+        } else {
+            store.commit_selected(accepted, req.operation, records.clone(), objects)?
+        };
         ensure!(!published.replayed, "Writer preparation replay");
         let after = self.writer_snapshot(store, reads)?;
         ensure!(
@@ -1345,7 +1392,7 @@ impl SelectedAdmission {
         f: SelectedWriterFinish,
         mut reads: Option<&mut SelectedReadBudget>,
         verify_new: impl FnOnce(&Store) -> Result<()>,
-        before_commit: impl FnOnce() -> Result<()>,
+        mut before_commit: impl FnMut() -> Result<()>,
     ) -> Result<SelectedWriterPublication> {
         ensure!(
             std::ptr::eq(store, self.writer_store().as_ref())
@@ -1415,8 +1462,19 @@ impl SelectedAdmission {
             store.actor_id,
         )?;
         before_commit()?;
-        let result =
-            store.commit_selected(&f.prepared.accepted, f.operation, records, BTreeMap::new());
+        let result = if let Some(reads) = reads.as_deref_mut() {
+            store.commit_selected_guarded(
+                &f.prepared.accepted,
+                f.operation,
+                records,
+                BTreeMap::new(),
+                reads,
+                &[],
+                &mut before_commit,
+            )
+        } else {
+            store.commit_selected(&f.prepared.accepted, f.operation, records, BTreeMap::new())
+        };
         let recovered = recover(store, reads)?;
         match (result, recovered) {
             (Ok(publication), Some((_, ack))) if !publication.replayed => {

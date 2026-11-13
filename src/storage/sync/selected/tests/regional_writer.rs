@@ -1,5 +1,5 @@
 //! Actual selected regional adapter controls; no device/provider authority.
-use super::corrections::CorrectionFixture;
+use super::corrections::{confirm, observed, CorrectionFixture};
 use super::*;
 use crate::{
     conversation::*,
@@ -29,11 +29,15 @@ enum Case {
     DraftExpired,
     FinalExpired,
     Delayed,
+    CaptureSibling,
+    RegionalSibling,
+    ForeignParent,
+    ForeignAfterChild,
 }
 
 #[test]
 fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
-    for case in [
+    run_cases(&[
         Case::Good,
         Case::Cancel,
         Case::SourceChanged,
@@ -48,7 +52,31 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
         Case::DraftExpired,
         Case::FinalExpired,
         Case::Delayed,
-    ] {
+    ]);
+}
+
+#[test]
+fn regional_sibling_reuse_after_uncertain_capture_has_no_second_submission() {
+    run_cases(&[Case::CaptureSibling]);
+}
+
+#[test]
+fn regional_sibling_reuse_after_uncertain_region_has_no_second_submission() {
+    run_cases(&[Case::RegionalSibling]);
+}
+
+#[test]
+fn regional_foreign_parent_collision_refuses_before_submission() {
+    run_cases(&[Case::ForeignParent]);
+}
+
+#[test]
+fn regional_foreign_parent_after_child_refuses_before_submission() {
+    run_cases(&[Case::ForeignAfterChild]);
+}
+
+fn run_cases(cases: &[Case]) {
+    for &case in cases {
         let clock = writer::selected::clock_for_test();
         let mut f = CorrectionFixture::new();
         crate::storage::target_generation::prepare(
@@ -111,6 +139,13 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
         let SelectedReaderPublication::Published { acknowledgment, .. } = interpreted else {
             panic!("fresh interpretation")
         };
+        let registered_correction = if case == Case::ForeignAfterChild {
+            let revision = observed(f.command(&f.a, &confirm(f.owner, Uuid::new_v4()), true));
+            f.drive(&mut f.engine(&f.a), revision);
+            Some(revision)
+        } else {
+            None
+        };
         let snapshot = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
         let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
         let target = projection
@@ -135,7 +170,7 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
             object: pin.object,
         };
         let selection = Selection {
-            accepted: snapshot.token,
+            accepted: snapshot.token.clone(),
             root: projection
                 .current_reference(Namespace::Conversation, target.conversation)
                 .unwrap(),
@@ -195,6 +230,7 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
             calls: Vec<Vec<String>>,
             images: Vec<String>,
             deadlines: Vec<Instant>,
+            before: Option<&'a dyn Fn()>,
         }
         impl LLMEngine for Model<'_> {
             fn guarded_timeout(&self) -> Option<Duration> {
@@ -234,11 +270,19 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
                 if self.case == Case::Cancel {
                     self.canceled.set(true);
                 }
+                if self.calls.is_empty() {
+                    if let Some(before) = self.before {
+                        before();
+                    }
+                }
                 handoff(&mut || {
                     self.calls.push(self.images.clone());
                     Ok(())
                 })?;
                 let stage = self.calls.len();
+                if matches!(self.case, Case::CaptureSibling | Case::RegionalSibling) && stage == 1 {
+                    anyhow::bail!("uncertain provider result after actual submission");
+                }
                 if self.case == Case::SourceChanged && stage == 1 {
                     let read = self
                         .store
@@ -275,6 +319,44 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
                 })
             }
         }
+        let foreign_after_child_executed = Cell::new(false);
+        let foreign_after_child = || {
+            assert!(f
+                .a
+                .selected_receipt(&scope, input.preparation())
+                .unwrap()
+                .is_some());
+            let before =
+                f.a.selected_snapshot(&scope, MAX_ITEMS)
+                    .unwrap()
+                    .unwrap()
+                    .token;
+            let mut update = confirm(f.owner, input.operation);
+            update["command"] = serde_json::json!("update");
+            update["expected_heads"] = serde_json::json!([registered_correction.unwrap()]);
+            update["corrected_text"] = serde_json::json!("20");
+            observed(f.command(&f.a, &update, false));
+            let foreign_scope = f
+                .owner
+                .domain()
+                .unwrap()
+                .scope(f.binding.group, f.binding.digest.clone())
+                .unwrap();
+            assert!(f
+                .a
+                .selected_receipt(&foreign_scope, input.operation)
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                f.a.selected_snapshot(&scope, MAX_ITEMS)
+                    .unwrap()
+                    .unwrap()
+                    .token,
+                before,
+                "the real local update must not advance the notebook winner"
+            );
+            foreign_after_child_executed.set(true);
+        };
         let mut model = Model {
             case,
             store: &f.a,
@@ -284,6 +366,137 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
             calls: vec![],
             images: vec![],
             deadlines: vec![],
+            before: (case == Case::ForeignAfterChild).then_some(&foreign_after_child as &dyn Fn()),
+        };
+        if matches!(case, Case::CaptureSibling | Case::RegionalSibling) {
+            let projection = SelectedDomainProjection::from_snapshot(&snapshot).unwrap();
+            let capture_request = writer::selected::WriterImageRequest {
+                operation: input.operation,
+                request: input.request.clone(),
+                image: SelectedWriterImage {
+                    source: projection
+                        .current_reference(Namespace::Source, target.source.record.record)
+                        .unwrap(),
+                    turn: projection
+                        .current_reference(Namespace::Conversation, target.source.turn)
+                        .unwrap(),
+                    ordinal: 0,
+                    page: 1,
+                },
+                guidance: input.guidance.clone(),
+                model_profile: input.model_profile.clone(),
+            };
+            let first = if case == Case::CaptureSibling {
+                writer::selected::run_image(
+                    &writer,
+                    &selection,
+                    &capture_request,
+                    &mut model,
+                    preferences,
+                    None,
+                    &mut || false,
+                )
+            } else {
+                writer::selected::run_target(
+                    &writer,
+                    &selection,
+                    &input,
+                    &mut model,
+                    preferences,
+                    None,
+                    &mut || false,
+                )
+            };
+            assert!(first.is_err());
+            assert_eq!(model.calls.len(), 1);
+            let (original, sibling) = if case == Case::CaptureSibling {
+                (capture_request.preparation(), input.preparation())
+            } else {
+                (input.preparation(), capture_request.preparation())
+            };
+            assert!(f.a.selected_receipt(&scope, original).unwrap().is_some());
+            assert!(f.a.selected_receipt(&scope, sibling).unwrap().is_none());
+            assert!(f
+                .a
+                .selected_receipt(&scope, input.operation)
+                .unwrap()
+                .is_none());
+            let latest = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let selection = Selection {
+                accepted: latest.token.clone(),
+                root: SelectedDomainProjection::from_snapshot(&latest)
+                    .unwrap()
+                    .current_reference(Namespace::Conversation, target.conversation)
+                    .unwrap(),
+                refine: None,
+            };
+            model.case = Case::Good;
+            let _received = if case == Case::CaptureSibling {
+                writer::selected::run_target(
+                    &writer,
+                    &selection,
+                    &input,
+                    &mut model,
+                    policy(),
+                    None,
+                    &mut || false,
+                )
+            } else {
+                writer::selected::run_image(
+                    &writer,
+                    &selection,
+                    &capture_request,
+                    &mut model,
+                    policy(),
+                    None,
+                    &mut || false,
+                )
+            };
+            assert_eq!(
+                model.calls.len(),
+                1,
+                "sibling entry point must not submit again under the original parent"
+            );
+            assert!(f.a.selected_receipt(&scope, sibling).unwrap().is_none());
+            assert!(f.a.selected_receipt(&scope, original).unwrap().is_some());
+            continue;
+        }
+        let preferences = if case == Case::ForeignParent {
+            drop(preferences);
+            let revision = observed(f.command(&f.a, &confirm(f.owner, input.operation), true));
+            f.drive(&mut f.engine(&f.a), revision);
+            let foreign_scope = f
+                .owner
+                .domain()
+                .unwrap()
+                .scope(f.binding.group, f.binding.digest.clone())
+                .unwrap();
+            assert!(f
+                .a
+                .selected_receipt(&foreign_scope, input.operation)
+                .unwrap()
+                .is_some());
+            assert!(f
+                .a
+                .selected_receipt(&scope, input.operation)
+                .unwrap()
+                .is_none());
+            policy()
+        } else {
+            preferences
+        };
+        let selection = if case == Case::ForeignParent {
+            let latest = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            Selection {
+                accepted: latest.token.clone(),
+                root: SelectedDomainProjection::from_snapshot(&latest)
+                    .unwrap()
+                    .current_reference(Namespace::Conversation, target.conversation)
+                    .unwrap(),
+                refine: None,
+            }
+        } else {
+            selection
         };
         if case == Case::AdmissionExpired {
             writer::selected::advance_for_test(Duration::from_secs(61));
@@ -314,6 +527,39 @@ fn regional_writer_uses_exact_mask_fixed_slots_and_original_custody() {
             None,
             &mut || canceled.get(),
         );
+        if matches!(case, Case::ForeignParent | Case::ForeignAfterChild) {
+            if case == Case::ForeignAfterChild {
+                assert!(
+                    foreign_after_child_executed.get(),
+                    "must reach the real producer interleaving after the original child"
+                );
+            }
+            assert!(model.calls.is_empty(), "accepted parent in another producer scope must refuse before submission; actual calls: {}", model.calls.len());
+            if case == Case::ForeignParent {
+                assert!(
+                result.as_ref().is_err_and(|error| {
+                    error.is::<crate::storage::selection::LocalOperationConflict>()
+                }),
+                "must reach the actual Store-wide operation conflict, not an unrelated refusal: {}",
+                match &result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(report) => serde_json::to_string(&report.report).unwrap(),
+                }
+            );
+            }
+            assert_eq!(
+                f.a.selected_receipt(&scope, input.preparation())
+                    .unwrap()
+                    .is_some(),
+                case == Case::ForeignAfterChild
+            );
+            assert!(f
+                .a
+                .selected_receipt(&scope, input.operation)
+                .unwrap()
+                .is_none());
+            continue;
+        }
         if case == Case::AdmissionCrossed {
             assert!(
                 !clock.admission_recheck_pending(),
