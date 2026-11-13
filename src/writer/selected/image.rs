@@ -238,7 +238,7 @@ impl Continuation<'_> {
                     NotebookPhase::Handoff,
                     memory,
                     |store, reads| {
-                        let mut check = || {
+                        let check = || {
                             self.check_storage_time(NotebookPhase::Handoff)?;
                             ensure!(regional::now() < deadline, "Writer image model deadline");
                             Ok(())
@@ -248,7 +248,7 @@ impl Continuation<'_> {
                                 selection.0,
                                 self.operation,
                                 reads,
-                                &mut check,
+                                check,
                                 submit,
                             )?;
                         } else {
