@@ -538,6 +538,23 @@ impl Store {
         }
         let mut reads = selection::SelectedReadBudget::new(0, 2, MAX_RECORD as u64 * 2, 0);
         store.check_runtime_policy(&mut reads)?;
+        // Historical selected data in an explicit LocalOnly Store keeps its
+        // delivered ordinary route. It is not eligible for notebook/target
+        // preparation. Never use this path to bypass an existing original or
+        // admit an incomplete/new-family Store.
+        if matches!(
+            feedback_generation::version(&root)?,
+            selection::SELECTED_STORE_FORMAT | feedback_generation::VERSION
+        ) && selection::has_selected(&root)?
+            && matches!(
+                store.sync_mode_snapshot()?.mode,
+                Some(sync::mode::SyncMode::LocalOnly)
+            )
+            && preparation(&root)?.is_none()
+        {
+            selection::validate_generation(&root, store.actor_id, generation)?;
+            return Ok(store);
+        }
         prepare(&mut store, &pin, BaseKind::OrdinaryNotebook, |_| Ok(()))?;
         Ok(store)
     }
@@ -858,6 +875,120 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn target_startup_preserves_local_selected_history_but_never_bypasses_an_original_or_marker() {
+        use crate::conversation::Ledger;
+        use selection::{SelectionChange, SelectionScope};
+        use std::sync::Arc;
+        for feedback in [false, true] {
+            for interference in ["none", "original", "notebook"] {
+                let fixture = Fixture::new();
+                let store = Arc::new(Store::open(fixture.paths()).unwrap());
+                Ledger::new(store.clone())
+                    .create(Uuid::new_v4(), Uuid::new_v4(), 1)
+                    .unwrap();
+                let mut manifest = store.manifests().unwrap().remove(0);
+                manifest.scope = Scope::SelectedRecords;
+                let scope = SelectionScope {
+                    group: Uuid::new_v4(),
+                    key_sha256: digest(b"historical document"),
+                    binding_sha256: digest(b"historical binding"),
+                };
+                let selected = store
+                    .initialize_selected(
+                        &scope,
+                        SelectionChange {
+                            operation: Uuid::new_v4(),
+                            accepted_base_sha256: digest(b"historical base"),
+                            selected: manifest,
+                            retained: vec![],
+                        },
+                        BTreeMap::new(),
+                    )
+                    .unwrap();
+                let mut store = Arc::try_unwrap(store).unwrap_or_else(|_| panic!("fixture owner"));
+                if feedback {
+                    feedback_generation::prepare(&mut store, |_| Ok(())).unwrap();
+                }
+                store
+                    .set_sync_mode(
+                        &store.sync_mode_snapshot().unwrap().token,
+                        Uuid::new_v4(),
+                        sync::mode::SyncModeChoice::LocalOnly,
+                    )
+                    .unwrap();
+                let generation = store.inner.lock().unwrap().generation;
+                let root = store.generation(generation);
+                if interference == "original" {
+                    assert!(prepare(
+                        &mut store,
+                        &digest(b"saved original config"),
+                        BaseKind::OrdinaryNotebook,
+                        |stage| {
+                            ensure!(stage != Stage::Original, "controlled interruption");
+                            Ok(())
+                        },
+                    )
+                    .is_err());
+                } else if interference == "notebook" {
+                    files::atomic_json(
+                        &root.join(notebook_generation::MARKER),
+                        &serde_json::json!({"format":1,"actor":store.actor_id,"generation":generation}),
+                    )
+                    .unwrap();
+                }
+                let original = root.join(PREPARATION);
+                let original_bytes = original.exists().then(|| fs::read(&original).unwrap());
+                let current = fs::read(store.paths.data.join("CURRENT")).unwrap();
+                let head = fs::read_dir(root.join("selections"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                let head_bytes = fs::read(&head).unwrap();
+                let capabilities = fs::read(store.paths.data.join("capabilities.json")).unwrap();
+                drop(store);
+                let config = crate::config::Config {
+                    paths: fixture.paths(),
+                    ..Default::default()
+                };
+                let opened = Store::open_source_target_startup(&config);
+                if interference == "none" {
+                    let store = opened.unwrap();
+                    assert!(store.source_target_generation().unwrap().is_none());
+                    assert_eq!(
+                        store
+                            .selected_snapshot(&scope, MAX_ITEMS)
+                            .unwrap()
+                            .unwrap()
+                            .token,
+                        selected.token
+                    );
+                    assert_eq!(
+                        feedback_generation::version(&root).unwrap(),
+                        if feedback { 3 } else { 2 }
+                    );
+                } else {
+                    assert!(opened.is_err(), "{interference}");
+                }
+                assert_eq!(
+                    fs::read(config.paths.data.join("CURRENT")).unwrap(),
+                    current
+                );
+                assert_eq!(fs::read(head).unwrap(), head_bytes);
+                assert_eq!(
+                    fs::read(config.paths.data.join("capabilities.json")).unwrap(),
+                    capabilities
+                );
+                assert_eq!(
+                    original.exists().then(|| fs::read(&original).unwrap()),
+                    original_bytes
+                );
+                assert!(!root.join(MARKER).exists());
+            }
         }
     }
     #[test]

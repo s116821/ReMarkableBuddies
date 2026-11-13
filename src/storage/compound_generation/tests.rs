@@ -955,7 +955,7 @@ fn check_local_operation_reuse(promote_targets: bool) {
         .selected_scope_candidates(
             request.group,
             &request.binding_sha256,
-            Namespace::Memory,
+            Namespace::SubjectMemory,
             &mut reads,
         )
         .unwrap();
@@ -967,7 +967,7 @@ fn check_local_operation_reuse(promote_targets: bool) {
         .selected_scope_candidates(
             Uuid::new_v4(),
             &request.binding_sha256,
-            Namespace::Memory,
+            Namespace::SubjectMemory,
             &mut reads,
         )
         .unwrap()
@@ -977,7 +977,7 @@ fn check_local_operation_reuse(promote_targets: bool) {
         .selected_scope_candidates(
             request.group,
             &request.binding_sha256,
-            Namespace::Memory,
+            Namespace::SubjectMemory,
             &mut exhausted,
         )
         .is_err());

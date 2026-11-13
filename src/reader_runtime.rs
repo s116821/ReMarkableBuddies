@@ -793,6 +793,19 @@ mod tests {
             )
             .unwrap();
         let paths = store.paths.clone();
+        fn snapshot(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = BTreeMap::new();
+            for item in std::fs::read_dir(root).unwrap() {
+                let path = item.unwrap().path();
+                if path.is_dir() {
+                    result.extend(snapshot(&path));
+                } else {
+                    result.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+            }
+            result
+        }
+        let before = snapshot(&paths.data);
         drop(store);
         let config = Config {
             paths,
@@ -801,6 +814,8 @@ mod tests {
         let StartupDecision::Ordinary(Some(admitted)) = startup(&config) else {
             panic!("local-only should admit ordinary data")
         };
+        assert!(admitted.source_target_generation().unwrap().is_none());
+        assert_eq!(snapshot(&config.paths.data), before);
         let saved = admitted.clone();
         let reused = ordinary_store(&config, Some(admitted)).ok().unwrap();
         assert!(Arc::ptr_eq(&saved, &reused), "no second Store open");
