@@ -473,12 +473,23 @@ fn actual_normal_startup_refuses_incompatible_mode_before_runtime_constructors()
     // CLI fixture covers the incompatible legacy-publisher combination instead.
     // Positive isolated admission/Dispatch is exercised without device constructors
     // by the mode-maintenance library fixtures.
-    for (mode, legacy_sync) in [(isolated(), true), (shared(Uuid::new_v4()), false)] {
+    for (mode, legacy_sync, refusal) in [
+        (
+            isolated(),
+            true,
+            "ordinary mode requires absent or LocalOnly choice",
+        ),
+        (
+            shared(Uuid::new_v4()),
+            false,
+            "ordinary Reader startup unsupported",
+        ),
+    ] {
         let f = Fixture::new();
         let initial = f.initialize();
         assert_eq!(f.choose(&request(&initial, mode))["status"], "ok");
         f.save_config(legacy_sync);
-        assert_ordinary_refuses(&f, "ordinary Reader startup unsupported");
+        assert_ordinary_refuses(&f, refusal);
     }
     let f = Fixture::new();
     let initial = f.initialize();
