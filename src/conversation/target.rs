@@ -77,6 +77,21 @@ pub struct Candidate {
     pub geometry: Option<geometry::Geometry>,
     pub understanding: Understanding,
 }
+/// Shared bounded response parser; a subject never substitutes for geometry.
+pub(crate) fn parse_candidate(raw: &str) -> Option<Candidate> {
+    if raw.len() > 32 * 1024 {
+        return None;
+    }
+    let mut candidate: Candidate = serde_json::from_str(raw).ok()?;
+    candidate.geometry = candidate
+        .geometry
+        .map(|geometry| geometry.canonicalize())
+        .transpose()
+        .ok()?;
+    candidate.validate().ok()?;
+    Some(candidate)
+}
+
 impl Candidate {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -712,4 +727,20 @@ impl TargetView {
         media.dedup();
         Ok(media)
     }
+}
+
+/// Original-frame geometry contract shared by Reader and fresh Writer.
+pub(crate) const GEOMETRY_CONTRACT: &str = "Also emit one TARGET_JSON: line before --- with strict JSON {\"subject\":\"concise selected concept\",\"geometry\":{\"components\":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},\"understanding\":{\"status\":\"interpreted\"}}. Replace the example polygon with the actual selected-content boundary; coordinates are integers on the full-page original image, top-left origin, normalized edge scale 1000000. The overview is a full-frame resize, so normalized coordinates map directly to the original. Exclude the handwritten instruction/question. At most 8 simple polygons, 3..64 vertices each, 512 total; canonical positive image-axis shoelace orientation, lexicographically first start and sorted components. Do not expand a point into a guessed rectangle. Subject is one line <=512 UTF-8 bytes. If the target is ambiguous return geometry:null and understanding:{\"status\":\"uncertain\",\"reason\":\"brief uncertainty\"}. The subject is inference, not confirmed transcription.";
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) fn candidate_geometry_contract() -> &'static str {
+    // Reader retains its exact wire-header instruction; Writer requests just the
+    // same bounded Candidate schema/geometry, without the Reader answer header.
+    GEOMETRY_CONTRACT
+        .strip_prefix("Also emit one TARGET_JSON: line before --- with strict JSON ")
+        .expect("static geometry contract prefix")
 }

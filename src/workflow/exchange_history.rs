@@ -138,7 +138,7 @@ pub(crate) fn project(
     let HistoricalPageAssociationInspection::HistoricalCandidate(before) = inspect()? else {
         anyhow::bail!("presentation binding unavailable")
     };
-    let context = ledger.context(
+    let context = ledger.presentation_context(
         conversation,
         &ContextBudget {
             max_text_bytes: 64 * 1024,

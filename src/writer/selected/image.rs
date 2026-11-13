@@ -14,6 +14,12 @@ use std::{
     cell::{Cell, RefCell},
     time::{Duration, Instant},
 };
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) mod fresh;
 pub(crate) mod regional;
 pub(crate) use regional::run_target;
 pub use regional::WriterTargetRequest;
@@ -84,10 +90,12 @@ pub(super) struct Continuation<'a> {
     canceled: Option<&'a dyn Fn() -> bool>,
     completed: Cell<u8>,
     document: Uuid,
-    handwriting: Option<ConfirmedContext>,
+    handwriting: Option<&'a ConfirmedContext>,
     memory_view: Option<crate::memory::QueryResult>,
     stage: Cell<u8>,
     submitted: Cell<u8>,
+    fresh_user: Option<&'a IntentRecordRef>,
+    runtime_progress: Option<&'a dyn Fn() -> Result<()>>,
 }
 
 impl Continuation<'_> {
@@ -136,6 +144,9 @@ impl Continuation<'_> {
         writer: &SelectedAdmission,
         token: &SelectionToken,
     ) -> Result<()> {
+        if let Some(progress) = self.runtime_progress {
+            progress()?;
+        }
         self.check_time()?;
         self.preferences.notebook_progress(writer, token)
     }
@@ -186,7 +197,7 @@ impl Continuation<'_> {
             Some(token),
             phase,
             memory.map(|(provider, view)| (provider, view, self.original)),
-            self.handwriting.as_ref(),
+            self.handwriting,
             |store, reads| {
                 self.check_phase_time(Some(phase))?;
                 self.source
@@ -455,12 +466,13 @@ fn run_input<E: LLMEngine>(
         canceled: Some(&is_canceled as &dyn Fn() -> bool),
         completed: Cell::new(0),
         document: document_id,
-        handwriting,
+        handwriting: handwriting.as_ref(),
         memory_view,
         stage: Cell::new(0),
         submitted: Cell::new(0),
+        fresh_user: None,
+        runtime_progress: None,
     };
-    let context = receiving.handwriting.as_ref();
     let memory_pin = memory.zip(receiving.memory_view.as_ref());
     let fingerprint = input.preparation_fingerprint(
         &selection.root,
@@ -483,9 +495,38 @@ fn run_input<E: LLMEngine>(
             )
         },
     )?;
+    continue_prepared(
+        writer,
+        engine,
+        fields,
+        receiving,
+        token,
+        root,
+        &target,
+        memory,
+        &mut canceled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_prepared<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    engine: &mut E,
+    fields: regional::Fields,
+    receiving: Continuation<'_>,
+    token: SelectionToken,
+    root: IntentRecordRef,
+    target: &notebook::AdmittedTarget,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> Result<SelectedReport> {
+    let preferences = receiving.preferences;
+    let page_number = receiving.source.page();
+    let context = receiving.handwriting;
+    let memory_pin = memory.zip(receiving.memory_view.as_ref());
     let (normalized, _) = notebook::normalize_admitted_with(
         receiving.document,
-        &target,
+        target,
         &fields.model_profile,
         context.filter(|context| !context.identity().examples.is_empty()),
         TranscriptionPolicy::WholePage,
@@ -534,16 +575,22 @@ fn run_input<E: LLMEngine>(
     request
         .preflight()
         .map_err(|_| anyhow::anyhow!("normalized Writer source refused"))?;
+    let source =
+        receiving
+            .source
+            .writer_source(normalized, &page, &extractor, &fields.model_profile)?;
+    let source = if let (SourceProof::Regional(proof), Some(user)) =
+        (&receiving.source, receiving.fresh_user)
+    {
+        proof.admit_fresh(source, user.clone())?
+    } else {
+        source
+    };
     let prepare = SelectedWriterPrepare {
         operation: fields.operation,
         root: root.clone(),
         request: fields.request.clone(),
-        source: receiving.source.writer_source(
-            normalized,
-            &page,
-            &extractor,
-            &fields.model_profile,
-        )?,
+        source,
     };
     ensure!(!canceled(), "selected Writer image canceled");
     let prepared = receiving.phase(
@@ -584,10 +631,10 @@ fn run_input<E: LLMEngine>(
         &request,
         Preferences {
             personalization: &personalization,
-            shared: Some(&preferences),
+            shared: Some(preferences),
         },
         memory,
-        &mut canceled,
+        canceled,
         &fields.request,
         prepared,
         Some(receiving),

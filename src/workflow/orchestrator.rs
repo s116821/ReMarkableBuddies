@@ -242,6 +242,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 anyhow::bail!("selected conversation requires the retained native source");
             };
             return match request {
+                SelectedConversationRequest::UnsupportedRegionalWriter => {
+                    anyhow::bail!("fresh regional Writer requires the selected receiver")
+                }
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
                 }
@@ -853,7 +856,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
 
         if attempt.source_target_enabled() {
-            owned.0.add_text_content("Also emit one TARGET_JSON: line before --- with strict JSON {\"subject\":\"concise selected concept\",\"geometry\":{\"components\":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},\"understanding\":{\"status\":\"interpreted\"}}. Replace the example polygon with the actual selected-content boundary; coordinates are integers on the full-page original image, top-left origin, normalized edge scale 1000000. The overview is a full-frame resize, so normalized coordinates map directly to the original. Exclude the handwritten instruction/question. At most 8 simple polygons, 3..64 vertices each, 512 total; canonical positive image-axis shoelace orientation, lexicographically first start and sorted components. Do not expand a point into a guessed rectangle. Subject is one line <=512 UTF-8 bytes. If the target is ambiguous return geometry:null and understanding:{\"status\":\"uncertain\",\"reason\":\"brief uncertainty\"}. The subject is inference, not confirmed transcription.");
+            owned
+                .0
+                .add_text_content(crate::conversation::target::GEOMETRY_CONTRACT);
         }
         let mut progress_failed = false;
         // Stored source readback, recipe verification, base64 encoding and model
@@ -885,16 +890,9 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn parse_target_candidate(raw: &str) -> Option<crate::conversation::target::Candidate> {
-        let mut candidate: crate::conversation::target::Candidate =
-            serde_json::from_str(raw).ok()?;
-        candidate.geometry = candidate
-            .geometry
-            .map(|geometry| geometry.canonicalize())
-            .transpose()
-            .ok()?;
-        candidate.validate().ok()?;
-        Some(candidate)
+        crate::conversation::target::parse_candidate(raw)
     }
+
     fn parse_analysis_response(
         response: &str,
         screenshot_png_data: Vec<u8>,

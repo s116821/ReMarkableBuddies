@@ -201,7 +201,38 @@ impl RequestPreferences {
         binding: Binding,
         transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
     ) -> Result<Self> {
-        let started = Instant::now();
+        Self::writer_image_from_binding_at(store, path, binding, Instant::now(), transport)
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn open_writer_image_at(
+        store: Arc<Store>,
+        path: PathBuf,
+        started: Instant,
+    ) -> Result<Self> {
+        ensure!(
+            !store.ordinary_reader_family()?,
+            "selected Writer requires shared Store"
+        );
+        let current = store.sync_mode_snapshot()?;
+        let binding =
+            Binding::qualified(current.mode.as_ref().context("Writer shared mode absent")?)?;
+        Self::writer_image_from_binding_at(store, path, binding, started, |store| {
+            GoogleDrive::open(store.paths.credentials.join("drive.json"))
+        })
+    }
+
+    fn writer_image_from_binding_at(
+        store: Arc<Store>,
+        path: PathBuf,
+        binding: Binding,
+        started: Instant,
+        transport: impl FnOnce(&Store) -> Result<GoogleDrive>,
+    ) -> Result<Self> {
         let lifetime = Duration::from_secs(300);
         Self::from_binding_at(
             store,

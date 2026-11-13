@@ -10,6 +10,7 @@ pub(crate) struct ResidentPrepared {
     source_binding: Uuid,
 }
 
+#[derive(Clone)]
 pub(crate) struct ResidentPreparedAcknowledgment {
     pub(crate) root: IntentRecordRef,
     pub(crate) user: IntentRecordRef,
@@ -24,6 +25,60 @@ impl ResidentPrepared {
         operation: Uuid,
         timestamp: u64,
     ) -> Result<Self> {
+        Self::build(
+            store, accepted, capture, operation, operation, timestamp, false,
+        )
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn new_writer(
+        store: &Store,
+        accepted: &SelectionToken,
+        capture: &ResidentSourceCapture,
+        logical: Uuid,
+        timestamp: u64,
+        binding: &str,
+    ) -> Result<Self> {
+        let operation = crate::writer::selected::normalization_preparations(logical)[1];
+        let mut packet = Self::build(
+            store, accepted, capture, operation, logical, timestamp, true,
+        )?;
+        let fingerprint = Ledger::fingerprint(&(
+            "selected-fresh-regional-prepare-v1",
+            IntentSelectionEvidence::from_token(accepted),
+            logical,
+            binding,
+            &packet.acknowledgment.root,
+            &packet.acknowledgment.user,
+            &packet.acknowledgment.capture,
+        ))?;
+        let receipt = packet
+            .records
+            .last_mut()
+            .context("fresh Writer receipt absent")?;
+        let Record::Receipt(mut value) = Ledger::decode(receipt)? else {
+            bail!("fresh Writer receipt variant")
+        };
+        value.fingerprint = fingerprint;
+        receipt.payload = serde_json::to_value(Record::Receipt(value))?;
+        Ledger::decode(receipt)?;
+        Ok(packet)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        store: &Store,
+        accepted: &SelectionToken,
+        capture: &ResidentSourceCapture,
+        operation: Uuid,
+        logical: Uuid,
+        timestamp: u64,
+        writer: bool,
+    ) -> Result<Self> {
         ensure!(!operation.is_nil(), "nil selected Prepare operation");
         ensure!(
             crate::memory::catalog::document_key(capture.document())?
@@ -31,17 +86,33 @@ impl ResidentPrepared {
             "resident capture belongs to another selected document"
         );
         let id = |label: &str| Uuid::new_v5(&operation, label.as_bytes());
-        let conversation = id("reader-prepare:root");
-        let user = id("reader-prepare:user");
-        let evidence_id = id("reader-prepare:capture");
+        let conversation = if writer {
+            crate::writer::stage(logical, "fresh-root")
+        } else {
+            id("reader-prepare:root")
+        };
+        let user = if writer {
+            crate::writer::stage(logical, "user")
+        } else {
+            id("reader-prepare:user")
+        };
+        let evidence_id = if writer {
+            crate::writer::stage(logical, "fresh-capture")
+        } else {
+            id("reader-prepare:capture")
+        };
         let prepared = capture.prepare_history(conversation, user, evidence_id)?;
         let turn = Turn {
             id: user,
             conversation,
-            exchange: id("reader-prepare:exchange"),
+            exchange: if writer {
+                logical
+            } else {
+                id("reader-prepare:exchange")
+            },
             sequence: 0,
             role: Role::User,
-            mode: Mode::Reader,
+            mode: if writer { Mode::Writer } else { Mode::Reader },
             outcome: Outcome::Prepared,
             text: None,
             sources: vec![evidence_id],
@@ -51,6 +122,11 @@ impl ResidentPrepared {
             completion: None,
         };
         Ledger::validate_turn(&turn)?;
+        let prefix = if writer {
+            "fresh-writer-prepare"
+        } else {
+            "reader-prepare"
+        };
         let record =
             |namespace, record_id, record: Record, media_descriptors| -> Result<Envelope> {
                 let envelope = Envelope {
@@ -62,8 +138,8 @@ impl ResidentPrepared {
                         SCHEMA
                     },
                     record_id,
-                    revision_id: id(&format!("reader-prepare:revision:{record_id}")),
-                    operation_id: id(&format!("reader-prepare:record:{record_id}")),
+                    revision_id: id(&format!("{prefix}:revision:{record_id}")),
+                    operation_id: id(&format!("{prefix}:record:{record_id}")),
                     actor_id: store.actor_id,
                     parents: BTreeSet::new(),
                     kind: Kind::Value,
@@ -140,6 +216,88 @@ impl ResidentPrepared {
             acknowledgment,
             source_binding: Ledger::binding_id(capture.document(), capture.page()),
         })
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn capture_exclusions(
+        capture: &ResidentSourceCapture,
+        logical: Uuid,
+    ) -> Result<BTreeSet<String>> {
+        let prepared = capture.prepare_history(
+            crate::writer::stage(logical, "fresh-root"),
+            crate::writer::stage(logical, "user"),
+            crate::writer::stage(logical, "fresh-capture"),
+        )?;
+        Ok(prepared
+            .evidence
+            .media()?
+            .into_iter()
+            .map(|m| m.sha256)
+            .collect())
+    }
+
+    /// Must be called under the original joined gates and exact slot claim.
+    #[cfg(all(
+        target_os = "linux",
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn publish_writer_locked(
+        mut self,
+        store: &Store,
+        accepted: &SelectionToken,
+        logical: Uuid,
+        reads: &mut SelectedReadBudget,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<(SelectionToken, ResidentPreparedAcknowledgment)> {
+        check()?;
+        ensure!(
+            self.operation == crate::writer::selected::normalization_preparations(logical)[1],
+            "fresh Writer admission identity"
+        );
+        let snapshot = store
+            .selected_snapshot_with_budget(accepted.scope(), crate::storage::MAX_ITEMS, reads)?
+            .context("fresh Writer document absent")?;
+        ensure!(
+            snapshot.snapshot.token == *accepted,
+            "fresh Writer selection changed"
+        );
+        let p = SelectedDomainProjection::from_snapshot(&snapshot.snapshot)?;
+        ensure!(
+            !matches!(
+                p.head(Namespace::Conversation, self.source_binding),
+                Some((_, Some(Record::Binding(_))))
+            ),
+            "fresh Writer source is a known Buddy page"
+        );
+        let mut records = snapshot.snapshot.selected_records;
+        records.extend_from_slice(&self.records);
+        let mut references = snapshot.snapshot.transaction.selected.records;
+        references.extend(
+            self.records
+                .iter()
+                .map(pending::pin)
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
+                .map(|p| p.object),
+        );
+        SelectedDomainProjection::from_mixed_records(&records, &references, accepted.scope())?
+            .inspect(self.acknowledgment.root.record_id)?;
+        let publication = store.commit_selected_guarded(
+            accepted,
+            self.operation,
+            self.records.clone(),
+            std::mem::take(&mut self.media),
+            reads,
+            &crate::writer::selected::normalization_prerequisites(logical),
+            check,
+        )?;
+        ensure!(!publication.replayed, "fresh Writer preparation historical");
+        Ok((publication.token, self.acknowledgment))
     }
 
     /// Resolve the existing original transaction even when live admission was

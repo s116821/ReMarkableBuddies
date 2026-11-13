@@ -1,6 +1,6 @@
 //! Selected text publication. Acknowledgment and historical evidence are not effects.
 use super::*;
-mod targets;
+pub(super) mod targets;
 use crate::storage::selection::{
     SelectedReadBudget, SelectionMutation, SelectionPublication, SelectionToken,
     SelectionTransaction,

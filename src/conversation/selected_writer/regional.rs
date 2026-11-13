@@ -24,8 +24,26 @@ impl RegionalImage {
         Ok(SelectedWriterSource::GenerateRegion {
             regional: SelectedRegionalSource {
                 region: Box::new(region),
+                fresh_user: None,
             },
         })
+    }
+    pub(crate) fn admit_fresh(
+        &self,
+        source: SelectedWriterSource,
+        user: IntentRecordRef,
+    ) -> Result<SelectedWriterSource> {
+        let SelectedWriterSource::GenerateRegion { mut regional } = source else {
+            bail!("fresh source variant")
+        };
+        ensure!(
+            regional.region.target == self.reference
+                && regional.region.turn == user.record_id
+                && user.record_id == self.target.introduced_by,
+            "fresh region user differs"
+        );
+        regional.fresh_user = Some(user);
+        Ok(SelectedWriterSource::GenerateRegion { regional })
     }
     pub(crate) fn matches(&self, other: &Self) -> Result<()> {
         ensure!(

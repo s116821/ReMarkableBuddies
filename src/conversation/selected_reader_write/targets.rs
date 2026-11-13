@@ -70,7 +70,7 @@ pub(super) fn records(
         _ => Ok(vec![]),
     }
 }
-fn interpret(
+pub(in crate::conversation) fn interpret(
     projection: &SelectedDomainProjection,
     request: &SelectedReaderWrite,
     user: &Turn,

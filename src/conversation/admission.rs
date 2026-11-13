@@ -1,5 +1,5 @@
 //! Canonical in-process selected admission. This is not native qualification.
-use super::{IntentRecordRef, Ledger, Receipt, Record, SelectedDomainProjection};
+use super::{ContextPurpose, IntentRecordRef, Ledger, Receipt, Record, SelectedDomainProjection};
 use crate::storage::selection::{
     SelectedReadBudget, SelectedSnapshot, SelectionChange, SelectionMutation, SelectionPublication,
     SelectionScope, SelectionToken, SelectionTransaction,
@@ -98,6 +98,43 @@ impl SelectedAdmission {
         budget: &super::ContextBudget,
         token_count: impl Fn(&[super::Turn]) -> Result<usize>,
     ) -> Result<super::ContextView> {
+        self.context_view(
+            accepted,
+            conversation,
+            selection,
+            budget,
+            token_count,
+            ContextPurpose::Model,
+        )
+    }
+
+    /// Historical read-only Writer presentation, independent of model context.
+    pub fn presentation_context(
+        &self,
+        accepted: &SelectionToken,
+        conversation: Uuid,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+    ) -> Result<super::ContextView> {
+        self.context_view(
+            accepted,
+            conversation,
+            None,
+            budget,
+            token_count,
+            ContextPurpose::Presentation,
+        )
+    }
+
+    fn context_view(
+        &self,
+        accepted: &SelectionToken,
+        conversation: Uuid,
+        selection: Option<super::TurnRange>,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+        purpose: ContextPurpose,
+    ) -> Result<super::ContextView> {
         Ledger::context_token_limit(selection, budget)?;
         let (records, media, targets) = self.with_current(accepted, |snapshot| {
             let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
@@ -121,12 +158,18 @@ impl SelectedAdmission {
             let targets = projection.target_views(&uses)?;
             Ok((records, media, targets))
         })?;
-        let mut context =
-            Ledger::context_from_records(records, selection, budget, token_count, |item| {
+        let mut context = Ledger::context_records_for(
+            records,
+            selection,
+            budget,
+            Some(&token_count),
+            |item| {
                 media
                     .get(&item.sha256)
                     .is_some_and(|reference| reference.bytes == item.bytes)
-            })?;
+            },
+            purpose,
+        )?;
         let requested = context
             .target_uses
             .iter()

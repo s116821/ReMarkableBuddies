@@ -100,6 +100,45 @@ pub(crate) fn run(
                 owner.progress(health)
             })?
         };
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        {
+            let pending = workflow
+                .resident_source
+                .as_ref()
+                .unwrap()
+                .peek_regional_writer();
+            match pending {
+                Ok(Some(pin)) => {
+                    let result = receive_fresh_release(
+                        &mut workflow,
+                        &reader,
+                        config_path,
+                        &mode,
+                        release,
+                        &pin,
+                    );
+                    if store.sync_mode_snapshot()?.token != mode {
+                        return Err(anyhow::anyhow!("selected Writer service mode changed"));
+                    }
+                    if workflow.runtime_failed() {
+                        return result
+                            .and_then(|_| Err(anyhow::anyhow!("selected Writer runtime lost")));
+                    }
+                    if result.is_err() {
+                        log::info!("Selected regional Writer ended without further output");
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    log::info!("Selected release refused because Writer slot is unavailable");
+                    continue;
+                }
+                Ok(None) => {}
+            }
+        }
         let policy = (|| {
             ensure!(
                 store.sync_mode_snapshot()?.token == mode,
@@ -228,4 +267,142 @@ pub(crate) fn run(
             log::info!("Selected Reader request ended without further output");
         }
     }
+}
+
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+fn receive_fresh_release(
+    workflow: &mut Workflow,
+    writer: &SelectedAdmission,
+    config_path: &Path,
+    mode: &crate::storage::sync::mode::SyncModeToken,
+    release: crate::device::request_input::ReleasedReaderInput,
+    pin: &resident_supervisor::writer_request::RegionalPin,
+) -> Result<()> {
+    use crate::storage::sync::selected::RequestPreferences;
+    ensure!(
+        writer.writer_store().sync_mode_snapshot()?.token == *mode,
+        "selected Writer service mode changed"
+    );
+    let preferences = RequestPreferences::open_writer_image_at(
+        writer.writer_store().clone(),
+        config_path.to_owned(),
+        release.released_at,
+    )?;
+    let config = preferences.config();
+    let memory = config
+        .memory
+        .enabled
+        .then(|| crate::memory::configured(writer.writer_store().clone(), &config.memory))
+        .transpose()?;
+    let effective = config::resolve(config, Overrides::default(), Environment::current())?;
+    let model = effective.model.clone();
+    let mut engine = OpenAI::new(
+        effective.model,
+        effective.key.into_string(),
+        effective.base_url,
+    )
+    .with_single_request();
+    receive_fresh_request(
+        workflow,
+        writer,
+        release,
+        pin,
+        preferences,
+        &mut engine,
+        memory.as_deref(),
+        &model,
+    )
+}
+
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn receive_fresh_request<E: crate::LLMEngine>(
+    workflow: &mut Workflow,
+    writer: &SelectedAdmission,
+    release: crate::device::request_input::ReleasedReaderInput,
+    pin: &resident_supervisor::writer_request::RegionalPin,
+    preferences: crate::storage::sync::selected::RequestPreferences,
+    engine: &mut E,
+    memory: Option<&dyn crate::memory::Provider>,
+    model: &str,
+) -> Result<()> {
+    use crate::writer::selected::FreshOperation;
+    let mut operation = FreshOperation::new(writer, preferences)?;
+    let token = operation.initial(writer)?;
+    let mut began = false;
+    let result = (|| {
+        operation.acquisition(writer, &token)?;
+        began = true;
+        workflow.resident_source.as_mut().unwrap().begin_until(
+            release,
+            workflow.service_health.as_mut().unwrap(),
+            std::time::Duration::from_secs(60),
+            || operation.acquisition(writer, &token),
+        )?;
+        workflow.begin_iteration()?;
+        let capture = workflow
+            .resident_source
+            .as_mut()
+            .unwrap()
+            .acquire_with_check(workflow.service_health.as_mut().unwrap(), |observed| {
+                operation.acquisition(writer, &token)?;
+                if let Some(facts) = observed {
+                    ensure!(
+                        crate::memory::catalog::document_key(Uuid::from_bytes(
+                            *facts.page().document.as_bytes()
+                        ))? == writer.scope().key_sha256,
+                        "regional capture belongs to another selected document"
+                    );
+                }
+                Ok(())
+            })?;
+        let runtime = std::cell::RefCell::new(&mut *workflow);
+        let progress = || {
+            let mut runtime = runtime.borrow_mut();
+            let Workflow {
+                resident_source,
+                service_health,
+                ..
+            } = &mut **runtime;
+            resident_source
+                .as_mut()
+                .unwrap()
+                .progress(service_health.as_mut().unwrap())
+        };
+        let mut canceled = || {
+            runtime
+                .borrow()
+                .resident_source
+                .as_ref()
+                .unwrap()
+                .canceled()
+        };
+        let report = operation.run(
+            writer,
+            &token,
+            &capture,
+            pin,
+            engine,
+            memory,
+            &mut canceled,
+            &progress,
+            model,
+        )?;
+        ensure!(
+            matches!(report.report.status, crate::writer::Status::Generated),
+            "fresh Writer ended without a generated draft"
+        );
+        Ok(())
+    })();
+    // Operation (and its context/view/owner/policy) is deliberately still alive.
+    if began {
+        finish_selected_request(workflow)?;
+    }
+    result
 }

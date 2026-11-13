@@ -21,6 +21,14 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::fresh_receiver_fixture;
+
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;

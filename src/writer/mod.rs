@@ -256,6 +256,17 @@ pub fn parse_draft(text: &str) -> Result<(&str, &str)> {
     );
     Ok((title, body))
 }
+/// Only the formatter's exact Markdown title/blank/About position is inline.
+pub(crate) fn regional_body_has_about(body: &str, about: &str) -> bool {
+    parse_draft(body).is_ok()
+        && body.split_once("\n\n").is_some_and(|(title, rest)| {
+            title.starts_with("# ")
+                && rest
+                    .strip_prefix(about)
+                    .is_some_and(|rest| rest.starts_with("\n\n"))
+        })
+}
+
 fn present_regional_draft(body: &str, about: &str) -> Result<String> {
     let (title, markdown) = parse_draft(body)?;
     ensure!(

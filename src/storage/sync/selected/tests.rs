@@ -1273,3 +1273,10 @@ mod notebook;
 mod recovery;
 
 mod regional_writer;
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+mod fresh_regional;

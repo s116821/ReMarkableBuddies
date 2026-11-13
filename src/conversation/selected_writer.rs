@@ -6,7 +6,19 @@ use crate::storage::selection::{
 };
 use crate::storage::{MAX_METADATA, MAX_RECORD};
 use serde::Deserialize;
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+mod fresh;
 mod regional;
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use fresh::FreshFrame;
 pub(crate) use regional::RegionalImage;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -27,6 +39,8 @@ pub enum SelectedWriterSource {
 #[serde(transparent)]
 pub struct SelectedRegionalSource {
     region: Box<target::RegionSource>,
+    #[serde(skip)]
+    fresh_user: Option<IntentRecordRef>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -182,6 +196,7 @@ fn record(
         Record::Turn(x) => (x.id, Namespace::Conversation),
         Record::NormalizedText(x) => (x.id, Namespace::Source),
         Record::RegionSource(x) => (x.id, Namespace::Source),
+        Record::TargetUse(x) => (x.id, Namespace::Conversation),
         Record::Receipt(x) => (
             Ledger::receipt_id(x.acknowledgment.operation),
             Namespace::Conversation,
@@ -192,7 +207,7 @@ fn record(
         Record::RegionSource(r) => r.media(),
         _ => vec![],
     };
-    let regional = matches!(&value, Record::RegionSource(_));
+    let regional = matches!(&value, Record::RegionSource(_) | Record::TargetUse(_));
     let e = Envelope {
         envelope_version: FORMAT,
         namespace,
@@ -397,30 +412,57 @@ fn prepare_records_from_projection(
             && !req.request.contains('\0'),
         "selected Writer request"
     );
+    let fresh = match &req.source {
+        SelectedWriterSource::GenerateRegion { regional } => regional.fresh_user.as_ref(),
+        _ => None,
+    };
+    let prior_user = fresh
+        .map(|reference| {
+            let Record::Turn(user) = current(p, reference)? else {
+                bail!("fresh Writer user variant")
+            };
+            let regional = input
+                .regional
+                .as_ref()
+                .context("fresh Writer region absent")?;
+            validate_fresh_user(p, user, regional, false)?;
+            ensure!(
+                user.text.as_deref() == Some(req.request.as_str()),
+                "fresh Writer request changed"
+            );
+            Ok::<_, anyhow::Error>(user)
+        })
+        .transpose()?;
     let user = Turn {
         id: crate::writer::stage(req.operation, "user"),
         conversation: root.id,
         exchange: req.operation,
-        sequence: root.next_sequence,
+        sequence: prior_user.map_or(root.next_sequence, |u| u.sequence),
         role: Role::User,
         mode: Mode::Writer,
         outcome: Outcome::Interpreted,
         text: Some(req.request.clone()),
-        sources: vec![input.source.id],
+        sources: prior_user.map_or_else(
+            || vec![input.source.id],
+            |u| vec![u.sources[0], input.source.id],
+        ),
         correction_of: input.prior.as_ref().map(|t| t.id),
-        created_ms: ms,
+        created_ms: prior_user.map_or(ms, |u| u.created_ms),
         updated_ms: ms,
         completion: None,
     };
     ensure!(
-        ms >= root.updated_ms && p.head(Namespace::Conversation, user.id).is_none(),
+        ms >= root.updated_ms
+            && (prior_user.is_some() || p.head(Namespace::Conversation, user.id).is_none()),
         "selected Writer chronology/replay"
     );
     Ledger::validate_turn(&user)?;
-    root.next_sequence = root
-        .next_sequence
-        .checked_add(1)
-        .context("sequence overflow")?;
+    if prior_user.is_none() {
+        root.next_sequence = root
+            .next_sequence
+            .checked_add(1)
+            .context("sequence overflow")?;
+    }
     root.updated_ms = ms;
     let binding = root.binding;
     let conversation = root.id;
@@ -450,7 +492,9 @@ fn prepare_records_from_projection(
     records.push(record(
         req.operation,
         actor,
-        BTreeSet::new(),
+        fresh
+            .map(|u| BTreeSet::from([u.revision_id]))
+            .unwrap_or_default(),
         Record::Turn(user),
     )?);
     add_receipt(
@@ -1202,7 +1246,10 @@ fn prepared_input(
             && user.mode == Mode::Writer
             && user.outcome == Outcome::Interpreted
             && user.text.is_some()
-            && user.sources == vec![source.id]
+            && (user.sources == vec![source.id]
+                || regional
+                    .as_ref()
+                    .is_some_and(|r| validate_fresh_user(p, user, r, true).is_ok()))
             && source.conversation == root.id,
         "Writer prepared ownership"
     );
@@ -1245,6 +1292,81 @@ fn prepared_input(
         history,
     })
 }
+/// The only two-source user shape is the original fresh Writer user plus its
+/// exact interpreted capture/target and newly admitted regional normalization.
+fn validate_fresh_user(
+    p: &SelectedDomainProjection,
+    user: &Turn,
+    region: &target::RegionSource,
+    attached: bool,
+) -> Result<()> {
+    let target_pin = IntentRecordRef {
+        namespace: region.target.namespace,
+        record_id: region.target.record,
+        revision_id: region.target.revision,
+        object: region.target.object.clone(),
+    };
+    let Record::SourceTarget(target) = current(p, &target_pin)? else {
+        bail!("fresh target variant")
+    };
+    ensure!(
+        user.role == Role::User
+            && user.mode == Mode::Writer
+            && user.outcome == Outcome::Interpreted
+            && user.id == region.turn
+            && user.id == target.introduced_by
+            && user.id == target.source.turn
+            && user.id == crate::writer::stage(user.exchange, "user")
+            && user.sequence == 0
+            && user.conversation == region.conversation
+            && user.conversation == target.conversation
+            && user.correction_of.is_none()
+            && region.original == target.source.original
+            && user.sources
+                == if attached {
+                    vec![target.source.record.record, region.id]
+                } else {
+                    vec![target.source.record.record]
+                },
+        "fresh Writer user correspondence"
+    );
+    let source_pin = IntentRecordRef {
+        namespace: target.source.record.namespace,
+        record_id: target.source.record.record,
+        revision_id: target.source.record.revision,
+        object: target.source.record.object.clone(),
+    };
+    let Record::ResidentCapture(capture) = current(p, &source_pin)? else {
+        bail!("fresh Writer requires resident capture")
+    };
+    ensure!(
+        capture.turn == user.id && capture.conversation == user.conversation,
+        "fresh capture owner differs"
+    );
+    let state = p.current_reference(
+        Namespace::Conversation,
+        target::TargetState::id(user.conversation),
+    )?;
+    let Record::TargetState(state) = current(p, &state)? else {
+        bail!("fresh target state variant")
+    };
+    let used = &state.use_reference;
+    let Record::TargetUse(used) = p.exact_reference(&IntentRecordRef {
+        namespace: used.namespace,
+        record_id: used.record,
+        revision_id: used.revision,
+        object: used.object.clone(),
+    })?
+    else {
+        bail!("fresh use variant")
+    };
+    ensure!(
+        used.target.as_ref() == Some(&region.target) && used.turn == user.id,
+        "fresh target no longer current"
+    );
+    Ok(())
+}
+
 fn finish_fingerprint(f: &SelectedWriterFinish) -> Result<String> {
     Ledger::fingerprint(&(
         "selected-writer-finish-v1",
@@ -1340,6 +1462,40 @@ fn finish_records_from_projection(
             Record::Turn(written.clone()),
         )?,
     ];
+    if f.outcome == Outcome::Generated {
+        if let Some(region) = input
+            .regional
+            .as_ref()
+            .filter(|r| r.turn == user.id && user.sources.len() == 2)
+        {
+            validate_fresh_user(p, user, region, true)?;
+            let id = target::TargetUse::id(user.id);
+            let (old, Some(Record::TargetUse(used))) = p
+                .head(Namespace::Conversation, id)
+                .context("fresh introducing use absent")?
+            else {
+                bail!("fresh introducing use variant")
+            };
+            let body = f.text.as_deref().context("fresh Generated body absent")?;
+            ensure!(
+                crate::writer::regional_body_has_about(body, &region.about),
+                "fresh Writer body lost About"
+            );
+            let mut used = (**used).clone();
+            let hash = digest(body.as_bytes());
+            ensure!(
+                used.inline_body_sha256.as_ref().is_none_or(|h| *h == hash),
+                "fresh Writer presentation changed"
+            );
+            used.inline_body_sha256 = Some(hash);
+            records.push(record(
+                f.operation,
+                actor,
+                BTreeSet::from([old.revision_id]),
+                Record::TargetUse(Box::new(used)),
+            )?);
+        }
+    }
     let receipt = add_receipt(
         &mut records,
         f.operation,

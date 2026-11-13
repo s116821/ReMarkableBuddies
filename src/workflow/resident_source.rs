@@ -65,7 +65,16 @@ trait SourceSession {
         &self,
         _document: crate::storage::Uuid,
         _page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
+        Ok(None)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
         Ok(None)
     }
     fn reconnect(
@@ -126,8 +135,17 @@ impl SourceSession for Session {
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
         Session::take_writer_request(self, document, page)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        Session::peek_regional_writer(self)
     }
     fn reconnect(
         &mut self,
@@ -343,12 +361,33 @@ impl ResidentSourceOwner {
             .context("resident Writer session absent")?;
         Ok(session
             .take_writer_request(capture.document(), capture.page())?
-            .map(
-                |request| super::resident_output::SelectedConversationRequest::WriterRefinement {
-                    request,
-                    require_current_draft: true,
-                },
-            ))
+            .map(|request| match request {
+                super::resident_supervisor::writer_request::InstalledRequest::Refine(request) => {
+                    super::resident_output::SelectedConversationRequest::WriterRefinement {
+                        request,
+                        require_current_draft: true,
+                    }
+                }
+                super::resident_supervisor::writer_request::InstalledRequest::GenerateRegion(_) => {
+                    super::resident_output::SelectedConversationRequest::UnsupportedRegionalWriter
+                }
+            }))
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        if !self.selection.has_installed_output() {
+            return Ok(None);
+        }
+        self.session
+            .as_ref()
+            .map(|session| session.peek_regional_writer())
+            .transpose()
+            .map(Option::flatten)
     }
     pub(super) fn begin(
         &mut self,
@@ -364,11 +403,25 @@ impl ResidentSourceOwner {
         health: &mut ServiceHealth,
         check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
+        self.begin_until(released, health, ACQUISITION, check)
+    }
+
+    pub(super) fn begin_until(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        acquisition: Duration,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            acquisition <= ACQUISITION,
+            "resident acquisition may only be clamped"
+        );
         ensure!(
             !self.fatal && self.input.is_none(),
             "Resident source request cannot restart"
         );
-        self.deadline = Some(released.released_at + ACQUISITION);
+        self.deadline = Some(released.released_at + acquisition);
         self.input = Some(released.input);
         self.gesture = Some(released.gesture);
         self.canceled = false;
@@ -1241,6 +1294,7 @@ pub(crate) mod tests {
         }
     }
     struct OwnedFactory {
+        source: Option<(ConversationId, ConversationId)>,
         events: Events,
         mode: &'static str,
         delay: Duration,
@@ -1261,6 +1315,9 @@ pub(crate) mod tests {
             std::thread::sleep(self.delay);
             before(deadline)?;
             let fixture = Fixture::new();
+            if let Some((document, page)) = self.source {
+                fixture.declare_source(document, page);
+            }
             let runtime = if self.mode == "source-handoff-companion" {
                 fixture.start_source_companion_with_store(
                     store,
@@ -1321,11 +1378,69 @@ pub(crate) mod tests {
             .configure_resident_source(InstalledReaderSelection::fixture(), store.clone())
             .unwrap();
         workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: None,
             events: events.clone(),
             mode,
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    /// Actual installed receiver body with a declared protocol peer, live input
+    /// guard/health owner and normal finalization. This is not native authority.
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn fresh_receiver_fixture<E: crate::LLMEngine>(
+        store: Arc<Store>,
+        writer: &crate::conversation::SelectedAdmission,
+        pin: &crate::workflow::resident_supervisor::writer_request::RegionalPin,
+        preferences: crate::storage::sync::selected::RequestPreferences,
+        engine: &mut E,
+    ) -> Result<()> {
+        let events = Rc::new(RefCell::new(vec![]));
+        let backend =
+            super::super::selected_backend::RefusingBackend::with_resident_releases(vec![]);
+        let mut workflow = Workflow::with_device(Box::new(backend), false);
+        let (socket, _receiver) = UnixDatagram::pair()?;
+        workflow.enable_service_health(ServiceHealth::fixture(socket))?;
+        workflow.configure_resident_source(InstalledReaderSelection::fixture(), store)?;
+        workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: Some((pin.request().document, pin.request().page)),
+            events: events.clone(),
+            mode: "reconnect-source-handoff",
+            delay: Duration::ZERO,
+        });
+        let started = preferences.regional_cutoff(60)? - Duration::from_secs(60);
+        let result = super::super::selected_resident_reader::receive_fresh_request(
+            &mut workflow,
+            writer,
+            released(started),
+            pin,
+            preferences,
+            engine,
+            None,
+            "fixture-model",
+        );
+        assert!(!workflow.runtime_failed());
+        let owner = workflow.resident_source.as_ref().unwrap();
+        assert!(
+            owner.input.is_none() && owner.deadline.is_none(),
+            "normal Workflow finalization retired source/input guard"
+        );
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "spawn", "observe", "capture"]
+        );
+        assert!(
+            !writer
+                .writer_store()
+                .writer_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            "original Writer owner released only after finalization"
+        );
+        result
     }
 
     #[cfg(all(
