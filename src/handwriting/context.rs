@@ -29,15 +29,86 @@ pub(crate) struct ConfirmedExample {
     pub original_text: Option<String>,
     pub corrected_text: String,
 }
+impl ConfirmedExample {
+    pub(crate) fn from_verified(value: Correction, revision: Uuid, png: Vec<u8>) -> Result<Self> {
+        Ok(Self {
+            identity: ExampleIdentity {
+                correction: value.correction,
+                record: value.record_id()?,
+                revision,
+                sample_sha256: value.sample.sha256.clone(),
+                original_text_sha256: value
+                    .original_text
+                    .as_deref()
+                    .map(|text| digest(text.as_bytes())),
+                corrected_text_sha256: digest(value.corrected_text.as_bytes()),
+            },
+            png,
+            original_text: value.original_text,
+            corrected_text: value.corrected_text,
+        })
+    }
+}
+
+pub(crate) enum ContextOwner {
+    Local { _corrections: LocalCorrections },
+    Selected(crate::storage::sync::selected::SelectedContextOwner),
+}
 /// Private fields prevent unchecked text/images from impersonating a retained capture.
 pub struct ConfirmedContext {
     pub(crate) identity: ContextIdentity,
     pub(crate) examples: Vec<ConfirmedExample>,
-    pub(crate) _owner: LocalCorrections,
+    pub(crate) owner: ContextOwner,
 }
 impl ConfirmedContext {
     pub fn identity(&self) -> &ContextIdentity {
         &self.identity
+    }
+
+    pub(crate) fn from_examples(
+        profile: Uuid,
+        examples: Vec<ConfirmedExample>,
+        owner: ContextOwner,
+    ) -> Self {
+        Self {
+            identity: ContextIdentity {
+                profile,
+                examples: examples
+                    .iter()
+                    .map(|example| example.identity.clone())
+                    .collect(),
+            },
+            examples,
+            owner,
+        }
+    }
+
+    /// Capture exact historical examples from a registered shared correction.
+    /// The selected phase must recheck ownership before using this context.
+    pub fn capture_selected(
+        store: std::sync::Arc<crate::storage::Store>,
+        profile: Uuid,
+        requested: &[ExampleSelection],
+        targets: &BTreeSet<String>,
+        reads: &mut crate::storage::selection::SelectedReadBudget,
+    ) -> std::result::Result<Self, ContextFailure> {
+        crate::storage::sync::selected::SelectedContextOwner::capture(
+            store, profile, requested, targets, reads,
+        )
+    }
+
+    /// Join existing document, memory or preference gates and revalidate the
+    /// selected capture before invoking a synchronous submission or publication.
+    pub fn with_selected_phase<T>(
+        &self,
+        gates: &[&crate::conversation::SelectedAdmission],
+        reads: &mut crate::storage::selection::SelectedReadBudget,
+        run: impl FnOnce(&crate::storage::Store) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let ContextOwner::Selected(owner) = &self.owner else {
+            anyhow::bail!("selected handwriting context required");
+        };
+        owner.with_phase(gates, reads, run)
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

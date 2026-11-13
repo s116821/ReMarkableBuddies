@@ -4,6 +4,8 @@ use crate::handwriting::{self, selected::Projection};
 use crate::memory::catalog::Identity;
 use crate::storage::selection::{SelectedReadBudget, SelectedReadSnapshot, SelectionMutation};
 pub(super) mod command;
+mod context;
+pub(crate) use context::SelectedContextOwner;
 mod query;
 pub(crate) use command::run;
 

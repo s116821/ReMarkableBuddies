@@ -6,6 +6,7 @@ mod context;
 pub(crate) use context::ABSENT_ORIGINAL_INSTRUCTION;
 pub(crate) mod runtime;
 pub(crate) use context::ConfirmedExample;
+pub(crate) use context::ContextOwner;
 pub use context::{
     ConfirmedContext, ContextFailure, ContextIdentity, ExampleIdentity, ExampleSelection,
 };

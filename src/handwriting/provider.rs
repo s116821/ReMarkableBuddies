@@ -185,22 +185,10 @@ impl LocalCorrections {
                 value
                     .verify_sample(&png)
                     .map_err(|_| ContextFailure::Unavailable)?;
-                examples.push(ConfirmedExample {
-                    identity: ExampleIdentity {
-                        correction: selection.correction,
-                        record,
-                        revision: selection.revision,
-                        sample_sha256: value.sample.sha256.clone(),
-                        original_text_sha256: value
-                            .original_text
-                            .as_ref()
-                            .map(|original| digest(original.as_bytes())),
-                        corrected_text_sha256: digest(value.corrected_text.as_bytes()),
-                    },
-                    png,
-                    original_text: value.original_text,
-                    corrected_text: value.corrected_text,
-                });
+                examples.push(
+                    ConfirmedExample::from_verified(value, selection.revision, png)
+                        .map_err(|_| ContextFailure::Invalid)?,
+                );
             }
             progress()?;
             Ok(examples)
@@ -209,15 +197,11 @@ impl LocalCorrections {
             Ok(values) => values,
             Err(failure) => return Err((failure, self)),
         };
-        let identity = ContextIdentity {
+        Ok(ConfirmedContext::from_examples(
             profile,
-            examples: examples.iter().map(|e| e.identity.clone()).collect(),
-        };
-        Ok(ConfirmedContext {
-            identity,
             examples,
-            _owner: self,
-        })
+            ContextOwner::Local { _corrections: self },
+        ))
     }
     fn operations(&self, operation: Uuid) -> Result<Vec<Envelope>> {
         self.store

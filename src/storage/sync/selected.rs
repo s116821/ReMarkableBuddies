@@ -13,6 +13,7 @@ mod catalog;
 mod control;
 mod corrections;
 pub(crate) use corrections::run as run_handwriting;
+pub(crate) use corrections::SelectedContextOwner;
 mod protocol;
 pub(crate) use control::{create_group, CreateGroupRequest, GroupOutcome};
 mod preference_command;

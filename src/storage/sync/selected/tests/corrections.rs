@@ -223,6 +223,21 @@ fn selected_handwriting_worker_distinguishes_omitted_and_missing_samples() {
     assert_eq!(query.status, handwriting::Status::Partial);
     assert_eq!(query.diagnostics.missing_media, 1);
     assert!(query.facts.is_empty());
+    let request = [handwriting::ExampleSelection {
+        correction: f.owner.correction,
+        revision,
+    }];
+    assert_eq!(
+        handwriting::ConfirmedContext::capture_selected(
+            peer,
+            f.owner.profile,
+            &request,
+            &BTreeSet::new(),
+            &mut route::allowance(),
+        )
+        .err(),
+        Some(handwriting::ContextFailure::Unavailable),
+    );
 }
 
 fn png() -> Vec<u8> {
@@ -256,6 +271,138 @@ fn observed(report: handwriting::Report) -> Uuid {
         MutationOutcome::Observed
     );
     report.facts[0].revision
+}
+
+#[test]
+fn selected_handwriting_context_checks_store_catalog_and_correction_each_phase() {
+    use handwriting::{ConfirmedContext, ContextFailure, ExampleSelection};
+
+    let f = CorrectionFixture::new();
+    let first = confirm(f.owner, Uuid::new_v4());
+    let revision = observed(f.command(&f.a, &first, true));
+    let mut sender = f.engine(&f.a);
+    f.drive(&mut sender, revision);
+    let mut receiver = f.engine(&f.b);
+    f.drive(&mut receiver, revision);
+    let requests = f.wire.requests().len();
+    let mut selection = [ExampleSelection {
+        correction: f.owner.correction,
+        revision,
+    }];
+    let mut reads = route::allowance();
+    let mut targets = BTreeSet::from([digest(&png())]);
+    assert_eq!(
+        ConfirmedContext::capture_selected(
+            f.b.clone(),
+            f.owner.profile,
+            &selection,
+            &targets,
+            &mut reads
+        )
+        .err(),
+        Some(ContextFailure::Unavailable),
+    );
+    targets.clear();
+    let captured = ConfirmedContext::capture_selected(
+        f.b.clone(),
+        f.owner.profile,
+        &selection,
+        &targets,
+        &mut reads,
+    )
+    .unwrap();
+    assert_eq!(captured.identity().examples[0].revision, revision);
+    assert_eq!(captured.examples[0].png, png());
+    let document = SelectionScope {
+        key_sha256: digest(b"fixture document"),
+        ..f.scope.clone()
+    };
+    let gate = SelectedAdmission::new(f.b.clone(), document.clone()).unwrap();
+    let foreign = SelectedAdmission::new(f.a.clone(), document).unwrap();
+    let used = reads.usage();
+    captured
+        .with_selected_phase(&[&gate], &mut reads, |store| {
+            assert_eq!(store.actor_id, f.b.actor_id);
+            Ok(())
+        })
+        .unwrap();
+    assert!(reads.usage().media_bytes > used.media_bytes);
+    assert!(captured
+        .with_selected_phase::<()>(&[&foreign], &mut reads, |_| panic!("foreign gate admitted"))
+        .is_err());
+    let mut exhausted = crate::storage::selection::SelectedReadBudget::new(0, 0, 0, 0);
+    assert!(captured
+        .with_selected_phase::<()>(&[&gate], &mut exhausted, |_| panic!("budget bypassed"))
+        .is_err());
+    assert!(exhausted.exhausted());
+    assert_eq!(f.wire.requests().len(), requests);
+
+    let mut updated = first;
+    updated["command"] = json!("update");
+    updated["operation"] = json!(Uuid::new_v4());
+    updated["expected_heads"] = json!([revision]);
+    updated["confirmed_ms"] = json!(2);
+    updated["corrected_text"] = json!("10 N");
+    let updated = observed(f.command(&f.b, &updated, false));
+    let error = captured
+        .with_selected_phase::<()>(&[&gate], &mut reads, |_| {
+            panic!("stale correction admitted")
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("example changed"), "{error:#}");
+    assert_eq!(
+        ConfirmedContext::capture_selected(
+            f.b.clone(),
+            f.owner.profile,
+            &selection,
+            &targets,
+            &mut reads
+        )
+        .err(),
+        Some(ContextFailure::Stale),
+    );
+    selection[0].revision = updated;
+    let captured = ConfirmedContext::capture_selected(
+        f.b.clone(),
+        f.owner.profile,
+        &selection,
+        &targets,
+        &mut reads,
+    )
+    .unwrap();
+    let sibling = HandwritingOwner::new(f.owner.profile, Uuid::new_v4());
+    observed(f.command(&f.a, &confirm(sibling, Uuid::new_v4()), true));
+    let sibling_scope = sibling
+        .domain()
+        .unwrap()
+        .scope(f.binding.group, f.binding.digest.clone())
+        .unwrap();
+    let mut sender = f.engine(&f.a);
+    for _ in 0..12 {
+        sender.step().unwrap();
+        if sender
+            .view()
+            .unwrap()
+            .unwrap()
+            .entries
+            .contains_key(&sibling_scope.key_sha256)
+        {
+            break;
+        }
+    }
+    let mut receiver = f.engine(&f.b);
+    let mut items = 32;
+    receiver.refresh_root_catalog(&mut items).unwrap().unwrap();
+    assert!(receiver
+        .view()
+        .unwrap()
+        .unwrap()
+        .entries
+        .contains_key(&sibling_scope.key_sha256));
+    let error = captured
+        .with_selected_phase::<()>(&[&gate], &mut reads, |_| panic!("stale catalog admitted"))
+        .unwrap_err();
+    assert!(error.to_string().contains("catalog changed"), "{error:#}");
 }
 
 #[test]

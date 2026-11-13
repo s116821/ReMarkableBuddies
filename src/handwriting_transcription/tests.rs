@@ -309,7 +309,9 @@ fn exercise_literal_vectors(local: &Local) {
                     examples: values.iter().map(|e| e.identity.clone()).collect(),
                 },
                 examples: values,
-                _owner: owner,
+                owner: handwriting::ContextOwner::Local {
+                    _corrections: owner,
+                },
             })
         };
         let mut engine = Engine::new();
@@ -404,12 +406,11 @@ fn real_current_capture_is_owned_through_provider_report_write_failure_and_drop(
     assert_eq!(engine.calls, 1);
     assert_eq!(report.provider_attempt, Attempt::Called);
     assert!(Store::open(local.config.paths.clone()).is_err());
-    assert!(report
-        ._owner
-        .as_ref()
-        .unwrap()
-        ._owner
-        .publisher_excluded_for_test());
+    let handwriting::ContextOwner::Local { _corrections } = &report._owner.as_ref().unwrap().owner
+    else {
+        panic!("expected local handwriting context");
+    };
+    assert!(_corrections.publisher_excluded_for_test());
     let data = output(&report);
     assert_eq!(data["context"]["examples"][0]["revision"], json!(revision));
     assert_eq!(data["confirmed"], false);
@@ -1762,7 +1763,9 @@ fn mixed_abstention_context_uses_frozen_identity_and_descriptors() {
             examples: examples.iter().map(|e| e.identity.clone()).collect(),
         },
         examples,
-        _owner: owner,
+        owner: handwriting::ContextOwner::Local {
+            _corrections: owner,
+        },
     };
     let context_json = serde_json::to_string(context.identity()).unwrap();
     assert_eq!(context_json, vectors["identity_json"].as_str().unwrap());
