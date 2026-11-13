@@ -802,6 +802,29 @@ pub(super) fn read_fixture_model_request(
 }
 
 #[cfg(test)]
+pub(super) fn fixture_preference_command(
+    store: Arc<Store>,
+    path: &Path,
+    binding: Binding,
+    wire: &crate::storage::drive::shared_fixture::Wire,
+    operation: Operation,
+    input: &[u8],
+) -> Result<Report> {
+    let request = Request::decode(operation, input)?;
+    let mut reads = budget();
+    let capture = Capture::read(path.to_owned(), &mut reads)?;
+    admitted(
+        store.clone(),
+        capture,
+        request,
+        binding.clone(),
+        Instant::now() + Duration::from_secs(60),
+        &mut reads,
+        || Ok(wire.client(store.paths.credentials.join("drive.json"), binding.group)),
+    )
+}
+
+#[cfg(test)]
 pub(super) fn set_fixture_preference(
     store: Arc<Store>,
     path: &std::path::Path,
