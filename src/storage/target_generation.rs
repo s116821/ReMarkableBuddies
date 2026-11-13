@@ -12,6 +12,15 @@ pub(crate) enum BaseKind {
     CompoundSelected,
 }
 impl BaseKind {
+    fn mode_matches(self, store: &Store) -> Result<bool> {
+        match self {
+            Self::OrdinaryNotebook => sync::mode::ordinary_local(store),
+            Self::CompoundSelected => Ok(matches!(
+                store.sync_mode_snapshot()?.mode,
+                Some(sync::mode::SyncMode::SharedGroup { .. })
+            )),
+        }
+    }
     fn version(self) -> u32 {
         match self {
             Self::OrdinaryNotebook => notebook_generation::VERSION,
@@ -380,6 +389,14 @@ fn prepare_original(
     let path = root.join(PREPARATION);
     let existing = preparation(&root)?;
     if is_target(&root)? && existing.as_ref().is_some_and(|original| original.complete) {
+        let ready = feature(&root)?;
+        if ready.base_kind != base_kind || !base_kind.mode_matches(store)? {
+            return Err(maintenance::Refusal::Unsupported.into());
+        }
+        ensure!(
+            operation.is_none_or(|id| ready.operation == id),
+            "ready original target preparation differs"
+        );
         return validate_ready(&store.paths, store.actor_id, generation);
     }
     let pin = source_pin(store)?;
@@ -405,19 +422,14 @@ fn prepare_original(
         if source_family == 5 {
             compound_generation::validate_ready(&store.paths, store.actor_id, generation)?;
         }
-        ensure!(
-            match base_kind {
-                BaseKind::OrdinaryNotebook =>
-                    (1..=4).contains(&source_family) && sync::mode::ordinary_local(store)?,
-                BaseKind::CompoundSelected =>
-                    source_family == 5
-                        && matches!(
-                            store.sync_mode_snapshot()?.mode,
-                            Some(sync::mode::SyncMode::SharedGroup { .. })
-                        ),
-            },
-            "target preparation mode/base family differs"
-        );
+        if !base_kind.mode_matches(store)?
+            || !match base_kind {
+                BaseKind::OrdinaryNotebook => (1..=4).contains(&source_family),
+                BaseKind::CompoundSelected => source_family == 5,
+            }
+        {
+            return Err(maintenance::Refusal::Unsupported.into());
+        }
         let original = Preparation {
             feature: Feature {
                 format: 1,
@@ -771,6 +783,7 @@ pub(super) fn stage_restore(
     } else {
         files::atomic_json(&root.join(MARKER), &value)?;
     }
+    super::recovery::notebook_backup::target_restore::boundary(Stage::Marker)?;
     let contract = store.paths.data.join("contract-v5.json");
     if !contract.exists() {
         files::atomic(&contract, CONTRACT.as_bytes())?;
@@ -779,6 +792,7 @@ pub(super) fn stage_restore(
         files::read(&contract, MAX_RECORD as u64)? == CONTRACT.as_bytes(),
         "restore contract differs"
     );
+    super::recovery::notebook_backup::target_restore::boundary(Stage::Contract)?;
     let family = feedback_generation::version(&root)?;
     ensure!(
         family == 4 || family == VERSION,
@@ -787,6 +801,7 @@ pub(super) fn stage_restore(
     if family != VERSION {
         files::atomic_json(&root.join("format.json"), &VERSION)?;
     }
+    super::recovery::notebook_backup::target_restore::boundary(Stage::Format)?;
     validate_feature(&root, value.actor, value.generation)
 }
 pub(super) fn publish_restore_capabilities(

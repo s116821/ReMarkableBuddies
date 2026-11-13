@@ -1,7 +1,7 @@
 use super::*;
 use crate::conversation::target_source::tests::Fixture;
 
-fn empty_store(root: &Path, actor: Uuid, targets: bool) -> Store {
+fn identity_paths(root: &Path, actor: Uuid) -> StorePaths {
     let paths = StorePaths {
         data: root.join("data"),
         cache: root.join("cache"),
@@ -18,6 +18,10 @@ fn empty_store(root: &Path, actor: Uuid, targets: bool) -> Store {
         },
     )
     .unwrap();
+    paths
+}
+fn empty_store(root: &Path, actor: Uuid, targets: bool) -> Store {
+    let paths = identity_paths(root, actor);
     if targets {
         Store::open_source_target_startup(&crate::config::Config {
             paths,
@@ -388,7 +392,7 @@ fn target_restore_combines_populated_target_history_with_newer_subject_revision(
                 .unwrap(),
             crate::conversation::target_source::tests::user(conversation),
             &TargetChange::CorrectSubject {
-                target: target.reference,
+                target: target.reference.clone(),
                 subject: "Newer base subject".into(),
             },
         )
@@ -438,4 +442,474 @@ fn target_restore_combines_populated_target_history_with_newer_subject_revision(
         .targets
         .iter()
         .any(|view| view.target.candidate.subject == "Newer base subject"));
+}
+
+#[test]
+fn target_restore_nonempty_additive_matrix_preserves_both_histories_and_exact_objects() {
+    use crate::conversation::{target_source::tests::populate, Ledger};
+    use std::sync::Arc;
+    for archive_targets in [false, true] {
+        for base_targets in [false, true] {
+            for conditional in [false, true] {
+                let fixture =
+                    Fixture(std::env::temp_dir().join(format!("target-matrix-{}", Uuid::new_v4())));
+                let actor = Uuid::new_v4();
+                let source = Arc::new(empty_store(
+                    &fixture.0.join("source"),
+                    actor,
+                    archive_targets,
+                ));
+                let source_conversation = if archive_targets {
+                    populate(&Ledger::new(source.clone())).0
+                } else {
+                    compound_generation::tests::produce_notebook_with_conversation(source.clone()).0
+                };
+                let archive = fixture.0.join("archive");
+                source.export_notebook_backup(&archive).unwrap();
+                let source_view = serde_json::to_value(
+                    Ledger::new(source.clone())
+                        .inspect(source_conversation, false)
+                        .unwrap(),
+                )
+                .unwrap();
+                let base = Arc::new(empty_store(&fixture.0.join("base"), actor, base_targets));
+                let base_conversation = if base_targets {
+                    populate(&Ledger::new(base.clone())).0
+                } else {
+                    compound_generation::tests::produce_notebook_with_conversation(base.clone()).0
+                };
+                let base_view = serde_json::to_value(
+                    Ledger::new(base.clone())
+                        .inspect(base_conversation, false)
+                        .unwrap(),
+                )
+                .unwrap();
+                let mut objects = BTreeMap::new();
+                for store in [&source, &base] {
+                    let root = store.generation(store.inner.lock().unwrap().generation);
+                    for entry in fs::read_dir(root.join("objects")).unwrap() {
+                        let path = entry.unwrap().path();
+                        objects.insert(
+                            path.file_name().unwrap().to_owned(),
+                            files::read(&path, MAX_MEDIA).unwrap(),
+                        );
+                    }
+                }
+                if conditional {
+                    let plan = base.prepare_notebook_restore(&archive, || Ok(())).unwrap();
+                    assert!(matches!(
+                        base.apply_notebook_restore(&archive, &plan.conditions, || Ok(()))
+                            .unwrap(),
+                        ordinary_restore::Publication::Verified(_)
+                    ));
+                } else {
+                    base.restore_notebook_backup(&archive).unwrap();
+                }
+                let generation = base.inner.lock().unwrap().generation;
+                let family = if archive_targets || base_targets {
+                    6
+                } else {
+                    4
+                };
+                assert_eq!(
+                    feedback_generation::version(&base.generation(generation)).unwrap(),
+                    family
+                );
+                for (name, bytes) in objects {
+                    assert_eq!(
+                        files::read(
+                            &base.generation(generation).join("objects").join(name),
+                            MAX_MEDIA
+                        )
+                        .unwrap(),
+                        bytes
+                    );
+                }
+                let paths = base.paths.clone();
+                drop(base);
+                let reopened = Arc::new(Store::open(paths).unwrap());
+                let ledger = Ledger::new(reopened);
+                assert_eq!(
+                    serde_json::to_value(ledger.inspect(source_conversation, false).unwrap())
+                        .unwrap(),
+                    source_view
+                );
+                assert_eq!(
+                    serde_json::to_value(ledger.inspect(base_conversation, false).unwrap())
+                        .unwrap(),
+                    base_view
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn target_restore_original_recovers_header_and_capability_publication_boundaries() {
+    use target_generation::Stage;
+    for stage in [
+        Stage::Original,
+        Stage::Marker,
+        Stage::Contract,
+        Stage::Format,
+        Stage::Capabilities,
+    ] {
+        let (fixture, ledger, conversation, _) =
+            crate::conversation::target_source::tests::fixture();
+        let source = ledger.store().clone();
+        let expected = serde_json::to_value(ledger.inspect(conversation, false).unwrap()).unwrap();
+        drop(ledger);
+        let archive = fixture.0.join("archive");
+        source.export_notebook_backup(&archive).unwrap();
+        let base = empty_store(&fixture.0.join("base"), source.actor_id, false);
+        let paths = base.paths.clone();
+        let plan = base.prepare_notebook_restore(&archive, || Ok(())).unwrap();
+        let interruption = target_restore::interrupt(stage);
+        let result = base
+            .apply_notebook_restore(&archive, &plan.conditions, || Ok(()))
+            .unwrap();
+        drop(interruption);
+        assert!(matches!(
+            result,
+            ordinary_restore::Publication::Unknown | ordinary_restore::Publication::NotActivated
+        ));
+        let root = base.generation(plan.conditions.target_generation);
+        let before: serde_json::Value =
+            files::json(&root.join(target_restore::ORIGINAL), MAX_RECORD as u64).unwrap();
+        drop(base);
+        if stage == Stage::Capabilities {
+            fs::rename(&archive, fixture.0.join("archive-retired")).unwrap();
+        }
+        let reopened = Store::open_source_target_startup(&crate::config::Config {
+            paths: paths.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            reopened.inner.lock().unwrap().generation,
+            plan.conditions.target_generation
+        );
+        let after: serde_json::Value =
+            files::json(&root.join(target_restore::ORIGINAL), MAX_RECORD as u64).unwrap();
+        assert_eq!(after["original"], before["original"]);
+        assert!(
+            after["remaining"]["usage"]["work_items"].as_u64().unwrap()
+                > before["remaining"]["usage"]["work_items"].as_u64().unwrap()
+        );
+        let ledger = crate::conversation::Ledger::new(std::sync::Arc::new(reopened));
+        assert_eq!(
+            serde_json::to_value(ledger.inspect(conversation, false).unwrap()).unwrap(),
+            expected
+        );
+        target_generation::validate_ready(
+            &paths,
+            source.actor_id,
+            plan.conditions.target_generation,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn target_restore_exhaustion_stays_with_original_and_cannot_mint_a_new_plan() {
+    let (fixture, ledger, _, _) = crate::conversation::target_source::tests::fixture();
+    let source = ledger.store().clone();
+    drop(ledger);
+    let archive = fixture.0.join("archive");
+    source.export_notebook_backup(&archive).unwrap();
+    let base = empty_store(&fixture.0.join("base"), source.actor_id, false);
+    let paths = base.paths.clone();
+    let plan = base.prepare_notebook_restore(&archive, || Ok(())).unwrap();
+    base.set_fault(Fault::BeforeActivation).unwrap();
+    assert!(matches!(
+        base.apply_notebook_restore(&archive, &plan.conditions, || Ok(()))
+            .unwrap(),
+        ordinary_restore::Publication::NotActivated
+    ));
+    let root = base.generation(plan.conditions.target_generation);
+    let receipt_path = root.join(target_restore::ORIGINAL);
+    let original: serde_json::Value = files::json(&receipt_path, MAX_RECORD as u64).unwrap();
+    let current = files::read(&paths.data.join("CURRENT"), 128).unwrap();
+    let history_path = root.join("target-restore-history.json");
+    let valid = files::read(&history_path, (MAX_METADATA + MAX_ITEMS + 2) as u64).unwrap();
+    files::atomic(&history_path, b"{}").unwrap();
+    drop(base);
+    let config = crate::config::Config {
+        paths: paths.clone(),
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        assert!(Store::open_source_target_startup(&config).is_err());
+    }
+    // Even repairing the test fault cannot replenish the original allowance.
+    files::atomic(&history_path, &valid).unwrap();
+    assert!(Store::open_source_target_startup(&config).is_err());
+    let exhausted: serde_json::Value = files::json(&receipt_path, MAX_RECORD as u64).unwrap();
+    assert_eq!(exhausted["original"], original["original"]);
+    assert_eq!(exhausted["remaining"]["exhausted"], true);
+    assert_eq!(
+        exhausted["remaining"]["usage"]["work_items"]
+            .as_u64()
+            .unwrap(),
+        original["original"]["work"].as_u64().unwrap() * 3
+    );
+    assert!(Store::open_source_target_startup(&config).is_err());
+    assert_eq!(
+        files::json::<serde_json::Value>(&receipt_path, MAX_RECORD as u64).unwrap(),
+        exhausted
+    );
+    assert_eq!(
+        files::read(&paths.data.join("CURRENT"), 128).unwrap(),
+        current
+    );
+    let base = Store::open_existing_for_notebook_restore(paths).unwrap();
+    let count = fs::read_dir(base.paths.data.join("generations"))
+        .unwrap()
+        .count();
+    assert!(base.prepare_notebook_restore(&archive, || Ok(())).is_err());
+    assert!(base.restore_notebook_backup(&archive).is_err());
+    assert_eq!(
+        fs::read_dir(base.paths.data.join("generations"))
+            .unwrap()
+            .count(),
+        count
+    );
+}
+
+#[test]
+fn target_restore_refuses_foreign_actor_before_staging() {
+    let (fixture, ledger, _, _) = crate::conversation::target_source::tests::fixture();
+    let source = ledger.store().clone();
+    drop(ledger);
+    let archive = fixture.0.join("archive");
+    source.export_notebook_backup(&archive).unwrap();
+    for targets in [false, true] {
+        let base = empty_store(
+            &fixture
+                .0
+                .join(if targets { "foreign6" } else { "foreign4" }),
+            Uuid::new_v4(),
+            targets,
+        );
+        let current = files::read(&base.paths.data.join("CURRENT"), 128).unwrap();
+        let count = fs::read_dir(base.paths.data.join("generations"))
+            .unwrap()
+            .count();
+        assert!(base.prepare_notebook_restore(&archive, || Ok(())).is_err());
+        assert!(base.restore_notebook_backup(&archive).is_err());
+        assert_eq!(
+            files::read(&base.paths.data.join("CURRENT"), 128).unwrap(),
+            current
+        );
+        assert_eq!(
+            fs::read_dir(base.paths.data.join("generations"))
+                .unwrap()
+                .count(),
+            count
+        );
+    }
+}
+
+#[test]
+fn target_restore_original_refuses_changed_actor_paths_or_valid_local_mode() {
+    for changed in ["actor", "paths", "mode"] {
+        let (fixture, ledger, _, _) = crate::conversation::target_source::tests::fixture();
+        let source = ledger.store().clone();
+        drop(ledger);
+        let archive = fixture.0.join("archive");
+        source.export_notebook_backup(&archive).unwrap();
+        let base = empty_store(&fixture.0.join("base"), source.actor_id, false);
+        let mut paths = base.paths.clone();
+        let plan = base.prepare_notebook_restore(&archive, || Ok(())).unwrap();
+        base.set_fault(Fault::BeforeActivation).unwrap();
+        assert!(matches!(
+            base.apply_notebook_restore(&archive, &plan.conditions, || Ok(()))
+                .unwrap(),
+            ordinary_restore::Publication::NotActivated
+        ));
+        let before: serde_json::Value = files::json(
+            &base
+                .generation(plan.conditions.target_generation)
+                .join(target_restore::ORIGINAL),
+            MAX_RECORD as u64,
+        )
+        .unwrap();
+        let current = files::read(&paths.data.join("CURRENT"), 128).unwrap();
+        drop(base);
+        match changed {
+            "actor" => {
+                let identity = Identity {
+                    format: FORMAT,
+                    actor: Uuid::new_v4(),
+                };
+                for path in [
+                    paths.data.join("identity.json"),
+                    paths.cache.join("owner.json"),
+                    paths.credentials.join("owner.json"),
+                ] {
+                    files::atomic_json(&path, &identity).unwrap();
+                }
+            }
+            "paths" => {
+                let relocated = fixture.0.join("relocated-base");
+                fs::rename(fixture.0.join("base"), &relocated).unwrap();
+                paths = StorePaths {
+                    data: relocated.join("data"),
+                    cache: relocated.join("cache"),
+                    credentials: relocated.join("credentials"),
+                };
+            }
+            "mode" => {
+                let mode_source = Store::open(identity_paths(
+                    &fixture.0.join("mode-source"),
+                    source.actor_id,
+                ))
+                .unwrap();
+                mode_source
+                    .set_sync_mode(
+                        &mode_source.sync_mode_snapshot().unwrap().token,
+                        Uuid::new_v4(),
+                        sync::mode::SyncModeChoice::LocalOnly,
+                    )
+                    .unwrap();
+                let bytes = files::read(
+                    &mode_source.paths.data.join("sync/mode.json"),
+                    MAX_METADATA as u64,
+                )
+                .unwrap();
+                files::atomic(&paths.data.join("sync/mode.json"), &bytes).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let config = crate::config::Config {
+            paths: paths.clone(),
+            ..Default::default()
+        };
+        assert!(
+            Store::open_source_target_startup(&config).is_err(),
+            "{changed}"
+        );
+        assert_eq!(
+            files::read(&paths.data.join("CURRENT"), 128).unwrap(),
+            current
+        );
+        let after: serde_json::Value = files::json(
+            &paths
+                .data
+                .join("generations")
+                .join(plan.conditions.target_generation.to_string())
+                .join(target_restore::ORIGINAL),
+            MAX_RECORD as u64,
+        )
+        .unwrap();
+        assert_eq!(after["original"], before["original"]);
+        if changed != "mode" {
+            assert_eq!(after, before);
+        } else {
+            assert!(
+                after["remaining"]["usage"]["work_items"].as_u64().unwrap()
+                    > before["remaining"]["usage"]["work_items"].as_u64().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn target_restore_selected_families_cannot_enter_ordinary_restore_or_startup() {
+    for targets in [false, true] {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("target-selected-restore-{}", Uuid::new_v4())),
+        );
+        let actor = Uuid::new_v4();
+        let archive_source = empty_store(&fixture.0.join("source"), actor, true);
+        let archive = fixture.0.join("archive");
+        archive_source.export_notebook_backup(&archive).unwrap();
+        let base = empty_store(&fixture.0.join("base"), actor, false);
+        let paths = base.paths.clone();
+        let token = serde_json::to_value(base.sync_mode_snapshot().unwrap().token).unwrap();
+        let request = compound_generation::Request {
+            operation: Uuid::new_v4(),
+            actor,
+            source_generation: base.inner.lock().unwrap().generation,
+            group: Uuid::new_v4(),
+            binding_sha256: digest(b"synthetic selected binding"),
+            expected_mode: compound_generation::ModeEvidence {
+                actor,
+                sha256: token["sha256"].as_str().unwrap().into(),
+            },
+        };
+        drop(base);
+        let mut selected = Store::prepare_shared_notebook(paths.clone(), request.clone()).unwrap();
+        selected
+            .set_sync_mode(
+                &selected.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                sync::mode::SyncModeChoice::SharedGroup {
+                    group: request.group,
+                    binding_sha256: request.binding_sha256,
+                    root_id: "synthetic-root".into(),
+                },
+            )
+            .unwrap();
+        if targets {
+            target_generation::prepare(
+                &mut selected,
+                &digest(b"selected fixture config"),
+                target_generation::BaseKind::CompoundSelected,
+                |_| Ok(()),
+            )
+            .unwrap();
+        }
+        let current = files::read(&paths.data.join("CURRENT"), 128).unwrap();
+        let count = fs::read_dir(paths.data.join("generations"))
+            .unwrap()
+            .count();
+        let destination = fixture.0.join("must-not-export");
+        assert!(selected.export_notebook_backup(&destination).is_err());
+        assert!(!destination.exists());
+        assert!(selected
+            .prepare_notebook_restore(&archive, || Ok(()))
+            .is_err());
+        assert!(selected.restore_notebook_backup(&archive).is_err());
+        drop(selected);
+        assert!(
+            Store::open_source_target_startup(&crate::config::Config {
+                paths: paths.clone(),
+                ..Default::default()
+            })
+            .is_err(),
+            "ordinary startup must refuse selected family{}",
+            if targets { 6 } else { 5 }
+        );
+        assert_eq!(
+            files::read(&paths.data.join("CURRENT"), 128).unwrap(),
+            current
+        );
+        assert_eq!(
+            fs::read_dir(paths.data.join("generations"))
+                .unwrap()
+                .count(),
+            count
+        );
+        if targets {
+            let mode =
+                files::read(&paths.data.join("sync/mode.json"), MAX_METADATA as u64).unwrap();
+            let ordinary = empty_store(&fixture.0.join("ordinary-mode-fault"), actor, true);
+            let ordinary_paths = ordinary.paths.clone();
+            let before = files::read(&ordinary_paths.data.join("CURRENT"), 128).unwrap();
+            drop(ordinary);
+            // Inject a valid same-actor SharedGroup mode as external interference;
+            // ordinary provenance alone must not qualify this changed mode.
+            files::atomic(&ordinary_paths.data.join("sync/mode.json"), &mode).unwrap();
+            assert!(Store::open_source_target_startup(&crate::config::Config {
+                paths: ordinary_paths.clone(),
+                ..Default::default()
+            })
+            .is_err());
+            assert_eq!(
+                files::read(&ordinary_paths.data.join("CURRENT"), 128).unwrap(),
+                before
+            );
+        }
+    }
 }

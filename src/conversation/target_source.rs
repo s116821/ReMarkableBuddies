@@ -600,6 +600,10 @@ pub(crate) mod tests {
         let ledger = Ledger::new(Arc::new(
             Store::open_source_target_startup(&config).unwrap(),
         ));
+        let (c, source) = populate(&ledger);
+        (f, ledger, c, source)
+    }
+    pub(crate) fn populate(ledger: &Ledger) -> (Uuid, Uuid) {
         let c = Uuid::new_v4();
         ledger.create(c, Uuid::new_v4(), 1).unwrap();
         let mut user = user(c);
@@ -678,7 +682,7 @@ pub(crate) mod tests {
                 },
             )
             .unwrap();
-        (f, ledger, c, source)
+        (c, source)
     }
     pub(crate) fn user(c: Uuid) -> Turn {
         Turn {

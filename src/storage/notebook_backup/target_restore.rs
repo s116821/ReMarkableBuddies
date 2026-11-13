@@ -8,6 +8,38 @@ const HISTORY: &str = "target-restore-history.json";
 // A canonical Vec adds delimiters to the existing cumulative manifest-byte cap.
 const HISTORY_BYTES: usize = MAX_METADATA + MAX_ITEMS + 2;
 
+#[cfg(test)]
+thread_local! { static INTERRUPTION: std::cell::Cell<Option<target_generation::Stage>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+pub(super) struct Interruption;
+#[cfg(test)]
+impl Drop for Interruption {
+    fn drop(&mut self) {
+        INTERRUPTION.with(|state| state.set(None));
+    }
+}
+#[cfg(test)]
+pub(super) fn interrupt(stage: target_generation::Stage) -> Interruption {
+    INTERRUPTION.with(|state| {
+        assert!(state.get().is_none());
+        state.set(Some(stage));
+    });
+    Interruption
+}
+pub(in crate::storage) fn boundary(stage: target_generation::Stage) -> Result<()> {
+    #[cfg(test)]
+    INTERRUPTION.with(|state| {
+        if state.get() == Some(stage) {
+            state.set(None);
+            anyhow::bail!("controlled original restore interruption: {stage:?}")
+        }
+        Ok(())
+    })?;
+    #[cfg(not(test))]
+    let _ = stage;
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::storage) struct Original {
@@ -328,6 +360,7 @@ impl Store {
             remaining,
         };
         files::atomic_json(&root.join(ORIGINAL), &receipt)?;
+        boundary(target_generation::Stage::Original)?;
         files::atomic(&root.join(HISTORY), &raw)?;
         let mut reads = receipt.reserve(&root)?;
         self.resume_target_locked(inner, &receipt.original, &mut reads, attempted)
@@ -531,6 +564,7 @@ impl Store {
         // existing fault mechanism; only the saved original can repair it.
         Self::trip(inner, Fault::AfterCommit)?;
         target_generation::publish_restore_capabilities(self, original)?;
+        boundary(target_generation::Stage::Capabilities)?;
         target_generation::complete_restore(self, original)?;
         Self::trip(inner, Fault::AfterActivation)?;
         Ok(())

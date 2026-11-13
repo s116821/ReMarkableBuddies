@@ -171,11 +171,20 @@ fn admission_status(status: crate::memory::maintenance::ReportStatus) -> Status 
         _ => Status::Unavailable,
     }
 }
+fn open_status(error: &anyhow::Error) -> Status {
+    use crate::storage::maintenance::Refusal;
+    match error.downcast_ref::<Refusal>() {
+        Some(Refusal::Unsupported) => Status::Unsupported,
+        Some(Refusal::Busy) => Status::Busy,
+        Some(Refusal::Unavailable) => Status::Unavailable,
+        None => admission_status(crate::memory::maintenance::store_open_status(error)),
+    }
+}
 fn open(config: &Config) -> std::result::Result<Arc<Store>, Status> {
     crate::memory::maintenance::preflight(config, false).map_err(admission_status)?;
     Store::open(config.paths.clone())
         .map(Arc::new)
-        .map_err(|error| admission_status(crate::memory::maintenance::store_open_status(&error)))
+        .map_err(|error| open_status(&error))
 }
 
 pub enum StartupDecision {
@@ -274,12 +283,7 @@ pub fn ordinary_store(
                 } else {
                     Store::open(config.paths.clone())
                 })
-                .map_err(|error| {
-                    Box::new(Report::new(
-                        "startup",
-                        admission_status(crate::memory::maintenance::store_open_status(&error)),
-                    ))
-                })?,
+                .map_err(|error| Box::new(Report::new("startup", open_status(&error))))?,
             )
         }
     };
@@ -330,9 +334,7 @@ pub fn startup(config: &Config) -> StartupDecision {
                     Err(refusal) => StartupDecision::Report(Box::new(refusal.report())),
                 }
             }
-            Err(error) => StartupDecision::refused(admission_status(
-                crate::memory::maintenance::store_open_status(&error),
-            )),
+            Err(error) => StartupDecision::refused(open_status(&error)),
         };
     }
     if config.reader.selection.is_none() {
