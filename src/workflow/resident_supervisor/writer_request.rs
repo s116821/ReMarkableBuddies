@@ -403,15 +403,35 @@ pub(crate) fn take(
     page: Uuid,
 ) -> Result<Option<InstalledRequest>> {
     let lease = caller(activation)?;
-    let name = name(&lease);
-    let Some(pending) = read(&lease, &name)? else {
+    take_locked(&lease, document, page)
+}
+
+// The installed caller owns the existing slot lock. Keep this read/dispatch
+// common to production and real-file ingress fixtures.
+fn take_locked(lease: &Lease, document: Uuid, page: Uuid) -> Result<Option<InstalledRequest>> {
+    let name = name(lease);
+    let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
     let expired = boot_seconds()? >= pending.expires;
+    // An observed regional intent always belongs to the selected receiver.
+    // Refinement's expiry/page None results mean Reader may continue, so they
+    // must never hide this intent. Keep unexpired (including foreign) bytes;
+    // retire an expired owned slot, but still refuse this ordinary attempt.
+    if matches!(
+        pending.submission,
+        Submission::GenerateRegionOnTablet { .. }
+    ) {
+        if expired {
+            discard_locked(lease, &name)?;
+        }
+        lease.current()?;
+        anyhow::bail!("fresh regional Writer requires the selected receiver");
+    }
     if !expired && pending.page()? != (document, page) {
         return Ok(None);
     }
-    discard_locked(&lease, &name)?;
+    discard_locked(lease, &name)?;
     if expired {
         return Ok(None);
     }
@@ -614,5 +634,126 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         assert!(claim.consume().is_err());
         assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    fn ordinary(
+        slot: &FixtureSlot,
+        document: Uuid,
+        page: Uuid,
+    ) -> Result<Option<InstalledRequest>> {
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
+        lock(&lease)?;
+        take_locked(&lease, document, page)
+    }
+    fn expire(slot: &FixtureSlot) {
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+        lock(&lease).unwrap();
+        let mut pending = read(&lease, &name(&lease)).unwrap().unwrap();
+        pending.expires = 0;
+        files::atomic_json(&lease.path.join(name(&lease)), &pending).unwrap();
+    }
+    #[test]
+    fn ordinary_ingress_matching_region_refuses_and_preserves_input() {
+        let request = request();
+        let slot = FixtureSlot::new(request.clone());
+        let result = ordinary(&slot, request.document, request.page);
+        assert!(
+            result.is_err(),
+            "regional intent must explicitly refuse ordinary ingress"
+        );
+        assert!(
+            slot.pending(),
+            "unexpired regional input remains for the selected receiver"
+        );
+    }
+    #[test]
+    fn ordinary_ingress_expired_region_refuses_instead_of_returning_reader_none() {
+        let request = request();
+        let slot = FixtureSlot::new(request.clone());
+        expire(&slot);
+        let result = ordinary(&slot, request.document, request.page);
+        assert!(
+            result.is_err(),
+            "expired regional intent must not fall through to Reader"
+        );
+        assert!(!slot.pending(), "owned expired record may be retired");
+    }
+    #[test]
+    fn ordinary_ingress_foreign_region_refuses_and_keeps_exact_bytes() {
+        let request = request();
+        let slot = FixtureSlot::new(request.clone());
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+        let path = lease.path.join(name(&lease));
+        let before = fs::read(&path).unwrap();
+        for (document, page) in [
+            (request.document, Uuid::new_v4()),
+            (Uuid::new_v4(), request.page),
+        ] {
+            assert!(
+                ordinary(&slot, document, page).is_err(),
+                "foreign-page regional intent must not fall through to Reader"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                before,
+                "foreign queued input must remain exact"
+            );
+        }
+    }
+    #[test]
+    fn ordinary_ingress_absent_slot_preserves_reader_none() {
+        let request = request();
+        let slot = FixtureSlot::new(request.clone());
+        slot.pin
+            .claim(request.document, request.page)
+            .unwrap()
+            .consume()
+            .unwrap();
+        assert!(ordinary(&slot, request.document, request.page)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn ordinary_ingress_refinement_retains_page_expiry_and_consume_behavior() {
+        let request = request();
+        let slot = FixtureSlot::new(request.clone());
+        let refinement = Request::Refine {
+            conversation: Uuid::new_v4(),
+            operation: Uuid::new_v4(),
+            request: "Make the note shorter".into(),
+            draft: Uuid::new_v4(),
+        };
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+        let path = lease.path.join(name(&lease));
+        let pending = Pending {
+            submission: Submission::RefineOnTablet {
+                document: request.document,
+                page: request.page,
+                refinement: refinement.clone(),
+            },
+            expires: boot_seconds().unwrap() + LIFETIME_SECS,
+            digest: String::new(),
+        };
+        files::atomic_json(&path, &pending).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(ordinary(&slot, request.document, Uuid::new_v4())
+            .unwrap()
+            .is_none());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let Some(InstalledRequest::Refine(received)) =
+            ordinary(&slot, request.document, request.page).unwrap()
+        else {
+            panic!("matching refinement was not delivered")
+        };
+        assert_eq!(
+            serde_json::to_vec(&received).unwrap(),
+            serde_json::to_vec(&refinement).unwrap()
+        );
+        assert!(!slot.pending());
+        files::atomic_json(&path, &pending).unwrap();
+        expire(&slot);
+        assert!(ordinary(&slot, request.document, request.page)
+            .unwrap()
+            .is_none());
+        assert!(!slot.pending());
     }
 }
