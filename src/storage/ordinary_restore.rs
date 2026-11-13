@@ -198,7 +198,12 @@ pub(super) fn load_archive(source: &Path) -> Result<(Backup, String)> {
     files::safe_path(source).map_err(|_| Refused::InvalidInput)?;
     let bytes = files::read(&source.join("backup.json"), MAX_METADATA as u64)
         .map_err(|_| Refused::Unavailable)?;
-    let raw = strict_json(&bytes).map_err(|_| Refused::InvalidInput)?;
+    Ok((parse_archive(source, &bytes)?.0, digest(&bytes)))
+}
+
+pub(super) fn parse_archive(source: &Path, bytes: &[u8]) -> Result<(Backup, BackupInspection)> {
+    require(bytes.len() <= MAX_METADATA, Refused::InvalidInput)?;
+    let raw = strict_json(bytes).map_err(|_| Refused::InvalidInput)?;
     require(raw.is_object(), Refused::InvalidInput)?;
     require(
         raw.get("format").and_then(Value::as_u64) == Some(u64::from(FORMAT))
@@ -219,9 +224,9 @@ pub(super) fn load_archive(source: &Path) -> Result<(Backup, String)> {
         crate::config::inspection::document(&serde_json::to_vec(config)?)
             .map_err(|_| Refused::InvalidInput)?;
     }
-    let backup: Backup = serde_json::from_slice(&bytes).map_err(|_| Refused::InvalidInput)?;
-    backup.inspect(source).map_err(|_| Refused::InvalidInput)?;
-    Ok((backup, digest(&bytes)))
+    let backup: Backup = serde_json::from_slice(bytes).map_err(|_| Refused::InvalidInput)?;
+    let inspection = backup.inspect(source).map_err(|_| Refused::InvalidInput)?;
+    Ok((backup, inspection))
 }
 fn staged_hash(backup: &Backup) -> Result<Option<String>> {
     backup
