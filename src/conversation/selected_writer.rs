@@ -6,17 +6,29 @@ use crate::storage::selection::{
 };
 use crate::storage::{MAX_METADATA, MAX_RECORD};
 use serde::Deserialize;
+mod regional;
+pub(crate) use regional::RegionalImage;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub enum SelectedWriterSource {
     Generate {
         normalized: NormalizedTextSource,
     },
+    GenerateRegion {
+        regional: SelectedRegionalSource,
+    },
     Refine {
         source: IntentRecordRef,
         draft: IntentRecordRef,
     },
 }
+/// Constructed only from the private selected regional resolver, never deserialized.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(transparent)]
+pub struct SelectedRegionalSource {
+    region: Box<target::RegionSource>,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct SelectedWriterPrepare {
     pub operation: Uuid,
@@ -76,6 +88,7 @@ pub enum SelectedWriterPublication {
 }
 pub struct SelectedWriterInput {
     pub source: NormalizedTextSource,
+    pub regional: Option<Box<target::RegionSource>>,
     pub prior: Option<Turn>,
     pub history: Vec<Turn>,
 }
@@ -162,16 +175,24 @@ fn record(
         Record::Root(x) => (x.id, Namespace::Conversation),
         Record::Turn(x) => (x.id, Namespace::Conversation),
         Record::NormalizedText(x) => (x.id, Namespace::Source),
+        Record::RegionSource(x) => (x.id, Namespace::Source),
         Record::Receipt(x) => (
             Ledger::receipt_id(x.acknowledgment.operation),
             Namespace::Conversation,
         ),
         _ => bail!("invalid selected Writer record"),
     };
+    let media = match &value {
+        Record::RegionSource(r) => r.media(),
+        _ => vec![],
+    };
+    let regional = matches!(&value, Record::RegionSource(_));
     let e = Envelope {
         envelope_version: FORMAT,
         namespace,
-        domain_schema_version: if namespace == Namespace::Source {
+        domain_schema_version: if regional {
+            target::SCHEMA
+        } else if namespace == Namespace::Source {
             TEXT_SOURCE_SCHEMA
         } else {
             SCHEMA
@@ -189,7 +210,7 @@ fn record(
         parents,
         kind: Kind::Value,
         payload: serde_json::to_value(value)?,
-        media_descriptors: vec![],
+        media_descriptors: media,
     };
     e.validate()?;
     Ledger::decode(&e)?;
@@ -221,6 +242,7 @@ fn source_input(
             history.push(t);
         }
     }
+    let mut regional = None;
     let (source, prior) = match &req.source {
         SelectedWriterSource::Generate { normalized } => {
             normalized.validate()?;
@@ -232,13 +254,30 @@ fn source_input(
             );
             (normalized.clone(), None)
         }
+        SelectedWriterSource::GenerateRegion { regional: admitted } => {
+            let value = &admitted.region;
+            value.validate()?;
+            ensure!(
+                value.conversation == root.id
+                    && value.turn == crate::writer::stage(req.operation, "user")
+                    && p.head(Namespace::Source, value.id).is_none(),
+                "regional Writer source ownership"
+            );
+            regional = Some(value.clone());
+            (value.normalized.clone(), None)
+        }
         SelectedWriterSource::Refine { source, draft } => {
             ensure!(
                 source.namespace == Namespace::Source && draft.namespace == Namespace::Conversation,
                 "selected Writer namespace"
             );
-            let Record::NormalizedText(s) = current(p, source)? else {
-                bail!("selected Writer source variant")
+            let s = match current(p, source)? {
+                Record::NormalizedText(s) => s.as_ref(),
+                Record::RegionSource(r) => {
+                    regional = Some(r.clone());
+                    &r.normalized
+                }
+                _ => bail!("selected Writer source variant"),
             };
             let Record::Turn(t) = current(p, draft)? else {
                 bail!("selected Writer draft variant")
@@ -253,7 +292,7 @@ fn source_input(
                     && t.sources == vec![s.id],
                 "selected Writer draft ownership"
             );
-            (s.as_ref().clone(), Some(t.clone()))
+            (s.clone(), Some(t.clone()))
         }
     };
     ensure!(
@@ -268,6 +307,7 @@ fn source_input(
         "selected Writer document ownership unavailable or foreign"
     );
     Ok(SelectedWriterInput {
+        regional,
         source,
         prior,
         history,
@@ -384,7 +424,16 @@ fn prepare_records_from_projection(
         BTreeSet::from([req.root.revision_id]),
         Record::Root(root),
     )?];
-    if matches!(req.source, SelectedWriterSource::Generate { .. }) {
+    if let Some(regional) = &input.regional {
+        if !matches!(req.source, SelectedWriterSource::Refine { .. }) {
+            records.push(record(
+                req.operation,
+                actor,
+                BTreeSet::new(),
+                Record::RegionSource(regional.clone()),
+            )?);
+        }
+    } else if matches!(req.source, SelectedWriterSource::Generate { .. }) {
         records.push(record(
             req.operation,
             actor,
@@ -575,11 +624,12 @@ impl SelectedAdmission {
         &self,
         store: &Store,
         selection: (&SelectionToken, &IntentRecordRef),
-        operation: Uuid,
-        fingerprint: &str,
-        timestamp: u64,
+        request: (Uuid, &str, u64),
         reads: &mut SelectedReadBudget,
+        progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<WriterNormalizationPrepared> {
+        progress()?;
+        let (operation, fingerprint, timestamp) = request;
         let (accepted, root_ref) = selection;
         ensure!(
             std::ptr::eq(store, self.writer_store().as_ref()) && accepted.scope() == self.scope(),
@@ -650,6 +700,7 @@ impl SelectedAdmission {
             .iter()
             .map(pending::pin)
             .collect::<Result<Vec<_>>>()?;
+        progress()?;
         let publication = store.commit_selected(accepted, operation, records, BTreeMap::new())?;
         let original = store
             .selected_receipt_with_budget(self.scope(), operation, reads)?
@@ -813,7 +864,9 @@ impl SelectedAdmission {
                 return Ok(history);
             }
             let _mode = self.reader_mode_lease()?;
-            self.prepare_writer_current(store, accepted, &req, &fingerprint, ms, None)
+            self.prepare_writer_current(store, accepted, &req, (&fingerprint, ms), None, || {
+                Ok(BTreeMap::new())
+            })
         })
     }
 
@@ -836,7 +889,14 @@ impl SelectedAdmission {
             IntentSelectionEvidence::from_token(accepted),
             req,
         ))?;
-        self.prepare_writer_current(store, accepted, req, &fingerprint, ms, Some(reads))
+        self.prepare_writer_current(
+            store,
+            accepted,
+            req,
+            (&fingerprint, ms),
+            Some(reads),
+            || Ok(BTreeMap::new()),
+        )
     }
 
     fn prepare_writer_current(
@@ -844,10 +904,11 @@ impl SelectedAdmission {
         store: &Store,
         accepted: &SelectionToken,
         req: &SelectedWriterPrepare,
-        fingerprint: &str,
-        ms: u64,
+        metadata: (&str, u64),
         mut reads: Option<&mut SelectedReadBudget>,
+        objects: impl FnOnce() -> Result<BTreeMap<String, Vec<u8>>>,
     ) -> Result<SelectedWriterPreparation> {
+        let (fingerprint, ms) = metadata;
         ensure!(
             std::ptr::eq(store, self.writer_store().as_ref()) && accepted.scope() == self.scope(),
             "foreign Writer selection"
@@ -872,8 +933,8 @@ impl SelectedAdmission {
             reads.as_deref_mut(),
         )?;
         // Unknown commit acknowledgment cannot mint a fresh model permit.
-        let published =
-            store.commit_selected(accepted, req.operation, records.clone(), BTreeMap::new())?;
+        let objects = objects()?;
+        let published = store.commit_selected(accepted, req.operation, records.clone(), objects)?;
         ensure!(!published.replayed, "Writer preparation replay");
         let after = self.writer_snapshot(store, reads)?;
         ensure!(
@@ -918,7 +979,10 @@ impl SelectedAdmission {
             )?,
             source: match &req.source {
                 SelectedWriterSource::Refine { source, .. } => source.clone(),
-                SelectedWriterSource::Generate { .. } => pin(Namespace::Source, input.source.id)?,
+                SelectedWriterSource::Generate { .. }
+                | SelectedWriterSource::GenerateRegion { .. } => {
+                    pin(Namespace::Source, input.source.id)?
+                }
             },
             refined_draft,
             preparation_fingerprint: fingerprint.into(),
@@ -1065,8 +1129,10 @@ fn prepared_input(
     let Record::Turn(user) = current(p, &prepared.user)? else {
         bail!("Writer prepared user variant")
     };
-    let Record::NormalizedText(source) = current(p, &prepared.source)? else {
-        bail!("Writer prepared source variant")
+    let (source, regional) = match current(p, &prepared.source)? {
+        Record::NormalizedText(s) => (s.as_ref(), None),
+        Record::RegionSource(r) => (&r.normalized, Some(r.clone())),
+        _ => bail!("Writer prepared source variant"),
     };
     let (_, Some(Record::Receipt(receipt))) = p
         .head(Namespace::Conversation, Ledger::receipt_id(user.exchange))
@@ -1126,7 +1192,8 @@ fn prepared_input(
         })
         .collect();
     Ok(SelectedWriterInput {
-        source: source.as_ref().clone(),
+        source: source.clone(),
+        regional,
         prior,
         history,
     })
@@ -1266,8 +1333,19 @@ impl SelectedAdmission {
         &self,
         store: &Store,
         f: SelectedWriterFinish,
+        reads: Option<&mut SelectedReadBudget>,
+        verify_new: impl FnOnce(&Store) -> Result<()>,
+    ) -> Result<SelectedWriterPublication> {
+        self.finish_writer_guarded_locked(store, f, reads, verify_new, || Ok(()))
+    }
+
+    pub(crate) fn finish_writer_guarded_locked(
+        &self,
+        store: &Store,
+        f: SelectedWriterFinish,
         mut reads: Option<&mut SelectedReadBudget>,
         verify_new: impl FnOnce(&Store) -> Result<()>,
+        before_commit: impl FnOnce() -> Result<()>,
     ) -> Result<SelectedWriterPublication> {
         ensure!(
             std::ptr::eq(store, self.writer_store().as_ref())
@@ -1336,6 +1414,7 @@ impl SelectedAdmission {
             f.updated_ms,
             store.actor_id,
         )?;
+        before_commit()?;
         let result =
             store.commit_selected(&f.prepared.accepted, f.operation, records, BTreeMap::new());
         let recovered = recover(store, reads)?;
@@ -1392,6 +1471,9 @@ fn historical_preparation(
         };
         let source = match &req.source {
             SelectedWriterSource::Generate { normalized } => pin(Namespace::Source, normalized.id)?,
+            SelectedWriterSource::GenerateRegion { regional } => {
+                pin(Namespace::Source, regional.region.id)?
+            }
             SelectedWriterSource::Refine { source, .. } => source.clone(),
         };
         let refined_draft = match &req.source {

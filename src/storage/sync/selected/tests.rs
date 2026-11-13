@@ -1271,3 +1271,5 @@ fn resident_reader_fixture_generated(
 mod notebook;
 
 mod recovery;
+
+mod regional_writer;

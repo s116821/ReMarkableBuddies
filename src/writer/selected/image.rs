@@ -10,7 +10,14 @@ use crate::{
         ObjectRef,
     },
 };
-use std::{cell::Cell, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    time::{Duration, Instant},
+};
+pub(crate) mod regional;
+pub(crate) use regional::run_target;
+pub use regional::WriterTargetRequest;
+use regional::{Input, SourceProof};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,8 +79,9 @@ type Memory<'a> = (
 pub(super) struct Continuation<'a> {
     preferences: &'a RequestPreferences,
     original: &'a SelectionToken,
-    target: &'a SelectedWriterImage,
-    reference: ObjectRef,
+    source: SourceProof<'a>,
+    canceled: Option<&'a dyn Fn() -> bool>,
+    completed: Cell<u8>,
     document: Uuid,
     handwriting: Option<ConfirmedContext>,
     memory_view: Option<crate::memory::QueryResult>,
@@ -82,6 +90,34 @@ pub(super) struct Continuation<'a> {
 }
 
 impl Continuation<'_> {
+    fn check_time(&self) -> Result<()> {
+        self.check_phase_time(None)
+    }
+
+    fn check_phase_time(&self, phase: Option<NotebookPhase>) -> Result<()> {
+        let offset = match (phase, self.completed.get()) {
+            (Some(NotebookPhase::Admission), _) => 60,
+            (_, 0) => 150,
+            (_, 1) => 240,
+            _ => 300,
+        };
+        self.check_cutoff(offset)
+    }
+
+    fn check_cutoff(&self, offset: u64) -> Result<()> {
+        if self.source.regional() {
+            ensure!(
+                !self.canceled.is_some_and(|c| c()),
+                "regional Writer canceled"
+            );
+            ensure!(
+                regional::now() < self.preferences.regional_cutoff(offset)?,
+                "regional Writer slot expired"
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn memory_view(&mut self) -> Option<crate::memory::QueryResult> {
         self.memory_view.take()
     }
@@ -90,6 +126,7 @@ impl Continuation<'_> {
         writer: &SelectedAdmission,
         token: &SelectionToken,
     ) -> Result<()> {
+        self.check_time()?;
         self.preferences.notebook_progress(writer, token)
     }
 
@@ -141,12 +178,16 @@ impl Continuation<'_> {
             memory.map(|(provider, view)| (provider, view, self.original)),
             self.handwriting.as_ref(),
             |store, reads| {
-                let image =
-                    writer.selected_writer_image_locked(store, token, root, self.target, reads)?;
-                ensure!(
-                    image.document == self.document && image.reference == self.reference,
-                    "selected Writer normalization source changed"
-                );
+                self.check_phase_time(Some(phase))?;
+                self.source
+                    .check(writer, store, token, root, reads, &mut || {
+                        #[cfg(test)]
+                        if matches!(phase, NotebookPhase::Admission) {
+                            regional::admission_recheck_for_test();
+                        }
+                        self.check_phase_time(Some(phase))
+                    })?;
+                self.check_phase_time(Some(phase))?;
                 run(store, reads)
             },
         )
@@ -165,6 +206,14 @@ impl Continuation<'_> {
             self.submitted.get() == stage,
             "selected Writer model stage out of order"
         );
+        self.check_time()?;
+        let deadline = if self.source.regional() {
+            self.preferences
+                .regional_cutoff(if stage == 0 { 150 } else { 240 })?
+                .min(regional::now() + Duration::from_secs(90))
+        } else {
+            self.preferences.writer_image_deadline()
+        };
         let response = engine.execute_with_deadline(
             progress,
             &mut |submit| {
@@ -174,21 +223,25 @@ impl Continuation<'_> {
                 );
                 self.stage.set(stage + 1);
                 self.phase(writer, selection, NotebookPhase::Handoff, memory, |_, _| {
-                    ensure!(
-                        Instant::now() < self.preferences.writer_image_deadline(),
-                        "Writer image model deadline"
-                    );
+                    ensure!(regional::now() < deadline, "Writer image model deadline");
                     submit()?;
                     self.submitted.set(stage + 1);
                     Ok(())
                 })
             },
-            self.preferences.writer_image_deadline(),
+            deadline,
         )?;
         ensure!(
             self.submitted.get() == stage + 1,
             "selected Writer result has no guarded handoff"
         );
+        if self.source.regional() {
+            ensure!(
+                regional::now() < deadline,
+                "regional Writer model slot expired"
+            );
+        }
+        self.completed.set(stage + 1);
         Ok(response)
     }
 
@@ -233,7 +286,15 @@ impl Continuation<'_> {
             (&token, &root),
             NotebookPhase::Publication,
             memory,
-            |store, reads| writer.finish_writer_locked(store, finish, Some(reads), |_| Ok(())),
+            |store, reads| {
+                writer.finish_writer_guarded_locked(
+                    store,
+                    finish,
+                    Some(reads),
+                    |_| Ok(()),
+                    || self.check_phase_time(Some(NotebookPhase::Publication)),
+                )
+            },
         )
     }
 }
@@ -247,7 +308,37 @@ pub(crate) fn run_image<E: LLMEngine>(
     memory: Option<&dyn crate::memory::Provider>,
     canceled: &mut dyn FnMut() -> bool,
 ) -> Result<SelectedReport> {
+    run_input(
+        writer,
+        selection,
+        Input::Capture(input),
+        engine,
+        preferences,
+        memory,
+        canceled,
+    )
+}
+
+fn run_input<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    selection: &Selection,
+    input: Input<'_>,
+    engine: &mut E,
+    preferences: RequestPreferences,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> Result<SelectedReport> {
+    let cancellation = RefCell::new(canceled);
+    let is_canceled = || (cancellation.borrow_mut())();
+    let mut canceled = || is_canceled();
+    let fields = input.fields();
     input.validate(&selection.root)?;
+    if input.regional() {
+        ensure!(
+            regional::now() < preferences.regional_cutoff(60)?,
+            "regional admission expired"
+        );
+    }
     preferences.require_writer(writer)?;
     ensure!(
         selection.refine.is_none()
@@ -260,7 +351,7 @@ pub(crate) fn run_image<E: LLMEngine>(
     );
     if let Some(memory) = memory {
         memory.require_selected_writer(writer)?;
-        ensure!(input.request.len() <= 2048, "Writer memory query bound");
+        ensure!(fields.request.len() <= 2048, "Writer memory query bound");
     }
     let _owner = Owner::acquire(writer.writer_store()).context("selected Writer busy")?;
     let check = || preferences.notebook_progress(writer, &selection.accepted);
@@ -276,33 +367,48 @@ pub(crate) fn run_image<E: LLMEngine>(
                     .selected_receipt_with_budget(writer.scope(), input.preparation(), reads)?
                     .is_none()
                     && store
-                        .selected_receipt_with_budget(writer.scope(), input.operation, reads)?
+                        .selected_receipt_with_budget(writer.scope(), fields.operation, reads)?
                         .is_none(),
                 "selected Writer image operation already has original evidence"
             );
-            writer.selected_writer_image_locked(
+            input.resolve(
+                writer,
                 store,
                 &selection.accepted,
                 &selection.root,
-                &input.image,
                 reads,
+                &mut || {
+                    ensure!(!canceled(), "regional Writer canceled");
+                    if input.regional() {
+                        ensure!(
+                            regional::now() < preferences.regional_cutoff(60)?,
+                            "regional admission expired"
+                        );
+                    }
+                    Ok(())
+                },
             )
         },
     )?;
-    let target = notebook::admit_target(input.image.page, frozen.png, &mut |_| {
+    let document_id = frozen.document();
+    let page_number = frozen.page();
+    let target = notebook::admit_target(page_number, frozen.png().to_vec(), &mut |_| {
         ensure!(!canceled(), "selected Writer image canceled");
         check()
     })?;
     ensure!(
-        target.sha256() == frozen.reference.sha256,
+        target.sha256() == frozen.image_sha(),
         "Writer normalization target differs"
     );
-    let handwriting =
-        preferences.capture_writer_handwriting(writer, &selection.accepted, target.sha256())?;
+    let handwriting = if input.regional() {
+        preferences.capture_writer_targets(writer, &selection.accepted, &frozen.exclusions())?
+    } else {
+        preferences.capture_writer_handwriting(writer, &selection.accepted, target.sha256())?
+    };
     let memory_view = memory
         .map(|provider| {
-            let mut query = crate::memory::Query::new(input.request.clone(), now());
-            query.document = Some(frozen.document);
+            let mut query = crate::memory::Query::new(fields.request.clone(), now());
+            query.document = Some(document_id);
             let view = provider.query_selected_notebook(&query, 2)?;
             ensure!(
                 view.selected(),
@@ -314,9 +420,12 @@ pub(crate) fn run_image<E: LLMEngine>(
     let receiving = Continuation {
         preferences: &preferences,
         original: &selection.accepted,
-        target: &input.image,
-        reference: frozen.reference,
-        document: frozen.document,
+        source: frozen,
+        canceled: input
+            .regional()
+            .then_some(&is_canceled as &dyn Fn() -> bool),
+        completed: Cell::new(0),
+        document: document_id,
         handwriting,
         memory_view,
         stage: Cell::new(0),
@@ -338,17 +447,16 @@ pub(crate) fn run_image<E: LLMEngine>(
             writer.prepare_writer_normalization_locked(
                 store,
                 (&selection.accepted, &selection.root),
-                input.preparation(),
-                &fingerprint,
-                now(),
+                (input.preparation(), &fingerprint, now()),
                 reads,
+                &mut || receiving.check_phase_time(Some(NotebookPhase::Admission)),
             )
         },
     )?;
     let (normalized, _) = notebook::normalize_admitted_with(
         receiving.document,
         &target,
-        &input.model_profile,
+        &fields.model_profile,
         context.filter(|context| !context.identity().examples.is_empty()),
         TranscriptionPolicy::WholePage,
         engine,
@@ -369,32 +477,43 @@ pub(crate) fn run_image<E: LLMEngine>(
     else {
         anyhow::bail!("selected Writer image did not normalize to a complete page");
     };
-    let text_scope = TextScope::Page {
-        page: input.image.page,
-    };
+    let mut page = page;
+    let extractor = page.document.extractor_revision.clone();
+    if let SourceProof::Regional(proof) = &receiving.source {
+        page.document.extractor_revision = format!(
+            "region-v1:{}",
+            digest(&serde_json::to_vec(&(&proof.reference, &extractor))?)
+        );
+    }
+    let text_scope = TextScope::Page { page: page_number };
     let normalized = NormalizedTextSource::new(
         root.record_id,
-        stage(input.operation, "user"),
+        stage(fields.operation, "user"),
         page.document.clone(),
         text_scope.clone(),
-        input.guidance.clone(),
+        fields.guidance.clone(),
     )?;
     let request = Request::Generate {
         conversation: root.record_id,
-        operation: input.operation,
-        request: input.request.clone(),
-        document: page.document,
+        operation: fields.operation,
+        request: fields.request.clone(),
+        document: page.document.clone(),
         selection: text_scope,
-        guidance: input.guidance.clone(),
+        guidance: fields.guidance.clone(),
     };
     request
         .preflight()
         .map_err(|_| anyhow::anyhow!("normalized Writer source refused"))?;
     let prepare = SelectedWriterPrepare {
-        operation: input.operation,
+        operation: fields.operation,
         root: root.clone(),
-        request: input.request.clone(),
-        source: SelectedWriterSource::Generate { normalized },
+        request: fields.request.clone(),
+        source: receiving.source.writer_source(
+            normalized,
+            &page,
+            &extractor,
+            &fields.model_profile,
+        )?,
     };
     ensure!(!canceled(), "selected Writer image canceled");
     let prepared = receiving.phase(
@@ -403,7 +522,22 @@ pub(crate) fn run_image<E: LLMEngine>(
         NotebookPhase::Publication,
         memory_pin,
         |store, reads| {
-            writer.prepare_normalized_writer_locked(store, &token, &prepare, now(), reads)
+            if let SourceProof::Regional(proof) = &receiving.source {
+                ensure!(
+                    regional::now() < preferences.regional_cutoff(150)?,
+                    "regional normalization result expired"
+                );
+                writer.prepare_regional_writer_locked(
+                    store,
+                    &token,
+                    &prepare,
+                    (&proof.png, now()),
+                    reads,
+                    &mut || receiving.check_cutoff(150),
+                )
+            } else {
+                writer.prepare_normalized_writer_locked(store, &token, &prepare, now(), reads)
+            }
         },
     );
     let personalization = preferences.config().personalization_snapshot()?;
@@ -416,8 +550,8 @@ pub(crate) fn run_image<E: LLMEngine>(
             shared: Some(&preferences),
         },
         memory,
-        canceled,
-        &input.request,
+        &mut canceled,
+        &fields.request,
         prepared,
         Some(receiving),
     ))

@@ -25,6 +25,7 @@ enum ConversationOperation {
     WriterInspect,
     WriterGenerate,
     WriterGenerateImage,
+    WriterGenerateTarget,
     WriterRefine,
     WriterRecover,
     TargetChange,
@@ -386,6 +387,9 @@ fn main() -> Result<()> {
             ConversationOperation::WriterGenerate => Some(selected_writer::Operation::Generate),
             ConversationOperation::WriterGenerateImage => {
                 Some(selected_writer::Operation::GenerateImage)
+            }
+            ConversationOperation::WriterGenerateTarget => {
+                Some(selected_writer::Operation::GenerateTarget)
             }
             ConversationOperation::WriterRefine => Some(selected_writer::Operation::Refine),
             ConversationOperation::WriterRecover => Some(selected_writer::Operation::Recover),

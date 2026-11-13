@@ -169,6 +169,15 @@ impl DetachedPreferences {
     }
 }
 impl RequestPreferences {
+    #[cfg(test)]
+    pub(super) fn exhaust_phase_reads_for_test(&self, phase: NotebookPhase) {
+        let budget = match phase {
+            NotebookPhase::Admission => &self.reads.admission,
+            NotebookPhase::Handoff => &self.reads.handoff,
+            NotebookPhase::Publication => &self.reads.finish,
+        };
+        assert!(budget.lock().unwrap().charge(u64::MAX, 0, 0, 0).is_err());
+    }
     pub(crate) fn open_writer_image(store: Arc<Store>, path: PathBuf) -> Result<Self> {
         ensure!(
             !store.ordinary_reader_family()?,
@@ -214,6 +223,23 @@ impl RequestPreferences {
         token: &SelectionToken,
         target: &str,
     ) -> Result<Option<crate::handwriting::ConfirmedContext>> {
+        self.capture_writer_targets(writer, token, &BTreeSet::from([target.to_owned()]))
+    }
+
+    pub(crate) fn regional_cutoff(&self, offset: u64) -> Result<Instant> {
+        ensure!(
+            self.deadline.duration_since(self.admission_deadline) == Duration::from_secs(240),
+            "regional Writer requires original image policy"
+        );
+        Ok(self.admission_deadline - Duration::from_secs(60) + Duration::from_secs(offset))
+    }
+
+    pub(crate) fn capture_writer_targets(
+        &self,
+        writer: &SelectedAdmission,
+        token: &SelectionToken,
+        targets: &BTreeSet<String>,
+    ) -> Result<Option<crate::handwriting::ConfirmedContext>> {
         self.require_writer(writer)?;
         let config = &self.effective.handwriting;
         if !config.enabled {
@@ -235,7 +261,7 @@ impl RequestPreferences {
             &self.store,
             &self.binding,
             profile,
-            &BTreeSet::from([target.to_owned()]),
+            targets,
             &[writer, &self.admission],
             &mut reads,
             |store, reads| {

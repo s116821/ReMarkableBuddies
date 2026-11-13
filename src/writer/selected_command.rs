@@ -27,6 +27,7 @@ pub enum Operation {
     Inspect,
     Generate,
     GenerateImage,
+    GenerateTarget,
     Refine,
     Recover,
 }
@@ -36,6 +37,7 @@ impl Operation {
             Self::Inspect => "writer-inspect",
             Self::Generate => "writer-generate",
             Self::GenerateImage => "writer-generate-image",
+            Self::GenerateTarget => "writer-generate-target",
             Self::Refine => "writer-refine",
             Self::Recover => "writer-recover",
         }
@@ -69,6 +71,41 @@ struct ImageInput {
     expected: Expected,
     root: IntentRecordRef,
     request: selected::WriterImageRequest,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetInput {
+    wire_version: u32,
+    expected: Expected,
+    root: IntentRecordRef,
+    request: selected::WriterTargetRequest,
+}
+enum ImageRequest {
+    Capture(selected::WriterImageRequest),
+    Regional(selected::WriterTargetRequest),
+}
+struct ImageCommand {
+    expected: Expected,
+    root: IntentRecordRef,
+    request: ImageRequest,
+}
+impl ImageRequest {
+    fn preparation(&self) -> Uuid {
+        match self {
+            Self::Capture(r) => r.preparation(),
+            Self::Regional(r) => r.preparation(),
+        }
+    }
+    fn preparation_fingerprint(
+        &self,
+        root: &IntentRecordRef,
+        selection: &IntentSelectionEvidence,
+    ) -> Result<String> {
+        match self {
+            Self::Capture(r) => r.preparation_fingerprint(root, selection),
+            Self::Regional(r) => r.preparation_fingerprint(root, selection),
+        }
+    }
 }
 impl ImageInput {
     fn validate(&self) -> Result<()> {
@@ -363,7 +400,27 @@ pub fn run(
     };
     let image = if op == Operation::GenerateImage {
         match serde_json::from_slice::<ImageInput>(&bytes) {
-            Ok(i) if i.validate().is_ok() => Some(i),
+            Ok(i) if i.validate().is_ok() => Some(ImageCommand {
+                expected: i.expected,
+                root: i.root,
+                request: ImageRequest::Capture(i.request),
+            }),
+            _ => return Report::new(op, "invalid-input"),
+        }
+    } else if op == Operation::GenerateTarget {
+        match serde_json::from_slice::<TargetInput>(&bytes) {
+            Ok(i)
+                if i.wire_version == 1
+                    && storage::valid_digest(&i.expected.raw_head_sha256)
+                    && i.expected.selection.validate().is_ok()
+                    && i.request.validate(&i.root).is_ok() =>
+            {
+                Some(ImageCommand {
+                    expected: i.expected,
+                    root: i.root,
+                    request: ImageRequest::Regional(i.request),
+                })
+            }
             _ => return Report::new(op, "invalid-input"),
         }
     } else {
@@ -554,7 +611,7 @@ fn run_image_command(
     store: Arc<Store>,
     writer: SelectedAdmission,
     mode: SyncModeLease,
-    input: ImageInput,
+    input: ImageCommand,
 ) -> Result<Report> {
     let mut reads = allowance();
     // An acknowledged original is terminal, even when the saved selection is stale.
@@ -581,9 +638,10 @@ fn run_image_command(
         store.clone(),
         config_path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into()),
     )?;
-    let accepted = SelectedAdmission::with_gates(&[&writer], |store| {
+    let regional = matches!(&input.request, ImageRequest::Regional(_));
+    let verify = |store: &Store, reads: &mut SelectedReadBudget| -> Result<SelectionToken> {
         let read = store
-            .selected_snapshot_with_budget(writer.scope(), MAX_ITEMS, &mut reads)?
+            .selected_snapshot_with_budget(writer.scope(), MAX_ITEMS, reads)?
             .context("Writer image selection absent")?;
         ensure!(
             IntentSelectionEvidence::from_token(&read.snapshot.token) == input.expected.selection
@@ -591,7 +649,19 @@ fn run_image_command(
             "Writer image expected selection differs"
         );
         Ok(read.snapshot.token)
-    })?;
+    };
+    let accepted = if regional {
+        preferences.with_document_phase(
+            &writer,
+            None,
+            crate::storage::sync::selected::NotebookPhase::Admission,
+            None,
+            None,
+            verify,
+        )?
+    } else {
+        SelectedAdmission::with_gates(&[&writer], |store| verify(store, &mut reads))?
+    };
     let config = preferences.config();
     ensure!(
         config.admits_writer(false),
@@ -626,16 +696,25 @@ fn run_image_command(
         .enable_all()
         .build()?;
     let received = runtime.block_on(async move {
-        let mut work = tokio::task::spawn_blocking(move || {
-            selected::run_image(
+        let mut work = tokio::task::spawn_blocking(move || match input.request {
+            ImageRequest::Capture(request) => selected::run_image(
                 &worker_writer,
                 &selection,
-                &input.request,
+                &request,
                 &mut engine,
                 preferences,
                 memory.as_deref(),
                 &mut || canceled.load(Ordering::Acquire),
-            )
+            ),
+            ImageRequest::Regional(request) => selected::run_target(
+                &worker_writer,
+                &selection,
+                &request,
+                &mut engine,
+                preferences,
+                memory.as_deref(),
+                &mut || canceled.load(Ordering::Acquire),
+            ),
         });
         tokio::select! {
             result = &mut work => result,

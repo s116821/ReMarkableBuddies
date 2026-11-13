@@ -256,6 +256,17 @@ pub fn parse_draft(text: &str) -> Result<(&str, &str)> {
     );
     Ok((title, body))
 }
+fn present_regional_draft(body: &str, about: &str) -> Result<String> {
+    let (title, markdown) = parse_draft(body)?;
+    ensure!(
+        !markdown.lines().any(|line| line.starts_with("About: ")),
+        "model supplied reserved About presentation"
+    );
+    let decorated = format!("# {title}\n\n{about}\n\n{markdown}");
+    parse_draft(&decorated)?;
+    Ok(decorated)
+}
+
 fn selected(
     ledger: &Ledger,
     conversation: Uuid,
@@ -719,12 +730,7 @@ fn run_owned_source<E: LLMEngine>(
     }
     let response = response.and_then(|body| {
         if let Some(region) = &source.region {
-            let (title, markdown) = parse_draft(&body)?;
-            ensure!(
-                !markdown.lines().any(|line| line.starts_with("About: ")),
-                "model supplied reserved About presentation"
-            );
-            Ok(format!("# {title}\n\n{}\n\n{markdown}", region.about))
+            present_regional_draft(&body, &region.about)
         } else {
             Ok(body)
         }

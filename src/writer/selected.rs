@@ -7,8 +7,12 @@ use crate::conversation::{
 use crate::storage::selection::{SelectionToken, SelectionTransaction};
 
 mod image;
-pub(crate) use image::run_image;
-pub use image::WriterImageRequest;
+#[cfg(test)]
+pub(crate) use image::regional::{
+    advance_at_admission_recheck_for_test, advance_for_test, clock_for_test,
+};
+pub(crate) use image::{run_image, run_target};
+pub use image::{WriterImageRequest, WriterTargetRequest};
 
 pub struct Selection {
     pub accepted: SelectionToken,
@@ -241,6 +245,7 @@ fn finish_run<E: LLMEngine>(
         Err(_) => return result(Report::refused(request, Failure::Storage)),
     };
     let mut memory_view = image.as_mut().and_then(image::Continuation::memory_view);
+    let mut regional_about = None;
     let mut failure = None;
     let mut was_canceled = false;
     let response = (|| -> Result<String> {
@@ -254,6 +259,7 @@ fn finish_run<E: LLMEngine>(
         let history_bytes = input.history.iter().try_fold(0usize, |total, turn| {
             total.checked_add(turn.text.as_ref().map_or(0, String::len))
         });
+        regional_about = input.regional.as_ref().map(|r| r.about.clone());
         if input.history.len() > 64 || history_bytes.is_none_or(|bytes| bytes > MAX_HISTORY) {
             failure = Some(Failure::TooLarge);
             anyhow::bail!("selected Writer history bound");
@@ -364,6 +370,15 @@ fn finish_run<E: LLMEngine>(
         progress()?;
         output
     })();
+    let response = response.and_then(|body| {
+        if let Some(about) = &regional_about {
+            present_regional_draft(&body, about).inspect_err(|_| {
+                failure = Some(Failure::InvalidOutput);
+            })
+        } else {
+            Ok(body)
+        }
+    });
     let (outcome, body, status) = if was_canceled {
         (Outcome::Canceled, None, Status::Canceled)
     } else {
