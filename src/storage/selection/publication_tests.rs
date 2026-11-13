@@ -364,6 +364,101 @@ fn selected_guard_checks_cross_scope_and_ordinary_prerequisites() {
 }
 
 #[test]
+fn selected_handoff_checks_current_token_operation_and_deadline_under_store_mutex() {
+    let f = Fixture::new();
+    let store = f.store();
+    let source_scope = scope();
+    let other_scope = scope();
+    let source = record(&store);
+    let other = record(&store);
+    let original = initialize(&store, &source_scope, std::slice::from_ref(&source));
+    let foreign = initialize(&store, &other_scope, std::slice::from_ref(&other));
+    let child = store
+        .commit_selected(
+            &original.token,
+            Uuid::new_v4(),
+            vec![edit(&source)],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let parent = Uuid::new_v4();
+
+    let mut reads = publication_reads();
+    let require_mutex = || {
+        assert!(matches!(
+            store.inner.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+    };
+    let returned = store
+        .with_selected_operation_absent(
+            &child.token,
+            parent,
+            &mut reads,
+            || {
+                require_mutex();
+                Ok(())
+            },
+            || {
+                require_mutex();
+                Ok("submitted")
+            },
+        )
+        .unwrap();
+    assert_eq!(returned, "submitted");
+    assert!(store.inner.try_lock().is_ok());
+    assert!(reads.usage().aggregates >= 2);
+    assert!(store
+        .selected_receipt(&source_scope, parent)
+        .unwrap()
+        .is_none());
+
+    let mut reads = publication_reads();
+    let expired: Result<()> = store.with_selected_operation_absent(
+        &child.token,
+        parent,
+        &mut reads,
+        || anyhow::bail!("fixture expired after inventory verification"),
+        || panic!("expired handoff submitted"),
+    );
+    assert!(expired.unwrap_err().to_string().contains("fixture expired"));
+    assert!(reads.usage().aggregates >= 2);
+
+    let mut too_small = SelectedReadBudget::new(0, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    let exhausted: Result<()> = store.with_selected_operation_absent(
+        &child.token,
+        parent,
+        &mut too_small,
+        || panic!("exhausted handoff reached check"),
+        || panic!("exhausted handoff submitted"),
+    );
+    assert!(exhausted.is_err());
+    assert!(too_small.exhausted());
+    let stale: Result<()> = store.with_selected_operation_absent(
+        &original.token,
+        parent,
+        &mut publication_reads(),
+        || panic!("stale handoff reached check"),
+        || panic!("stale handoff submitted"),
+    );
+    assert!(stale.unwrap_err().to_string().contains("stale selection"));
+
+    // Another scope can accept the parent after this document's child.
+    store
+        .commit_selected(&foreign.token, parent, vec![edit(&other)], BTreeMap::new())
+        .unwrap();
+    let conflict: Result<()> = store.with_selected_operation_absent(
+        &child.token,
+        parent,
+        &mut publication_reads(),
+        || panic!("known parent reached check"),
+        || panic!("known parent submitted"),
+    );
+    assert!(conflict.unwrap_err().is::<LocalOperationConflict>());
+    assert_eq!(selected(&store, &source_scope).token, child.token);
+}
+
+#[test]
 fn all_activation_faults_reopen_old_or_complete_new_winner_and_retained_media() {
     for fault in [
         Fault::BeforeObjects,

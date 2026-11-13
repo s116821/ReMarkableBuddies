@@ -298,11 +298,7 @@ fn claim_local_operation(
     operation: Uuid,
     prerequisites: &[Uuid],
     budget: Option<&mut SelectedReadBudget>,
-    base_version: u32,
 ) -> Result<()> {
-    if budget.is_none() && base_version != COMPOUND_STORE_FORMAT {
-        return Ok(());
-    }
     let mut compatibility_budget;
     let budget = if let Some(budget) = budget {
         budget
@@ -320,6 +316,23 @@ fn claim_local_operation(
         }
         Ok(())
     })
+}
+
+fn require_unclaimed_indexed_operations(
+    index: &Index,
+    operations: impl IntoIterator<Item = Uuid>,
+) -> Result<()> {
+    for id in operations {
+        if index.operations.contains_key(&id)
+            || index
+                .manifests
+                .get(&id)
+                .is_some_and(|manifest| manifest.scope == Scope::LocalTransaction)
+        {
+            return Err(LocalOperationConflict.into());
+        }
+    }
+    Ok(())
 }
 
 struct CommitGuard<'a> {
@@ -698,28 +711,21 @@ impl Store {
             prerequisites.is_empty() || inner.index.unavailable == 0,
             "cannot verify selected commit prerequisites with unavailable history"
         );
-        if guard.is_some()
-            && std::iter::once(&transaction.operation)
-                .chain(prerequisites)
-                .any(|id| {
-                    inner.index.operations.contains_key(id)
-                        || inner
-                            .index
-                            .manifests
-                            .get(id)
-                            .is_some_and(|manifest| manifest.scope == Scope::LocalTransaction)
-                })
-        {
-            return Err(LocalOperationConflict.into());
+        if guard.is_some() {
+            require_unclaimed_indexed_operations(
+                &inner.index,
+                std::iter::once(transaction.operation).chain(prerequisites.iter().copied()),
+            )?;
         }
-        claim_local_operation(
-            root,
-            inner.generation,
-            transaction.operation,
-            prerequisites,
-            guard.as_mut().map(|g| &mut *g.reads),
-            base_version,
-        )?;
+        if guard.is_some() || base_version == COMPOUND_STORE_FORMAT {
+            claim_local_operation(
+                root,
+                inner.generation,
+                transaction.operation,
+                prerequisites,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
+        }
         if base_version == compound_generation::VERSION {
             compound_generation::validate_ready_with_budget(
                 &self.paths,
@@ -887,6 +893,45 @@ impl Store {
         media: BTreeMap<String, Vec<u8>>,
     ) -> Result<SelectionPublication> {
         self.commit_selected_inner(expected, operation, records, media, None)
+    }
+
+    /// Serialize an immediate handoff with publication of the same operation.
+    /// Both callbacks run under the Store mutex. They must avoid Store/gate
+    /// reentry and return before waiting for a provider response.
+    #[allow(
+        dead_code,
+        reason = "the regional Writer caller lands with the paired change"
+    )]
+    pub(crate) fn with_selected_operation_absent<T>(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        reads: &mut SelectedReadBudget,
+        check: impl FnOnce() -> Result<()>,
+        submit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        ensure!(!operation.is_nil(), "nil selected handoff operation");
+        expected.scope.validate()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.generation == expected.store_generation,
+            "stale selection token"
+        );
+        ensure!(
+            inner.index.unavailable == 0,
+            "cannot authorize selected handoff with unavailable history"
+        );
+        let root = self.generation(inner.generation);
+        let current = current_with_budget(&root, inner.generation, &expected.scope, Some(reads))?
+            .context("selected handoff scope is absent")?;
+        ensure!(token(&current)? == *expected, "stale selection token");
+        require_unclaimed_indexed_operations(&inner.index, [operation])?;
+        claim_local_operation(&root, inner.generation, operation, &[], Some(reads))?;
+        check()?;
+        submit()
     }
 
     /// Check time/cancellation under the publication mutex and after syncing the
