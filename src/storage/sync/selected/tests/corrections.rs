@@ -363,6 +363,15 @@ fn selected_handwriting_automatic_ranks_metadata_before_capped_sample_reads() {
 
 #[test]
 fn selected_handwriting_reader_uses_same_examples_and_refuses_stale_submission_and_result() {
+    check_selected_handwriting_reader(false);
+}
+
+#[test]
+fn selected_handwriting_promoted_reader_preserves_examples_and_fences_target_publication() {
+    check_selected_handwriting_reader(true);
+}
+
+fn check_selected_handwriting_reader(promote_targets: bool) {
     use crate::conversation::{
         fixture_defer_pending_for_worker, resident_capture::tests::capture_for,
         selected_reader_prepare::ResidentPrepared, Ledger, Outcome, Record,
@@ -417,14 +426,27 @@ fn selected_handwriting_reader_uses_same_examples_and_refuses_stale_submission_a
                 (self.replace)();
             }
             Ok(if stage == 0 {
-                "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n---\nANSWER: x = 7"
+                "QUESTION: What is x?\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\nTARGET_JSON: {\"subject\":\"Value of x\",\"geometry\":{\"components\":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},\"understanding\":{\"status\":\"interpreted\"}}\n---\nANSWER: x = 7"
             } else {
                 "TRANSCRIPTION: What is x?"
             }.into())
         }
     }
 
-    let f = CorrectionFixture::new();
+    let mut f = CorrectionFixture::new();
+    if promote_targets {
+        crate::storage::target_generation::prepare(
+            Arc::get_mut(&mut f.a).expect("fixture Store must be exclusively owned"),
+            &digest(b"synthetic selected Reader target configuration"),
+            crate::storage::target_generation::BaseKind::CompoundSelected,
+            |_| Ok(()),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        f.a.source_target_generation().unwrap().is_some(),
+        promote_targets
+    );
     let identity = catalog::Identity {
         group: f.binding.group,
         profile: f.owner.profile,
@@ -540,11 +562,27 @@ fn selected_handwriting_reader_uses_same_examples_and_refuses_stale_submission_a
             .any(
                 |record| matches!(record, Record::Turn(turn) if turn.outcome == Outcome::Generated),
             );
+        let targets = snapshot
+            .selected_records
+            .iter()
+            .filter_map(|record| match Ledger::decode(record).unwrap() {
+                Record::SourceTarget(target) if target.conversation == root => Some(target),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         if matches!(change, Change::None) {
             result.unwrap();
             assert_eq!(proof.len(), 2);
             assert_eq!(proof[0], proof[1]);
             assert!(generated);
+            assert_eq!(targets.len(), usize::from(promote_targets));
+            if let Some(target) = targets.first() {
+                assert_eq!(target.candidate.subject, "Value of x");
+                assert!(matches!(
+                    target.candidate.understanding,
+                    crate::conversation::target::Understanding::Interpreted
+                ));
+            }
         } else {
             assert_eq!(
                 proof.len(),
@@ -555,6 +593,7 @@ fn selected_handwriting_reader_uses_same_examples_and_refuses_stale_submission_a
                 }
             );
             assert!(!generated);
+            assert!(targets.is_empty(), "stale correction published a target");
             if matches!(change, Change::BeforeResult) {
                 assert!(format!("{:#}", result.unwrap_err()).contains("example changed"));
             }
