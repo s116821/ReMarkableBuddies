@@ -468,11 +468,16 @@ fn assert_ordinary_refuses(f: &Fixture, expected: &str) {
 }
 
 #[test]
-fn actual_normal_startup_refuses_nonordinary_mode_before_runtime_constructors() {
-    for mode in [isolated(), shared(Uuid::new_v4())] {
+fn actual_normal_startup_refuses_incompatible_mode_before_runtime_constructors() {
+    // Ordinary isolated mode is now a supported local runtime. This negative
+    // CLI fixture covers the incompatible legacy-publisher combination instead.
+    // Positive isolated admission/Dispatch is exercised without device constructors
+    // by the mode-maintenance library fixtures.
+    for (mode, legacy_sync) in [(isolated(), true), (shared(Uuid::new_v4()), false)] {
         let f = Fixture::new();
         let initial = f.initialize();
         assert_eq!(f.choose(&request(&initial, mode))["status"], "ok");
+        f.save_config(legacy_sync);
         assert_ordinary_refuses(&f, "ordinary Reader startup unsupported");
     }
     let f = Fixture::new();
