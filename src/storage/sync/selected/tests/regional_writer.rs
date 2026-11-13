@@ -589,17 +589,7 @@ fn run_cases(cases: &[Case]) {
             )
             .unwrap();
         }
-        let selection = if case == Case::ForeignParent {
-            let latest = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
-            Selection {
-                accepted: latest.token.clone(),
-                root: SelectedDomainProjection::from_snapshot(&latest)
-                    .unwrap()
-                    .current_reference(Namespace::Conversation, target.conversation)
-                    .unwrap(),
-                refine: None,
-            }
-        } else if case == Case::ClearedTarget {
+        let selection = if matches!(case, Case::ForeignParent | Case::ClearedTarget) {
             let latest = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
             Selection {
                 accepted: latest.token.clone(),
