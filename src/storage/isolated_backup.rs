@@ -223,6 +223,23 @@ pub(in crate::storage) struct PublicationSource {
     pub config_sha256: String,
 }
 
+impl PublicationSource {
+    pub(in crate::storage) fn same_generation_and_config(&self, other: &Self) -> bool {
+        self.generation == other.generation
+            && self.config_path == other.config_path
+            && self.config_sha256 == other.config_sha256
+    }
+}
+
+#[derive(Debug)]
+pub(in crate::storage) struct PublicationSourceChanged;
+impl std::fmt::Display for PublicationSourceChanged {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("original isolated source changed")
+    }
+}
+impl std::error::Error for PublicationSourceChanged {}
+
 fn publication_source(inner: &Inner, path: &Path, sha256: &str) -> Result<PublicationSource> {
     Ok(PublicationSource {
         generation: inner.generation,
@@ -343,6 +360,7 @@ impl Store {
             destination,
             saved_config,
             attempted_marker,
+            None,
             |_, _| Ok(()),
         )
     }
@@ -352,6 +370,7 @@ impl Store {
         lease: &sync::mode::SyncModeLease,
         destination: &Path,
         saved_config: &Path,
+        expected: &PublicationSource,
     ) -> Result<Option<(PublicationSource, String)>> {
         let mut source = None;
         let result = self.export_isolated_package_with(
@@ -359,6 +378,7 @@ impl Store {
             destination,
             saved_config,
             &mut None,
+            Some(expected),
             |_, captured| {
                 source = Some(captured);
                 Ok(())
@@ -407,6 +427,7 @@ impl Store {
         destination: &Path,
         saved_config: &Path,
         attempted_marker: &mut Option<String>,
+        expected: Option<&PublicationSource>,
         before_marker: impl FnOnce(&Path, PublicationSource) -> Result<()>,
     ) -> Result<Option<PackageInspection>> {
         ensure!(
@@ -415,6 +436,10 @@ impl Store {
         );
         self.with_isolated_snapshot(lease, destination, |inner, backup, bytes| {
             let (saved_path, original, artifact) = capture_saved(self, saved_config, destination)?;
+            let source = publication_source(inner, &saved_path, &original)?;
+            if expected.is_some_and(|expected| !expected.same_generation_and_config(&source)) {
+                return Err(PublicationSourceChanged.into());
+            }
             reserve_archive_root(destination)?;
             let data = destination.join(DATA);
             files::directory(&data.join(OBJECTS))?;
@@ -434,10 +459,7 @@ impl Store {
             let mut config_refused = false;
             let result = files::atomic_json_guarded(&destination.join(MARKER), &marker, || {
                 let check = (|| -> Result<()> {
-                    before_marker(
-                        destination,
-                        publication_source(inner, &saved_path, &original)?,
-                    )?;
+                    before_marker(destination, source)?;
                     ensure!(
                         canonical_archive_path(saved_config)? == saved_path
                             && digest(&files::read(saved_config, MAX_RECORD as u64)?) == original,
@@ -725,7 +747,7 @@ mod tests {
         fs::write(&conf, &exact).unwrap();
 
         assert!(source
-            .export_isolated_package_with(&lease, &root, &conf, &mut attempted, |path, _| {
+            .export_isolated_package_with(&lease, &root, &conf, &mut attempted, None, |path, _| {
                 assert!(path.join(DATA).join(BACKUP).is_file());
                 assert!(path.join(PREFERENCES).is_file());
                 assert!(!path.join(MARKER).exists());

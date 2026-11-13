@@ -1,7 +1,7 @@
 //! Upload-only ordinary isolated publisher under the existing Drive Worker.
 use super::*;
 use crate::storage::recovery::isolated_backup::{
-    package_members, PackageMembers, PublicationSource, MARKER,
+    package_members, PackageMembers, PublicationSource, PublicationSourceChanged, MARKER,
 };
 use serde_json::Value;
 
@@ -127,15 +127,6 @@ fn source_valid(source: &PublicationSource) -> bool {
 fn marker_valid(marker: &ObjectRef) -> bool {
     valid_digest(&marker.sha256) && (1..=16 * 1024).contains(&marker.bytes)
 }
-
-#[derive(Debug)]
-struct SourceChanged;
-impl std::fmt::Display for SourceChanged {
-    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.write_str("original isolated source changed")
-    }
-}
-impl std::error::Error for SourceChanged {}
 
 impl Checkpoint {
     fn predecessor(&self) -> &str {
@@ -351,11 +342,10 @@ impl Engine {
     }
 
     fn same_source(current: Result<Option<PublicationSource>>, source: &PublicationSource) -> bool {
-        current.ok().flatten().is_some_and(|current| {
-            source.generation == current.generation
-                && source.config_path == current.config_path
-                && source.config_sha256 == current.config_sha256
-        })
+        current
+            .ok()
+            .flatten()
+            .is_some_and(|current| source.same_generation_and_config(&current))
     }
 
     fn check_latest(&mut self) -> Result<()> {
@@ -424,6 +414,14 @@ impl Engine {
     }
 
     fn stage(&mut self, attempt: &Attempt) -> Result<Status> {
+        self.stage_after_check(attempt, || Ok(()))
+    }
+
+    fn stage_after_check(
+        &mut self,
+        attempt: &Attempt,
+        before_capture: impl FnOnce() -> Result<()>,
+    ) -> Result<Status> {
         let root = self.staging.join(attempt.id.to_string());
         if !integrity(absent(&root))? {
             // An interrupted local package with no journaled marker cannot
@@ -434,12 +432,21 @@ impl Engine {
             self.stale = true;
             return Ok(Status::Pending);
         }
-        let Some((source, digest)) = integrity(self.store.freeze_isolated_package(
+        before_capture()?;
+        let captured = self.store.freeze_isolated_package(
             &self.lease,
             &root,
             &self.saved_config,
-        ))?
-        else {
+            &attempt.source,
+        );
+        if captured
+            .as_ref()
+            .is_err_and(|error| error.is::<PublicationSourceChanged>())
+        {
+            self.stale = true;
+            return Ok(Status::Pending);
+        }
+        let Some((source, digest)) = integrity(captured)? else {
             return Err(InvalidRemoteData.into());
         };
         let package = integrity(package_members(&root, &digest))?;
@@ -507,12 +514,12 @@ impl Engine {
                             .isolated_publication_source(&self.lease, &self.saved_config),
                         &attempt.source,
                     ) {
-                        return Err(SourceChanged.into());
+                        return Err(PublicationSourceChanged.into());
                     }
                     Ok(())
                 });
         let progress = match progress {
-            Err(error) if error.is::<SourceChanged>() => {
+            Err(error) if error.is::<PublicationSourceChanged>() => {
                 self.stale = true;
                 return Ok(false);
             }
@@ -663,13 +670,17 @@ impl Engine {
         self.members = None;
         self.checked = 0;
         self.observe_cursor = 0;
-        Ok(if self.stale {
+        Ok(self.settled_status(&attempt.source, complete))
+    }
+
+    fn settled_status(&self, source: &PublicationSource, complete: bool) -> Status {
+        if self.current_source().ok().flatten().as_ref() != Some(source) {
             Status::Pending
         } else if complete {
             Status::Current
         } else {
             Status::IncompleteMedia
-        })
+        }
     }
 
     fn publish_marker(&mut self, attempt: &Attempt, marker: ObjectRef) -> Result<Status> {
@@ -729,11 +740,7 @@ impl Engine {
                 self.save()?;
                 self.members = None;
                 self.checked = 0;
-                return Ok(if complete {
-                    Status::Current
-                } else {
-                    Status::IncompleteMedia
-                });
+                return Ok(self.settled_status(&attempt.source, complete));
             }
         }
         if let Some(id) = &attempt.marker_id {

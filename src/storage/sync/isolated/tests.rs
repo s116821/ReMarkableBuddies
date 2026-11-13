@@ -639,3 +639,70 @@ fn stale_config_cannot_create_absent_marker_and_original_binding_must_match() {
         .unwrap();
     assert!(local.engine(local.group).is_err());
 }
+
+#[test]
+fn changed_config_between_admission_and_capture_cannot_replace_original() {
+    let local = Local::new();
+    local.commit();
+    let mut engine = local.engine(local.group).unwrap();
+    assert_eq!(engine.step().unwrap(), Status::Pending);
+    let original = engine.state.attempt.as_ref().unwrap().clone();
+    let path = engine.saved_config.clone();
+    let exact = fs::read(&path).unwrap();
+    let status = engine
+        .stage_after_check(&original, || {
+            let mut changed = exact.clone();
+            changed.push(b'\n');
+            fs::write(&path, changed)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(status, Status::Pending);
+    assert!(engine.stale);
+    let retained = Engine::read_checkpoint(&engine.checkpoint, &local.binding)
+        .unwrap()
+        .attempt
+        .unwrap();
+    assert_eq!(retained.id, original.id);
+    assert!(retained.source == original.source && retained.marker.is_none());
+    assert!(!engine.staging.join(original.id.to_string()).exists());
+    assert!(local.wire.uploads_sent().is_empty());
+    fs::write(&path, exact).unwrap();
+    Local::finish(&mut engine);
+    assert_eq!(engine.state.settled_stage, Some(original.id));
+}
+
+#[test]
+fn commits_during_publication_leave_frozen_revision_verified_and_new_work_pending() {
+    let local = Local::new();
+    local.commit();
+    let mut engine = local.engine(local.group).unwrap();
+    Local::advance(&mut engine, |engine, _| {
+        engine
+            .state
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.marker_observed)
+    });
+    let original = engine.state.attempt.as_ref().unwrap().clone();
+    local.commit();
+    for _ in 0..16 {
+        assert_eq!(engine.step().unwrap(), Status::Pending);
+        if engine.state.settled_stage == Some(original.id) {
+            break;
+        }
+    }
+    assert_eq!(engine.state.settled_stage, Some(original.id));
+    let verified = engine.state.latest.as_ref().unwrap();
+    assert_eq!(&verified.marker, original.marker.as_ref().unwrap());
+    assert_eq!(
+        engine.health(Status::Pending)["latest_verified"]["marker_sha256"],
+        verified.marker.sha256
+    );
+    let first_digest = verified.marker.sha256.clone();
+    Local::finish(&mut engine);
+    assert_ne!(
+        engine.state.latest.as_ref().unwrap().marker.sha256,
+        first_digest
+    );
+}

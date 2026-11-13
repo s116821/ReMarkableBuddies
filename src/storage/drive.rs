@@ -732,9 +732,6 @@ impl GoogleDrive {
     }
 }
 
-#[cfg(test)]
-#[path = "drive_tests.rs"]
-mod tests;
 impl DriveTransport for GoogleDrive {
     fn authorize(&mut self, collection: Uuid) -> Result<()> {
         ensure!(
@@ -862,3 +859,7 @@ impl DriveTransport for GoogleDrive {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "drive_tests.rs"]
+mod tests;
