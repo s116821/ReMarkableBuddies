@@ -281,6 +281,28 @@ fn publisher_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn read_publisher_custody(directory: &Path) -> Result<Option<Custody>> {
+    let namespace = directory
+        .parent()
+        .context("isolated checkpoint parent missing")?;
+    // Windows may report NotFound for a child of a regular file. Check
+    // each owned directory itself before treating an absent child as new.
+    for parent in [namespace, directory] {
+        if absent(parent)? {
+            return Ok(None);
+        }
+        ensure!(
+            fs::symlink_metadata(parent)?.is_dir(),
+            "invalid publisher directory"
+        );
+    }
+    let checkpoint = directory.join("publisher.json");
+    if absent(&checkpoint)? {
+        return Ok(None);
+    }
+    read_private(&checkpoint).map(Some)
+}
+
 fn map_provider(error: anyhow::Error, unknown: bool) -> State {
     if error.is::<InvalidRemoteData>() {
         return State::RecoveryRequired;
@@ -577,11 +599,7 @@ pub(in crate::storage::sync) fn launch_rooted(
     let directory = checkpoint_dir(&store, backup);
     let path = directory.join("publisher.json");
     let reservations = mode::isolated_reservations(&store, backup)?;
-    let state = match absent(&path) {
-        Ok(true) => None,
-        Ok(false) => Some(read_private::<Custody>(&path)),
-        Err(error) => Some(Err(error)),
-    };
+    let state = read_publisher_custody(&directory).transpose();
     let (state, reason, status) = match state {
         Some(Ok(Custody::Publisher(publisher))) => {
             if publisher.validate(&publisher.binding).is_err()
