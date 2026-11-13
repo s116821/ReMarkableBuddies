@@ -90,7 +90,10 @@ fn root_lost_ack_reopens_original_and_worker_publishes_existing_v1_package() {
     let path = test.checkpoint(&unknown);
     let candidate: Candidate = read_private(&path).unwrap();
     let root_id = candidate.root.unwrap();
-    assert_eq!(test.wire.slot_posts(), [root_id.clone()]);
+    assert_eq!(
+        test.wire.slot_posts().as_slice(),
+        std::slice::from_ref(&root_id)
+    );
     assert!(test.store.sync_mode_snapshot().unwrap().token == token);
     let Setup {
         root,
@@ -111,7 +114,10 @@ fn root_lost_ack_reopens_original_and_worker_publishes_existing_v1_package() {
     assert!(test.store.sync_mode_snapshot().unwrap().token == token);
     let confirmed = test.execute(&original);
     assert_eq!(confirmed.outcome, State::RootVerified);
-    assert_eq!(test.wire.slot_posts(), [root_id.clone()]);
+    assert_eq!(
+        test.wire.slot_posts().as_slice(),
+        std::slice::from_ref(&root_id)
+    );
     assert_eq!(test.allocations(), 1);
     let published: Checkpoint = read_private(&path).unwrap();
     assert_eq!(published.binding.root, root_id);

@@ -102,7 +102,7 @@ struct Candidate {
 #[serde(untagged)]
 enum Custody {
     Candidate(Candidate),
-    Publisher(Checkpoint),
+    Publisher(Box<Checkpoint>),
 }
 
 #[derive(Debug)]
@@ -412,7 +412,7 @@ fn advance(
             advance_candidate(store, request, original, &path, candidate, &mut drive)
         }
         Custody::Publisher(checkpoint) => {
-            advance_verified(store, request, original, &path, checkpoint, &mut drive)
+            advance_verified(store, request, original, &path, *checkpoint, &mut drive)
         }
     }
 }
@@ -611,13 +611,13 @@ pub(in crate::storage::sync) fn launch_rooted(
                 (None, "root-custody-invalid", Status::RecoveryRequired)
             } else if !publisher.binding.matches(&store, &snapshot) {
                 (
-                    Some(publisher),
+                    Some(*publisher),
                     "root-admission-stale",
                     Status::RecoveryRequired,
                 )
             } else {
                 (
-                    Some(publisher),
+                    Some(*publisher),
                     "authorization-required",
                     Status::AuthorizationRequired,
                 )
