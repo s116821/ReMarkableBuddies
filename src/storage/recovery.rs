@@ -5,6 +5,8 @@ pub(crate) mod ordinary_export;
 #[path = "ordinary_restore.rs"]
 pub(crate) mod ordinary_restore;
 
+#[path = "isolated_backup.rs"]
+mod isolated_backup;
 #[path = "notebook_backup.rs"]
 pub(crate) mod notebook_backup;
 
@@ -280,17 +282,35 @@ impl Store {
         lease: &sync::mode::SyncModeLease,
         destination: &Path,
     ) -> Result<Option<BackupInspection>> {
-        files::safe_path(destination)?;
-        let canonical_destination = inspection::canonical_with_missing_tail(destination)
-            .context("isolated backup destination unavailable")?;
-        for owned in [&self.paths.data, &self.paths.cache, &self.paths.credentials] {
-            let canonical_owned =
-                inspection::canonical_with_missing_tail(owned).context("owned root unavailable")?;
-            let overlaps =
-                crate::restore_maintenance::overlap(&canonical_destination, &canonical_owned)
-                    .map_err(|_| anyhow::anyhow!("cannot compare isolated backup destination"))?;
-            ensure!(!overlaps, "isolated backup overlaps owned roots");
-        }
+        self.with_isolated_snapshot(lease, destination, |inner, backup, bytes| {
+            reserve_archive_root(destination)?;
+            files::directory(&destination.join("objects"))?;
+            self.export_write_locked(
+                inner,
+                destination,
+                backup,
+                bytes,
+                &mut false,
+                |path, bytes| {
+                    let report = backup.inspect(destination)?;
+                    files::atomic(path, bytes)?;
+                    Ok(report)
+                },
+            )
+        })
+    }
+
+    fn with_isolated_snapshot<T>(
+        &self,
+        lease: &sync::mode::SyncModeLease,
+        destination: &Path,
+        prepare: impl FnOnce(&Inner, &Backup, &[u8]) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let destination = canonical_archive_path(destination)?;
+        require_archive_disjoint(
+            &destination,
+            [&self.paths.data, &self.paths.cache, &self.paths.credentials].map(PathBuf::as_path),
+        )?;
         let inner = self
             .inner
             .lock()
@@ -318,29 +338,7 @@ impl Store {
             bytes.len() <= MAX_METADATA,
             "backup metadata exceeds supported restore bound"
         );
-        // Reserve the path exclusively so concurrent attempts cannot share it.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700).create(destination)?;
-        }
-        #[cfg(not(unix))]
-        fs::create_dir(destination)?;
-        files::sync_dir(destination.parent().context("export parent missing")?)?;
-        files::directory(&destination.join("objects"))?;
-        let report = self.export_write_locked(
-            &inner,
-            destination,
-            &backup,
-            &bytes,
-            &mut false,
-            |path, bytes| {
-                let report = backup.inspect(destination)?;
-                files::atomic(path, bytes)?;
-                Ok(report)
-            },
-        )?;
-        Ok(Some(report))
+        prepare(&inner, &backup, &bytes).map(Some)
     }
 
     fn export_policy(&self, destination: &Path, feedback: bool) -> Result<bool> {
@@ -954,6 +952,36 @@ impl Store {
         }
         Ok(digest(&bytes))
     }
+}
+
+fn reserve_archive_root(destination: &Path) -> Result<()> {
+    // Exclusive reservation gives this attempt custody of a private root.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(destination)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(destination)?;
+    files::sync_dir(destination.parent().context("export parent missing")?)
+}
+
+fn canonical_archive_path(path: &Path) -> Result<PathBuf> {
+    files::safe_path(path)?;
+    inspection::canonical_with_missing_tail(path).context("archive path unavailable")
+}
+
+fn require_archive_disjoint<'a>(
+    canonical: &Path,
+    others: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    for other in others {
+        let overlaps =
+            crate::restore_maintenance::overlap(canonical, &canonical_archive_path(other)?)
+                .map_err(|_| anyhow::anyhow!("cannot compare archive paths"))?;
+        ensure!(!overlaps, "isolated backup overlaps protected path");
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

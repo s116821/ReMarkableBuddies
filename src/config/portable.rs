@@ -76,12 +76,19 @@ impl Report {
     }
 }
 fn project(bytes: &[u8]) -> std::result::Result<Value, Status> {
-    let (_, raw) = inspection::document(bytes)?;
+    project_saved(bytes).map(|(_, artifact)| artifact)
+}
+
+pub(crate) fn project_saved(bytes: &[u8]) -> std::result::Result<(super::Config, Value), Status> {
+    let (config, raw) = inspection::document(bytes)?;
     let settings: Map<String, Value> = SETTINGS
         .into_iter()
         .filter_map(|key| raw.get(key).map(|v| (key.to_owned(), v.clone())))
         .collect();
-    Ok(json!({"portable_configuration_version": 1, "settings": settings}))
+    Ok((
+        config,
+        json!({"portable_configuration_version": 1, "settings": settings}),
+    ))
 }
 fn validate(bytes: &[u8]) -> std::result::Result<Value, Status> {
     if bytes.len() > MAX_IO {
