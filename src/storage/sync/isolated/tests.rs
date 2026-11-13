@@ -58,6 +58,7 @@ impl Local {
             latest: None,
             attempt: None,
             settled_stage: None,
+            provisioning: None,
         };
         files::create_identity(&dir.join("publisher.json"), &state).unwrap();
         Self {
@@ -125,6 +126,7 @@ impl Local {
             checked: 0,
             observe_cursor: 0,
             stale: false,
+            qualified_root: false,
             _publisher: publisher,
         })
     }

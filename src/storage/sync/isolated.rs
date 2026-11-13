@@ -5,6 +5,8 @@ use crate::storage::recovery::isolated_backup::{
 };
 use serde_json::Value;
 
+pub(crate) mod provision;
+
 type Properties = BTreeMap<String, String>;
 const CHECKPOINT_LIMIT: u64 = MAX_METADATA as u64;
 
@@ -102,6 +104,8 @@ struct Checkpoint {
     attempt: Option<Attempt>,
     // Cleanup applies only to a settled package, after the new head is durable.
     settled_stage: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provisioning: Option<provision::RootRecord>,
 }
 
 fn integrity<T>(result: Result<T>) -> Result<T> {
@@ -236,6 +240,7 @@ struct Engine {
     checked: usize,
     observe_cursor: usize,
     stale: bool,
+    qualified_root: bool,
     _publisher: File,
 }
 
@@ -245,25 +250,35 @@ struct Engine {
 )]
 impl Engine {
     fn read_checkpoint(path: &Path, binding: &Binding) -> Result<Checkpoint> {
-        let bytes = files::read(path, CHECKPOINT_LIMIT)?;
-        let value = crate::config::inspection::strict_json(&bytes)
-            .map_err(|_| anyhow::anyhow!("invalid isolated publisher checkpoint"))?;
-        let state: Checkpoint = serde_json::from_value(value)?;
+        let state: Checkpoint = read_private(path)?;
         state.validate(binding)?;
         Ok(state)
     }
 
     fn save(&self) -> Result<()> {
         integrity(self.state.validate(&self.binding))?;
-        let bytes = serde_json::to_vec(&self.state)?;
-        integrity(
-            (bytes.len() as u64 <= CHECKPOINT_LIMIT)
-                .then_some(())
-                .context("isolated publisher checkpoint bound"),
-        )?;
-        files::atomic(&self.checkpoint, &bytes)
+        write_private(&self.checkpoint, &self.state)
     }
+}
 
+fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = files::read(path, CHECKPOINT_LIMIT)?;
+    let value = crate::config::inspection::strict_json(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid isolated publisher checkpoint"))?;
+    Ok(serde_json::from_value(value)?)
+}
+
+fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    integrity(
+        (bytes.len() as u64 <= CHECKPOINT_LIMIT)
+            .then_some(())
+            .context("isolated publisher checkpoint bound"),
+    )?;
+    files::atomic(path, &bytes)
+}
+
+impl Engine {
     fn find(&mut self, properties: &Properties) -> Result<Found> {
         if &self.search.properties != properties {
             self.search = Search {
@@ -321,6 +336,20 @@ impl Engine {
     }
 
     fn authorized(&mut self) -> Result<()> {
+        if self.qualified_root {
+            integrity(
+                self.store
+                    .check_isolated_saved_config(&self.saved_config, &self.staging),
+            )?;
+            self.transport.qualify_isolated_grant(&self.binding.grant)?;
+            if !self
+                .transport
+                .observe_isolated_root(&self.binding.root, &self.binding.root_properties())?
+            {
+                return Err(InvalidRemoteData.into());
+            }
+            return Ok(());
+        }
         self.transport.authorize_grant(&self.binding.grant)?;
         if !self.transport.read_immutable(
             &self.binding.root,
@@ -774,6 +803,10 @@ impl Engine {
 
     fn step_inner(&mut self) -> Result<Status> {
         let state = integrity(Self::read_checkpoint(&self.checkpoint, &self.binding))?;
+        if self.qualified_root {
+            let record = integrity(state.provisioning.as_ref().context("root receipt missing"))?;
+            integrity(record.validate(&self.store, &self.binding))?;
+        }
         self.state = state;
         integrity(self.check_local_custody())?;
         if let Some(stage) = self.state.settled_stage {

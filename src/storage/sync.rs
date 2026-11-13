@@ -4,6 +4,7 @@
     allow(dead_code, reason = "isolated provider binding is unqualified")
 )]
 mod isolated;
+pub(crate) use isolated::provision as isolated_provision;
 pub mod mode;
 pub(crate) mod selected;
 use super::{drive::*, *};
@@ -815,7 +816,9 @@ impl Worker {
                 return Self::launch(store, policy, cancel, engine);
             }
             Some(mode::SyncMode::IsolatedBackup { backup, .. }) => {
-                return Self::isolated_unavailable(&store, snapshot.device, *backup);
+                // Saved Config custody is supplied by the ordinary entry point.
+                Self::isolated_unavailable(&store, snapshot.device, *backup);
+                return Ok(None);
             }
             None => {}
         }
@@ -844,11 +847,7 @@ impl Worker {
         }
     }
 
-    fn isolated_unavailable(
-        store: &Store,
-        device: Option<Uuid>,
-        backup: Uuid,
-    ) -> Result<Option<Self>> {
+    fn isolated_unavailable(store: &Store, device: Option<Uuid>, backup: Uuid) {
         if files::atomic_json(
             &store.paths.data.join("sync/health.json"),
             &json!({"version":1,"status":Status::UnsupportedOrCorrupt,
@@ -859,13 +858,12 @@ impl Worker {
         {
             log::warn!("Could not write isolated backup availability");
         }
-        Ok(None)
     }
 
     pub fn isolated(
         store: Arc<Store>,
         policy: SyncPolicy,
-        _saved_config: &Path,
+        saved_config: &Path,
     ) -> Result<Option<Self>> {
         // Production provisioning must establish exact provider custody before
         // any credential access or construction of the isolated upload engine.
@@ -877,7 +875,13 @@ impl Worker {
             !policy.enabled,
             "isolated mode requires legacy sync disabled"
         );
-        Self::isolated_unavailable(&store, snapshot.device, backup)
+        if isolated_provision::installed_eligible() {
+            let credentials = GoogleDrive::open(store.paths.credentials.join("drive.json"));
+            isolated_provision::launch_rooted(store, policy, saved_config, credentials)
+        } else {
+            Self::isolated_unavailable(&store, snapshot.device, backup);
+            Ok(None)
+        }
     }
 }
 impl Drop for Worker {

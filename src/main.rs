@@ -208,10 +208,10 @@ pub struct Args {
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
-    /// Explicit storage-mode maintenance or qualified group creation; no runtime activation
+    /// Explicit storage-mode maintenance or qualified provider control; no runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input"])]
     sync_mode_operation: Option<remarkable_reader_buddy::mode_maintenance::Operation>,
-    /// Bounded choice JSON; group creation requires exact-dash stdin
+    /// Bounded choice JSON; provider controls require exact-dash stdin
     #[arg(
         long,
         value_name = "FILE",

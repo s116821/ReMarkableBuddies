@@ -129,6 +129,7 @@ impl Fixture {
             token_url: format!("{base}/token"),
             request_deadline: None,
             request_cancel: None,
+            isolated_credential_revision: None,
         };
         Self {
             root,

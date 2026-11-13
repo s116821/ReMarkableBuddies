@@ -35,9 +35,10 @@ struct Model {
     expire_once: bool,
     lose_marker_once: bool,
     about_status: Option<u16>,
+    lose_root_once: bool,
     observer: Option<RequestObserver>,
 }
-pub(in crate::storage) struct Wire {
+pub(crate) struct Wire {
     base: String,
     model: Arc<Mutex<Model>>,
     stop: Arc<AtomicBool>,
@@ -102,6 +103,9 @@ impl Wire {
         client.token_url = format!("{}/token", self.base);
         client
     }
+    pub fn install_grant(&self, credential_path: PathBuf, group: Uuid) -> String {
+        self.client(credential_path, group).binding_digest()
+    }
     pub fn object(&self, id: &str, group: Uuid, bytes: Vec<u8>) {
         let tag = Tag {
             collection: group,
@@ -130,6 +134,9 @@ impl Wire {
     }
     pub fn lose_marker_once(&self) {
         self.model.lock().unwrap().lose_marker_once = true;
+    }
+    pub fn lose_root_once(&self) {
+        self.model.lock().unwrap().lose_root_once = true;
     }
     pub fn expire_once(&self) {
         self.model.lock().unwrap().expire_once = true;
@@ -292,8 +299,15 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
             }
         }
     } else if method == "POST" && path == "/drive/v3/files" {
-        let metadata: Value = serde_json::from_slice(body).unwrap();
+        let mut metadata: Value = serde_json::from_slice(body).unwrap();
         let id = metadata["id"].as_str().unwrap().to_owned();
+        let isolated_root = metadata["appProperties"]["buddy_isolated"] == "1"
+            && metadata["appProperties"]["kind"] == "root";
+        if isolated_root {
+            metadata["spaces"] = json!(["appDataFolder"]);
+            metadata["size"] = json!("0");
+            metadata["trashed"] = json!(false);
+        }
         model.slot_posts.push(id.clone());
         let status = if model.files.contains_key(&id) {
             409
@@ -309,6 +323,11 @@ fn serve(mut stream: TcpStream, base: &str, model: &Arc<Mutex<Model>>) {
         };
         if model.lose_create.as_deref() == Some(&id) {
             model.lose_create = None;
+            return;
+        }
+        if isolated_root && model.lose_root_once {
+            model.lose_root_once = false;
+            model.fail_get_once = Some(id.clone());
             return;
         }
         (status, serde_json::to_vec(&json!({"id":id})).unwrap())
