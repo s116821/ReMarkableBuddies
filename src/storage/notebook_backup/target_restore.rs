@@ -115,7 +115,13 @@ struct Receipt {
 }
 impl Receipt {
     fn read(root: &Path) -> Result<Self> {
-        let value: Self = files::json(&root.join(ORIGINAL), MAX_RECORD as u64)?;
+        Self::read_with_budget(root, None)
+    }
+    fn read_with_budget(
+        root: &Path,
+        budget: Option<&mut selection::SelectedReadBudget>,
+    ) -> Result<Self> {
+        let value: Self = files::json_with_budget(&root.join(ORIGINAL), MAX_RECORD as u64, budget)?;
         value.original.validate()?;
         ensure!(
             root.file_name().and_then(|s| s.to_str())
@@ -147,7 +153,13 @@ impl Receipt {
     }
 }
 pub(in crate::storage) fn read_original(root: &Path) -> Result<Original> {
-    Ok(Receipt::read(root)?.original)
+    read_original_with_budget(root, None)
+}
+pub(in crate::storage) fn read_original_with_budget(
+    root: &Path,
+    budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<Original> {
+    Ok(Receipt::read_with_budget(root, budget)?.original)
 }
 
 /// Only this owner constructs a context, after validating the original plan.

@@ -292,21 +292,40 @@ fn visit_selection_heads(
 
 /// Check accepted Store transactions under the publication mutex. Imported
 /// envelope operation IDs are deliberately absent from this inventory.
-fn claim_local_operation(root: &Path, generation: Uuid, operation: Uuid) -> Result<()> {
-    if target_generation::base_version(root)? != COMPOUND_STORE_FORMAT {
+fn claim_local_operation(
+    root: &Path,
+    generation: Uuid,
+    operation: Uuid,
+    prerequisites: &[Uuid],
+    budget: Option<&mut SelectedReadBudget>,
+    base_version: u32,
+) -> Result<()> {
+    if budget.is_none() && base_version != COMPOUND_STORE_FORMAT {
         return Ok(());
     }
-    let mut budget =
-        SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
-    visit_selection_heads(root, generation, &mut budget, |current, budget| {
+    let mut compatibility_budget;
+    let budget = if let Some(budget) = budget {
+        budget
+    } else {
+        compatibility_budget =
+            SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
+        &mut compatibility_budget
+    };
+    visit_selection_heads(root, generation, budget, |current, budget| {
         let scope = current.scope.clone();
         for accepted in history_with_budget(root, generation, &scope, current, Some(budget))? {
-            if accepted.operation == operation {
+            if accepted.operation == operation || prerequisites.contains(&accepted.operation) {
                 return Err(LocalOperationConflict.into());
             }
         }
         Ok(())
     })
+}
+
+struct CommitGuard<'a> {
+    reads: &'a mut SelectedReadBudget,
+    prerequisites: &'a [Uuid],
+    check: &'a mut dyn FnMut() -> Result<()>,
 }
 pub(super) fn replay(
     chain: &[SelectionTransaction],
@@ -647,14 +666,67 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         chain: &[SelectionTransaction],
     ) -> Result<SelectionPublication> {
+        self.write_selection_inner(inner, root, previous, transaction, objects, chain, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_selection_inner(
+        &self,
+        inner: &mut Inner,
+        root: &Path,
+        previous: Option<&SelectionTransaction>,
+        transaction: SelectionTransaction,
+        objects: BTreeMap<String, Vec<u8>>,
+        chain: &[SelectionTransaction],
+        mut guard: Option<&mut CommitGuard<'_>>,
+    ) -> Result<SelectionPublication> {
         // Replay was resolved by the target method before entering this new
         // publication boundary. Independent scope gates still serialize here.
         for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
-            Self::validate_namespace_family(root, manifest)?;
+            Self::validate_namespace_family_with_budget(
+                root,
+                manifest,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
         }
-        claim_local_operation(root, inner.generation, transaction.operation)?;
-        if target_generation::base_version(root)? == compound_generation::VERSION {
-            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        let base_version = target_generation::base_version_with_budget(
+            root,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
+        let prerequisites = guard.as_ref().map_or(&[][..], |g| g.prerequisites);
+        ensure!(
+            prerequisites.is_empty() || inner.index.unavailable == 0,
+            "cannot verify selected commit prerequisites with unavailable history"
+        );
+        if guard.is_some()
+            && std::iter::once(&transaction.operation)
+                .chain(prerequisites)
+                .any(|id| {
+                    inner.index.operations.contains_key(id)
+                        || inner
+                            .index
+                            .manifests
+                            .get(id)
+                            .is_some_and(|manifest| manifest.scope == Scope::LocalTransaction)
+                })
+        {
+            return Err(LocalOperationConflict.into());
+        }
+        claim_local_operation(
+            root,
+            inner.generation,
+            transaction.operation,
+            prerequisites,
+            guard.as_mut().map(|g| &mut *g.reads),
+            base_version,
+        )?;
+        if base_version == compound_generation::VERSION {
+            compound_generation::validate_ready_with_budget(
+                &self.paths,
+                self.actor_id,
+                inner.generation,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
         }
         ensure!(
             inner.legacy_sync_handles == 0,
@@ -672,8 +744,13 @@ impl Store {
         );
         let required: BTreeMap<_, _> = std::iter::once(&transaction.selected)
             .chain(&transaction.retained)
-            .flat_map(|m| m.records.iter().chain(&m.media))
-            .map(|r| (r.sha256.clone(), r.bytes))
+            .flat_map(|m| {
+                m.records
+                    .iter()
+                    .map(|r| (r, false))
+                    .chain(m.media.iter().map(|r| (r, true)))
+            })
+            .map(|(r, media)| (r.sha256.clone(), (r.bytes, media)))
             .collect();
         ensure!(
             objects.keys().all(|h| required.contains_key(h)),
@@ -681,18 +758,34 @@ impl Store {
         );
         Self::trip(inner, Fault::BeforeObjects)?;
         for (hash, bytes) in objects {
+            let (length, media) = required[&hash];
             ensure!(
-                required.get(&hash) == Some(&(bytes.len() as u64)),
+                length == bytes.len() as u64,
                 "selection object size mismatch"
             );
-            files::object(&root.join("objects").join(&hash), &hash, &bytes)?;
+            files::object_with_budget(
+                &root.join("objects").join(&hash),
+                &hash,
+                &bytes,
+                guard.as_mut().map(|g| &mut *g.reads),
+                media,
+            )?;
         }
         Self::trip(inner, Fault::AfterObjects)?;
-        let parts = validate_closure(root, &transaction)?;
+        let parts = validate_closure_with_budget(
+            root,
+            &transaction,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         // Live publication and reopen validate identical notebook closure
         // semantics. A retained original is its own complete historical graph.
         for (manifest, records) in &parts {
-            notebook_generation::validate_records(root, &Index::default(), records)?;
+            notebook_generation::validate_records_with_budget(
+                root,
+                &Index::default(),
+                records,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
             target_generation::validate_records(&Index::default(), records, &manifest.records)?;
         }
         let records: Vec<_> = parts
@@ -715,28 +808,65 @@ impl Store {
         files::directory(&root.join("selection-history"))?;
         if let Some(previous) = previous {
             let bytes = serde_json::to_vec(previous)?;
-            files::object(
+            files::object_with_budget(
                 &root.join("selection-history").join(digest(&bytes)),
                 &digest(&bytes),
                 &bytes,
+                guard.as_mut().map(|g| &mut *g.reads),
+                false,
             )?;
         }
-        prepare_generation(root, self.actor_id, inner.generation)?;
+        prepare_generation_with_budget(
+            root,
+            self.actor_id,
+            inner.generation,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         Self::trip(inner, Fault::BeforeCommit)?;
         Self::trip(inner, Fault::BeforeActivation)?;
         // One fsync/rename publication commits BOTH winner and retained closure.
         // The lock still protects the token and causal checks performed above.
-        let result = files::atomic_json(&path(root, &transaction.scope)?, &transaction);
-        if let Err(error) = result {
-            // rename may have succeeded before a directory-sync failure. Rebuild
-            // evidence from actual durable metadata; never continue with a stale index.
-            inner.index = self.recover(inner.generation)?;
-            return Err(error);
-        }
+        let marker = path(root, &transaction.scope)?;
+        let mut rename_started = guard.is_none();
+        let result = if let Some(guard) = guard {
+            files::atomic_json_guarded(&marker, &transaction, || {
+                (guard.check)()?;
+                rename_started = true;
+                Ok(())
+            })
+        } else {
+            files::atomic_json(&marker, &transaction)
+        };
+        let uncertain = match result {
+            Ok(()) => None,
+            Err(error) if !rename_started => return Err(error),
+            Err(error) if guard.is_some() => {
+                // The guarded path has already validated the exact staged
+                // closure. Observe only this head after a possible rename.
+                // This read is independently bounded by MAX_METADATA.
+                match current(root, inner.generation, &transaction.scope) {
+                    Ok(Some(observed)) if observed == transaction => Some(error),
+                    Ok(observed) if observed.as_ref() == previous => return Err(error),
+                    _ => {
+                        // Preserve the legacy integrity recovery if neither
+                        // exact head can be established.
+                        inner.index = self.recover(inner.generation)?;
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                inner.index = self.recover(inner.generation)?;
+                return Err(error);
+            }
+        };
         for (manifest, records) in parts {
             Self::apply_index(&mut inner.index, manifest, records);
         }
         self.notify_commit();
+        if let Some(error) = uncertain {
+            return Err(error);
+        }
         Self::trip(inner, Fault::AfterCommit)?;
         Self::trip(inner, Fault::AfterActivation)?;
         receipt(transaction, false)
@@ -750,6 +880,53 @@ impl Store {
         operation: Uuid,
         records: Vec<Envelope>,
         media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<SelectionPublication> {
+        self.commit_selected_inner(expected, operation, records, media, None)
+    }
+
+    /// Check time/cancellation under the publication mutex and after syncing the
+    /// staged head, just before rename. The callback must not re-enter the Store.
+    /// An exact historical replay only spends read allowance. Prerequisites
+    /// test absence at this commit and create no durable reservation.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        dead_code,
+        reason = "the regional Writer caller lands with the paired change"
+    )]
+    pub(crate) fn commit_selected_guarded(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+        reads: &mut SelectedReadBudget,
+        prerequisites: &[Uuid],
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<SelectionPublication> {
+        ensure!(
+            prerequisites.len() <= 3 && prerequisites.iter().all(|id| !id.is_nil()),
+            "invalid selected commit prerequisites"
+        );
+        self.commit_selected_inner(
+            expected,
+            operation,
+            records,
+            media,
+            Some(CommitGuard {
+                reads,
+                prerequisites,
+                check,
+            }),
+        )
+    }
+
+    fn commit_selected_inner(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+        mut guard: Option<CommitGuard<'_>>,
     ) -> Result<SelectionPublication> {
         ensure!(
             !operation.is_nil() && !records.is_empty(),
@@ -766,14 +943,32 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let previous = current(&root, inner.generation, &expected.scope)?
-            .context("selected scope is absent")?;
-        let chain = history(&root, inner.generation, &expected.scope, previous.clone())?;
+        let previous = current_with_budget(
+            &root,
+            inner.generation,
+            &expected.scope,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?
+        .context("selected scope is absent")?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            &expected.scope,
+            previous.clone(),
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         if let Some(receipt) = replay(&chain, operation, &fingerprint)? {
             return Ok(receipt);
         }
+        if let Some(guard) = guard.as_mut() {
+            (guard.check)()?;
+        }
         ensure!(token(&previous)? == *expected, "stale selection token");
-        let selected_records = Self::validate_objects(&root, &previous.selected)?;
+        let selected_records = Self::validate_objects_with_budget(
+            &root,
+            &previous.selected,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         let selected_index = closure_index(&selected_records, true)?;
         let mut objects = media;
         let mut selected = previous.selected.clone();
@@ -846,13 +1041,14 @@ impl Store {
             },
             (fingerprint, SelectionMutation::Commit),
         )?;
-        self.write_selection(
+        self.write_selection_inner(
             &mut inner,
             &root,
             Some(&previous),
             transaction,
             objects,
             &chain,
+            guard.as_mut(),
         )
     }
 }

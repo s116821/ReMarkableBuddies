@@ -76,11 +76,17 @@ fn data(root: &Path) -> Result<&Path> {
         .context("invalid target generation path")
 }
 fn read_preparation(path: &Path) -> Result<Option<Preparation>> {
+    read_preparation_with_budget(path, None)
+}
+fn read_preparation_with_budget(
+    path: &Path,
+    budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<Option<Preparation>> {
     files::safe_path(path)?;
     if !path.exists() {
         return Ok(None);
     }
-    let original: Preparation = files::json(path, MAX_RECORD as u64)?;
+    let original: Preparation = files::json_with_budget(path, MAX_RECORD as u64, budget)?;
     original.feature.validate()?;
     ensure!(
         original
@@ -94,13 +100,19 @@ fn read_preparation(path: &Path) -> Result<Option<Preparation>> {
 /// New originals belong to their generation. An older global receipt can only
 /// authorize its exact generation; it is never overwritten or borrowed by another.
 fn preparation(root: &Path) -> Result<Option<Preparation>> {
+    preparation_with_budget(root, None)
+}
+fn preparation_with_budget(
+    root: &Path,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<Option<Preparation>> {
     let generation: Uuid = root
         .file_name()
         .and_then(|name| name.to_str())
         .context("target generation name absent")?
         .parse()?;
-    let local = read_preparation(&root.join(PREPARATION))?;
-    let global = read_preparation(&data(root)?.join(PREPARATION))?
+    let local = read_preparation_with_budget(&root.join(PREPARATION), budget.as_deref_mut())?;
+    let global = read_preparation_with_budget(&data(root)?.join(PREPARATION), budget)?
         .filter(|original| original.feature.generation == generation);
     if let Some(local) = &local {
         ensure!(
@@ -119,15 +131,25 @@ fn preparation(root: &Path) -> Result<Option<Preparation>> {
     Ok(local.or(global))
 }
 fn feature(root: &Path) -> Result<Feature> {
-    let value: Feature = files::json(&root.join(MARKER), MAX_RECORD as u64)?;
+    feature_with_budget(root, None)
+}
+fn feature_with_budget(
+    root: &Path,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<Feature> {
+    let value: Feature =
+        files::json_with_budget(&root.join(MARKER), MAX_RECORD as u64, budget.as_deref_mut())?;
     value.validate()?;
-    let original = preparation(root)?.context("target original preparation absent")?;
+    let original = preparation_with_budget(root, budget.as_deref_mut())?
+        .context("target original preparation absent")?;
     ensure!(
         original.feature == value,
         "target feature differs from original preparation"
     );
     if let Some(sha) = &original.restore_sha256 {
-        let restored = super::recovery::notebook_backup::target_restore::read_original(root)?;
+        let restored = super::recovery::notebook_backup::target_restore::read_original_with_budget(
+            root, budget,
+        )?;
         ensure!(
             restored.sha256()? == *sha && restore_feature(&restored)? == value,
             "target feature differs from original restore"
@@ -141,9 +163,15 @@ fn feature(root: &Path) -> Result<Feature> {
 }
 /// Explicit inherited policy, never a guessed ordinary-vs-selected format test.
 pub(crate) fn base_version(root: &Path) -> Result<u32> {
-    let raw = feedback_generation::version(root)?;
+    base_version_with_budget(root, None)
+}
+pub(super) fn base_version_with_budget(
+    root: &Path,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<u32> {
+    let raw = files::json_with_budget(&root.join("format.json"), 64, budget.as_deref_mut())?;
     if raw == VERSION {
-        Ok(feature(root)?.base_kind.version())
+        Ok(feature_with_budget(root, budget)?.base_kind.version())
     } else {
         Ok(raw)
     }
@@ -152,16 +180,34 @@ pub(crate) fn is_target(root: &Path) -> Result<bool> {
     Ok(feedback_generation::version(root)? == VERSION)
 }
 pub(crate) fn validate_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    let value = feature(root)?;
+    validate_feature_with_budget(root, actor, generation, None)
+}
+pub(super) fn validate_feature_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
+    let value = feature_with_budget(root, budget.as_deref_mut())?;
     ensure!(
-        value.actor == actor && value.generation == generation && is_target(root)?,
+        value.actor == actor
+            && value.generation == generation
+            && files::json_with_budget::<u32>(&root.join("format.json"), 64, budget)? == VERSION,
         "source-target owner/family differs"
     );
     Ok(())
 }
 fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<serde_json::Value> {
+    capabilities_with_budget(paths, actor, generation, None)
+}
+fn capabilities_with_budget(
+    paths: &StorePaths,
+    actor: Uuid,
+    generation: Uuid,
+    budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<serde_json::Value> {
     let root = paths.data.join("generations").join(generation.to_string());
-    let value = feature(&root)?;
+    let value = feature_with_budget(&root, budget)?;
     let mut result = match value.base_kind {
         BaseKind::OrdinaryNotebook => notebook_generation::capabilities(paths, actor, generation),
         BaseKind::CompoundSelected => compound_generation::capabilities(paths, actor, generation),
@@ -172,40 +218,71 @@ fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<ser
     result["source_target_feature"] = serde_json::json!({"procedure":"same-generation-original-preparation-v1","base_kind":value.base_kind});
     Ok(result)
 }
-pub(crate) fn validate_ready_root(root: &Path) -> Result<()> {
+pub(super) fn validate_ready_root_with_budget(
+    root: &Path,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     let data = data(root)?;
-    let cap: serde_json::Value = files::json(&data.join("capabilities.json"), MAX_RECORD as u64)?;
+    let cap: serde_json::Value = files::json_with_budget(
+        &data.join("capabilities.json"),
+        MAX_RECORD as u64,
+        budget.as_deref_mut(),
+    )?;
     let paths: StorePaths = serde_json::from_value(cap["paths"].clone())?;
     ensure!(paths.data == data, "target capabilities data root differs");
-    let value = feature(root)?;
-    validate_ready(&paths, value.actor, value.generation)
+    let value = feature_with_budget(root, budget.as_deref_mut())?;
+    validate_ready_with_budget(&paths, value.actor, value.generation, budget)
 }
 pub(crate) fn validate_ready(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    validate_ready_with_budget(paths, actor, generation, None)
+}
+pub(super) fn validate_ready_with_budget(
+    paths: &StorePaths,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     let root = paths.data.join("generations").join(generation.to_string());
-    let original = preparation(&root)?.context("target original preparation absent")?;
+    let original = preparation_with_budget(&root, budget.as_deref_mut())?
+        .context("target original preparation absent")?;
     ensure!(
         original.complete,
         "source-target preparation has not completed"
     );
-    validate_ready_contents(paths, actor, generation)
+    validate_ready_contents_with_budget(paths, actor, generation, budget)
 }
 fn validate_ready_contents(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    validate_ready_contents_with_budget(paths, actor, generation, None)
+}
+fn validate_ready_contents_with_budget(
+    paths: &StorePaths,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
     ensure!(
-        files::json::<Uuid>(&paths.data.join("CURRENT"), 128)? == generation,
+        files::json_with_budget::<Uuid>(&paths.data.join("CURRENT"), 128, budget.as_deref_mut())?
+            == generation,
         "target CURRENT changed"
     );
     let root = paths.data.join("generations").join(generation.to_string());
-    validate_feature(&root, actor, generation)?;
+    validate_feature_with_budget(&root, actor, generation, budget.as_deref_mut())?;
     // These inherited validators read base-kind policy, without overwriting receipts.
-    selection::validate_generation(&root, actor, generation)?;
+    selection::validate_generation_with_budget(&root, actor, generation, budget.as_deref_mut())?;
     ensure!(
-        files::read(&paths.data.join("contract-v5.json"), MAX_RECORD as u64)?
-            == CONTRACT.as_bytes(),
+        files::read_with_budget(
+            &paths.data.join("contract-v5.json"),
+            MAX_RECORD as u64,
+            budget.as_deref_mut()
+        )? == CONTRACT.as_bytes(),
         "target contract differs"
     );
     ensure!(
-        files::read(&paths.data.join("capabilities.json"), MAX_RECORD as u64)?
-            == serde_json::to_vec(&capabilities(paths, actor, generation)?)?,
+        files::read_with_budget(
+            &paths.data.join("capabilities.json"),
+            MAX_RECORD as u64,
+            budget.as_deref_mut()
+        )? == serde_json::to_vec(&capabilities_with_budget(paths, actor, generation, budget)?)?,
         "incomplete target capabilities"
     );
     Ok(())
@@ -242,7 +319,7 @@ pub(super) fn archive_origin(
     if !is_target(root)? {
         return Ok(None);
     }
-    validate_ready_root(root)?;
+    validate_ready_root_with_budget(root, None)?;
     let origin = ArchiveOrigin {
         format: 1,
         feature: feature(root)?,

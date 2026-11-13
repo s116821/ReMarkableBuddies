@@ -121,6 +121,248 @@ fn selected(store: &Store, scope: &SelectionScope) -> SelectedSnapshot {
     store.selected_snapshot(scope, MAX_ITEMS).unwrap().unwrap()
 }
 
+fn publication_reads() -> SelectedReadBudget {
+    SelectedReadBudget::new(64, 4096, MAX_METADATA as u64, 8 * MAX_MEDIA)
+}
+
+#[test]
+fn selected_guard_expiry_at_rename_leaves_only_unpublished_staging() {
+    use std::cell::Cell;
+
+    let f = Fixture::new();
+    let store = f.store();
+    let scope = scope();
+    let old = record(&store);
+    let initial = initialize(&store, &scope, std::slice::from_ref(&old));
+    let next = edit(&old);
+    let op = Uuid::new_v4();
+    let calls = Cell::new(0);
+    let root = store.generation(initial.token.store_generation());
+    let bytes = serde_json::to_vec(&next).unwrap();
+    let pending = root.join("objects").join(digest(&bytes));
+    let mut reads = publication_reads();
+    let error = store
+        .commit_selected_guarded(
+            &initial.token,
+            op,
+            vec![next.clone()],
+            BTreeMap::new(),
+            &mut reads,
+            &[],
+            &mut || {
+                assert!(matches!(
+                    store.inner.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    assert_eq!(fs::read(&pending).unwrap(), bytes);
+                    assert!(fs::read_dir(root.join("selections"))
+                        .unwrap()
+                        .any(|entry| entry
+                            .unwrap()
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".stage-")));
+                    anyhow::bail!("fixture expired at the rename boundary");
+                }
+                Ok(())
+            },
+        )
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("fixture expired"));
+    assert_eq!(calls.get(), 2);
+    assert!(reads.usage().metadata_bytes > bytes.len() as u64);
+    assert_eq!(selected(&store, &scope).token, initial.token);
+    assert!(store.selected_receipt(&scope, op).unwrap().is_none());
+    assert!(store.heads(old.namespace, old.record_id).unwrap() == vec![old]);
+    assert!(!fs::read_dir(root.join("selections"))
+        .unwrap()
+        .any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".stage-")));
+
+    // A guard rejection before rename leaves an exact original retry available.
+    let first = store
+        .commit_selected_guarded(
+            &initial.token,
+            op,
+            vec![next],
+            BTreeMap::new(),
+            &mut publication_reads(),
+            &[],
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert!(!first.replayed);
+}
+
+#[test]
+fn selected_guard_uses_remaining_budget_inside_publication() {
+    let f = Fixture::new();
+    let store = f.store();
+    let scope = scope();
+    let old = record(&store);
+    let initial = initialize(&store, &scope, std::slice::from_ref(&old));
+    let root = store.generation(initial.token.store_generation());
+    let next = edit(&old);
+    let new_bytes = serde_json::to_vec(&next).unwrap();
+    let old_bytes = initial.transaction.selected.records[0].bytes;
+    let head_bytes = serde_json::to_vec(&initial.transaction).unwrap().len() as u64;
+    let root_format_bytes = fs::metadata(root.join("format.json")).unwrap().len();
+    // The Store-wide inventory reads this scope's current head once more.
+    let limit = 2 * head_bytes + 2 * old_bytes + root_format_bytes + 1;
+    let mut reads = SelectedReadBudget::new(64, 4096, limit, 0);
+    // The caller has already spent part of the same allowance.
+    reads.charge(0, 1, 1, 0).unwrap();
+    let op = Uuid::new_v4();
+    let mut checks = 0;
+    assert!(store
+        .commit_selected_guarded(
+            &initial.token,
+            op,
+            vec![next],
+            BTreeMap::new(),
+            &mut reads,
+            &[],
+            &mut || {
+                checks += 1;
+                Ok(())
+            },
+        )
+        .is_err());
+    assert_eq!(checks, 1);
+    assert!(reads.exhausted());
+    assert!(
+        root.join("objects").join(digest(&new_bytes)).is_file(),
+        "must reach guarded closure verification"
+    );
+    assert_eq!(selected(&store, &scope).token, initial.token);
+    assert!(store.selected_receipt(&scope, op).unwrap().is_none());
+}
+
+#[test]
+fn selected_guard_recovers_exact_original_after_publication_acknowledgment_loss() {
+    let f = Fixture::new();
+    let store = f.store();
+    let scope = scope();
+    let old = record(&store);
+    let initial = initialize(&store, &scope, std::slice::from_ref(&old));
+    let next = edit(&old);
+    let op = Uuid::new_v4();
+    #[cfg(unix)]
+    files::fail_next_atomic(
+        store
+            .generation(initial.token.store_generation())
+            .join("selections")
+            .join(scope.filename().unwrap()),
+        files::AtomicFailure::RenameAcknowledgment,
+    );
+    #[cfg(not(unix))]
+    store.set_fault(Fault::AfterCommit).unwrap();
+    assert!(store
+        .commit_selected_guarded(
+            &initial.token,
+            op,
+            vec![next.clone()],
+            BTreeMap::new(),
+            &mut publication_reads(),
+            &[],
+            &mut || Ok(()),
+        )
+        .is_err());
+    assert!(store.heads(next.namespace, next.record_id).unwrap() == vec![next.clone()]);
+    let original_token = selected(&store, &scope).token;
+    drop(store);
+    let store = f.store();
+    let replay = store
+        .commit_selected_guarded(
+            &initial.token,
+            op,
+            vec![next],
+            BTreeMap::new(),
+            &mut publication_reads(),
+            &[op],
+            &mut || panic!("historical receipt must not run an action guard"),
+        )
+        .unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.token, original_token);
+    assert_eq!(selected(&store, &scope).token, original_token);
+}
+
+#[test]
+fn selected_guard_checks_cross_scope_and_ordinary_prerequisites() {
+    let f = Fixture::new();
+    let store = f.store();
+    let local = record(&store);
+    let local_transaction = store.commit(vec![local.clone()], BTreeMap::new()).unwrap();
+    let scope_a = scope();
+    let scope_b = scope();
+    let old = record(&store);
+    let a = initialize(&store, &scope_a, std::slice::from_ref(&old));
+    let other = record(&store);
+    let foreign = initialize(&store, &scope_b, std::slice::from_ref(&other));
+    let op = Uuid::new_v4();
+    let next = edit(&old);
+
+    for prerequisite in [
+        foreign.transaction.operation,
+        local.operation_id,
+        local_transaction,
+    ] {
+        let error = store
+            .commit_selected_guarded(
+                &a.token,
+                op,
+                vec![next.clone()],
+                BTreeMap::new(),
+                &mut publication_reads(),
+                &[prerequisite, op],
+                &mut || Ok(()),
+            )
+            .err()
+            .unwrap();
+        assert!(error.is::<LocalOperationConflict>());
+        assert!(store.selected_receipt(&scope_a, op).unwrap().is_none());
+    }
+    // Current head and active closure can be read without any aggregate charge.
+    // The cross-scope inventory must spend the same charged allowance.
+    let mut insufficient = SelectedReadBudget::new(0, 4096, MAX_METADATA as u64, MAX_MEDIA);
+    assert!(store
+        .commit_selected_guarded(
+            &a.token,
+            op,
+            vec![next.clone()],
+            BTreeMap::new(),
+            &mut insufficient,
+            &[Uuid::new_v4()],
+            &mut || Ok(()),
+        )
+        .is_err());
+    assert!(insufficient.exhausted());
+    assert!(store.selected_receipt(&scope_a, op).unwrap().is_none());
+    assert_eq!(selected(&store, &scope_b).token, foreign.token);
+
+    let mut reads = publication_reads();
+    let accepted = store
+        .commit_selected_guarded(
+            &a.token,
+            op,
+            vec![next],
+            BTreeMap::new(),
+            &mut reads,
+            &[Uuid::new_v4(), op],
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert!(!accepted.replayed);
+    assert!(reads.usage().aggregates >= 2);
+}
+
 #[test]
 fn all_activation_faults_reopen_old_or_complete_new_winner_and_retained_media() {
     for fault in [
