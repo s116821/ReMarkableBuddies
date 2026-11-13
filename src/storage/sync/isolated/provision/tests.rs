@@ -310,12 +310,6 @@ fn rooted_worker_keeps_local_store_usable_when_private_paths_are_blocked() {
             });
             write_private(&path, &state).unwrap();
         }
-        if !matches!(blocked_path, "checkpoint-parent" | "checkpoint") {
-            assert_eq!(
-                test.health()["latest_verified"]["marker_sha256"],
-                digest(b"last marker")
-            );
-        }
         let obstruction = match blocked_path {
             "checkpoint-parent" => test.store.paths.data.join("sync/isolated"),
             "checkpoint" => directory.join("publisher.json"),
@@ -359,6 +353,12 @@ fn rooted_worker_keeps_local_store_usable_when_private_paths_are_blocked() {
             );
             assert!(!health.to_string().contains("PRIVATE"));
             assert_eq!(fs::read(&obstruction).unwrap(), b"PRIVATE_BLOCKED_PATH");
+        }
+        if !matches!(blocked_path, "checkpoint-parent" | "checkpoint") {
+            assert_eq!(
+                test.health()["latest_verified"]["marker_sha256"],
+                digest(b"last marker")
+            );
         }
         let entry = record(&test.store);
         test.store
