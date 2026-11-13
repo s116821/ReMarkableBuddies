@@ -827,7 +827,10 @@ impl Store {
         // One fsync/rename publication commits BOTH winner and retained closure.
         // The lock still protects the token and causal checks performed above.
         let marker = path(root, &transaction.scope)?;
-        let mut rename_started = guard.is_none();
+        let is_guarded = guard.is_some();
+        let mut rename_started = !is_guarded;
+        let new_head = is_guarded.then(|| token(&transaction)).transpose()?;
+        let old_head = previous.filter(|_| is_guarded).map(token).transpose()?;
         let result = if let Some(guard) = guard {
             files::atomic_json_guarded(&marker, &transaction, || {
                 (guard.check)()?;
@@ -840,13 +843,15 @@ impl Store {
         let uncertain = match result {
             Ok(()) => None,
             Err(error) if !rename_started => return Err(error),
-            Err(error) if guard.is_some() => {
+            Err(error) if is_guarded => {
                 // The guarded path has already validated the exact staged
                 // closure. Observe only this head after a possible rename.
                 // This read is independently bounded by MAX_METADATA.
-                match current(root, inner.generation, &transaction.scope) {
-                    Ok(Some(observed)) if observed == transaction => Some(error),
-                    Ok(observed) if observed.as_ref() == previous => return Err(error),
+                let observed = current(root, inner.generation, &transaction.scope)
+                    .and_then(|transaction| transaction.as_ref().map(token).transpose());
+                match observed {
+                    Ok(observed) if observed == new_head => Some(error),
+                    Ok(observed) if observed == old_head => return Err(error),
                     _ => {
                         // Preserve the legacy integrity recovery if neither
                         // exact head can be established.
