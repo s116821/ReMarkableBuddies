@@ -52,7 +52,7 @@ impl ConfirmedExample {
 
 pub(crate) enum ContextOwner {
     Local { _corrections: LocalCorrections },
-    Selected(crate::storage::sync::selected::SelectedContextOwner),
+    Selected(Box<crate::storage::sync::selected::SelectedContextOwner>),
 }
 
 #[cfg(any(target_os = "linux", test))]

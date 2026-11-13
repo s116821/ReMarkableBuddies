@@ -434,7 +434,7 @@ fn explicit_local_isolated_and_shared_modes_route_before_private_runtime_setup()
     )
     .unwrap();
     let output = fixture.command().output().unwrap();
-    assert_ordinary_refusal(output, "ordinary mode requires absent or LocalOnly choice");
+    assert_ordinary_refusal(output, "ordinary Reader startup unsupported");
 }
 
 #[test]

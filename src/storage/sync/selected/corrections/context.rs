@@ -135,7 +135,7 @@ impl SelectedContextOwner {
             context: ConfirmedContext::from_examples(
                 profile,
                 examples,
-                ContextOwner::Selected(owner),
+                ContextOwner::Selected(Box::new(owner)),
             ),
             selection,
         })
@@ -261,7 +261,7 @@ impl SelectedContextOwner {
         Ok(ConfirmedContext::from_examples(
             profile,
             examples,
-            ContextOwner::Selected(Self {
+            ContextOwner::Selected(Box::new(Self {
                 mode: lease,
                 binding,
                 catalog,
@@ -270,7 +270,7 @@ impl SelectedContextOwner {
                 corrections,
                 #[cfg(any(target_os = "linux", test))]
                 inventory: None,
-            }),
+            })),
         ))
     }
 
