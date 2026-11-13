@@ -33,6 +33,8 @@ enum Case {
     RegionalSibling,
     ForeignParent,
     ForeignAfterChild,
+    ReaderCompleted,
+    ClearedTarget,
 }
 
 #[test]
@@ -73,6 +75,16 @@ fn regional_foreign_parent_collision_refuses_before_submission() {
 #[test]
 fn regional_foreign_parent_after_child_refuses_before_submission() {
     run_cases(&[Case::ForeignAfterChild]);
+}
+
+#[test]
+fn regional_writer_keeps_target_after_real_reader_generated_presentation() {
+    run_cases(&[Case::ReaderCompleted]);
+}
+
+#[test]
+fn regional_writer_refuses_cleared_active_target_after_reader_presentation() {
+    run_cases(&[Case::ClearedTarget]);
 }
 
 fn run_cases(cases: &[Case]) {
@@ -139,6 +151,29 @@ fn run_cases(cases: &[Case]) {
         let SelectedReaderPublication::Published { acknowledgment, .. } = interpreted else {
             panic!("fresh interpretation")
         };
+        if matches!(case, Case::ReaderCompleted | Case::ClearedTarget) {
+            let current = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let generated = writer
+                .publish_reader_text(
+                    &current.token,
+                    SelectedReaderWrite {
+                        operation: Uuid::new_v4(),
+                        root: acknowledgment.root.clone(),
+                        user: acknowledgment.turn.clone(),
+                        updated_ms: 4,
+                        text: "About: Left concept\nReader answer about the selected concept."
+                            .into(),
+                        kind: SelectedReaderText::Generate {
+                            assistant: Uuid::new_v4(),
+                        },
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                generated,
+                SelectedReaderPublication::Published { .. }
+            ));
+        }
         let registered_correction = if case == Case::ForeignAfterChild {
             let revision = observed(f.command(&f.a, &confirm(f.owner, Uuid::new_v4()), true));
             f.drive(&mut f.engine(&f.a), revision);
@@ -485,7 +520,76 @@ fn run_cases(cases: &[Case]) {
         } else {
             preferences
         };
-        let selection = if case == Case::ForeignParent {
+        if case == Case::ClearedTarget {
+            // Model an accepted peer clear through the actual selected Store CAS.
+            // No selected high-level clear command is claimed by this fixture.
+            let current = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
+            let projection = SelectedDomainProjection::from_snapshot(&current).unwrap();
+            let (state, Some(Record::TargetState(value))) = projection
+                .head(
+                    Namespace::Conversation,
+                    target::TargetState::id(target.conversation),
+                )
+                .unwrap()
+            else {
+                panic!("current target state")
+            };
+            let mut clear = projection
+                .head(Namespace::Conversation, value.use_reference.record)
+                .unwrap()
+                .0
+                .clone();
+            let mut used = match Ledger::decode(&clear).unwrap() {
+                Record::TargetUse(used) => used,
+                _ => panic!("target use"),
+            };
+            used.action = target::Action::None;
+            used.target = None;
+            used.about = None;
+            used.inline_body_sha256 = None;
+            clear.parents = BTreeSet::from([clear.revision_id]);
+            clear.revision_id = Uuid::new_v4();
+            clear.operation_id = Uuid::new_v4();
+            clear.payload = serde_json::to_value(Record::TargetUse(used)).unwrap();
+            let encoded = serde_json::to_vec(&clear).unwrap();
+            let mut next_state = (**value).clone();
+            next_state.use_reference = target::RecordRef {
+                namespace: clear.namespace,
+                record: clear.record_id,
+                revision: clear.revision_id,
+                object: crate::storage::ObjectRef {
+                    sha256: digest(&encoded),
+                    bytes: encoded.len() as u64,
+                },
+            };
+            let mut state = state.clone();
+            state.parents = BTreeSet::from([state.revision_id]);
+            state.revision_id = Uuid::new_v4();
+            state.operation_id = Uuid::new_v4();
+            state.payload =
+                serde_json::to_value(Record::TargetState(Box::new(next_state))).unwrap();
+            let mut root = projection
+                .head(Namespace::Conversation, target.conversation)
+                .unwrap()
+                .0
+                .clone();
+            root.parents = BTreeSet::from([root.revision_id]);
+            root.revision_id = Uuid::new_v4();
+            root.operation_id = Uuid::new_v4();
+            let Record::Root(mut value) = Ledger::decode(&root).unwrap() else {
+                panic!("root")
+            };
+            value.updated_ms = 5;
+            root.payload = serde_json::to_value(Record::Root(value)).unwrap();
+            f.a.commit_selected(
+                &current.token,
+                Uuid::new_v4(),
+                vec![root, clear, state],
+                BTreeMap::new(),
+            )
+            .unwrap();
+        }
+        let selection = if matches!(case, Case::ForeignParent | Case::ClearedTarget) {
             let latest = f.a.selected_snapshot(&scope, MAX_ITEMS).unwrap().unwrap();
             Selection {
                 accepted: latest.token.clone(),
@@ -527,6 +631,25 @@ fn run_cases(cases: &[Case]) {
             None,
             &mut || canceled.get(),
         );
+        if case == Case::ClearedTarget {
+            assert!(model.calls.is_empty());
+            assert!(
+                result
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("target is no longer current")),
+                "must honor current cleared state: {}",
+                match &result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(report) => serde_json::to_string(&report.report).unwrap(),
+                }
+            );
+            assert!(f
+                .a
+                .selected_receipt(&scope, input.preparation())
+                .unwrap()
+                .is_none());
+            continue;
+        }
         if matches!(case, Case::ForeignParent | Case::ForeignAfterChild) {
             if case == Case::ForeignAfterChild {
                 assert!(
@@ -582,7 +705,7 @@ fn run_cases(cases: &[Case]) {
             }
             _ => None,
         });
-        if matches!(case, Case::Good | Case::Delayed) {
+        if matches!(case, Case::Good | Case::Delayed | Case::ReaderCompleted) {
             let report = result.unwrap();
             assert_eq!(report.report.status, writer::Status::Generated, "{case:?}");
             assert_eq!(model.calls.len(), 2);
