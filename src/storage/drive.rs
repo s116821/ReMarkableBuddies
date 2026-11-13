@@ -21,6 +21,7 @@ pub const APP_SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 const CHUNK: usize = 256 * 1024;
 pub(super) const RESUMABLE_THRESHOLD: u64 = CHUNK as u64;
 type VerifyCreate<'a> = dyn Fn(&mut GoogleDrive, &str, &ObjectRef) -> Result<()> + 'a;
+type UploadChecks<'a> = (&'a dyn Fn(&GoogleDrive) -> Result<()>, &'a VerifyCreate<'a>);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -627,7 +628,7 @@ impl GoogleDrive {
         properties: &BTreeMap<String, String>,
         bytes: &mut files::Source,
         session: &mut UploadSession,
-        (before_send, verify): (&dyn Fn(&Self) -> Result<()>, &VerifyCreate<'_>),
+        (before_send, verify): UploadChecks<'_>,
     ) -> Result<UploadProgress> {
         let token = self.token()?;
         let metadata = json!({"id":id_value,"name":bytes.reference().sha256,"parents":["appDataFolder"],"appProperties":properties});
