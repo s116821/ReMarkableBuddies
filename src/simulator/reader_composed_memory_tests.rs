@@ -643,7 +643,8 @@ fn marked_question_predecessor_compatibility() -> Result<()> {
             );
         }
     }
-    println!("MARKED_RECEIPT_PHASE {}", receipt);
+    // libtest's nocapture progress prefix has no trailing newline.
+    println!("\nMARKED_RECEIPT_PHASE {}", receipt);
     Ok(())
 }
 
