@@ -179,6 +179,9 @@ jobs:
               'researched_pdf_unclear_intent_stops_before_interpret',
               'researched_pdf_drift_refuses_handoff_and_generation',
               'researched_pdf_lost_ack_recovers_original_without_replay',
+              'researched_pdf_currentness_loss_stops_later_work',
+              'researched_pdf_withheld_search_expires_original_deadline',
+              'researched_pdf_original_read_allowance_cannot_be_renewed',
           ]
           names = ['storage::sync::selected::tests::researched_reader::' + name for name in names]
           listing = subprocess.run([str(library), '--ignored', '--list', '--format', 'terse'],
