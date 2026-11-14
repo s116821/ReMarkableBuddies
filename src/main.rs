@@ -620,7 +620,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(operation) = args.archive_operation {
-        let report = remarkable_reader_buddy::archive_maintenance::run(
+        let report = remarkable_reader_buddy::archive_maintenance::run_cli(
             operation,
             args.archive_input
                 .as_deref()

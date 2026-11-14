@@ -17,6 +17,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_os = "linux")]
+mod isolated_stage;
+
 pub const MAX_INPUT: usize = 16_384;
 pub const MAX_OUTPUT: usize = 16_384;
 
@@ -28,6 +31,18 @@ pub enum Operation {
     ExportSelected,
     InspectNotebook,
     ExportNotebook,
+    ReceiveIsolatedStage,
+    CheckIsolatedStage,
+    ReleaseIsolatedStage,
+}
+
+impl Operation {
+    fn is_stage(self) -> bool {
+        matches!(
+            self,
+            Self::ReceiveIsolatedStage | Self::CheckIsolatedStage | Self::ReleaseIsolatedStage
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -57,8 +72,14 @@ struct IsolatedRequest {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Data {
-    Archive { inspection: BackupInspection },
-    Isolated { isolated_package: serde_json::Value },
+    Archive {
+        inspection: BackupInspection,
+    },
+    Isolated {
+        isolated_package: serde_json::Value,
+    },
+    #[cfg(target_os = "linux")]
+    Stage(isolated_stage::StageData),
 }
 
 struct Custody {
@@ -291,12 +312,37 @@ fn export_notebook(config: Config, destination: &Path) -> Report {
     report
 }
 
+/// Dispatch the real CLI stdin without routing stage streams through blocking Read.
+pub fn run_cli(
+    operation: Operation,
+    input: &Path,
+    config_path: Option<PathBuf>,
+    stdin: &mut std::io::StdinLock<'_>,
+) -> Report {
+    if !operation.is_stage() {
+        return run(operation, input, config_path, stdin);
+    }
+    if input.as_os_str() != "-" {
+        return Report::new(operation, Status::InvalidInput);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        isolated_stage::run(operation, config_path, stdin.as_raw_fd())
+    }
+    #[cfg(not(target_os = "linux"))]
+    Report::new(operation, Status::Unsupported)
+}
+
 pub fn run(
     operation: Operation,
     input: &Path,
     config_path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
+    if operation.is_stage() {
+        return Report::new(operation, Status::Unsupported);
+    }
     if operation == Operation::InspectIsolated {
         return inspect_isolated(input, stdin);
     }
@@ -308,7 +354,10 @@ pub fn run(
         Operation::Inspect => return inspect(&request.path),
         Operation::InspectNotebook => return inspect_notebook(&request.path),
         Operation::ExportSelected | Operation::ExportNotebook => (),
-        Operation::InspectIsolated => unreachable!("handled before ordinary archive input"),
+        Operation::InspectIsolated
+        | Operation::ReceiveIsolatedStage
+        | Operation::CheckIsolatedStage
+        | Operation::ReleaseIsolatedStage => unreachable!("handled before ordinary archive input"),
     }
     let config = match Config::load(config_path) {
         Ok(config) if !config.sync.enabled => config,

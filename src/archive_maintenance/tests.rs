@@ -350,7 +350,7 @@ fn notebook_archive_marker_fault_preserves_unpublished_and_possibly_published_ro
     }
 }
 
-fn isolated_package(partial: bool) -> (Fixture, PathBuf, String, serde_json::Value) {
+pub(super) fn isolated_package(partial: bool) -> (Fixture, PathBuf, String, serde_json::Value) {
     use std::collections::BTreeMap;
     use storage::{
         Coverage, Envelope, Kind, Manifest, Media, Namespace, ObjectRef, Omission, Scope,
