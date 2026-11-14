@@ -81,7 +81,7 @@ def main():
     receipt_raw = Path(args.build_receipt).read_bytes()
     receipt = json.loads(receipt_raw)
     assert receipt['old_source'] == report['old_source']
-    assert receipt['old_driver_source_sha256'] == '3019fc442438995e1196061d78fa7b8a40ca5072ac6e8d6d29f509e68a605590'
+    assert receipt['old_driver_source_sha256'] == '1520b0913849ef68e0d6f82d76cb7949897392461e570b6b9b2d9e4a4e033528'
     for name, path, expected in [('old_driver', args.old_driver, args.old_driver_sha256),
                                  ('current_binary', args.current_binary, args.current_binary_sha256)]:
         actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()

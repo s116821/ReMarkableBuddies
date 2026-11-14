@@ -36,16 +36,25 @@ fn wait_for_sole_owner<T>(
     mut pause: impl FnMut(Duration),
 ) -> Result<(), usize> {
     let deadline = Instant::now() + timeout;
+    let mut owners = Arc::strong_count(store);
+    if owners == 1 {
+        return Ok(());
+    }
     loop {
-        let owners = Arc::strong_count(store);
-        if owners == 1 {
-            return Ok(());
-        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(owners);
         }
         pause(remaining.min(Duration::from_millis(10)));
+        owners = Arc::strong_count(store);
+        // After any wait, even actual uniqueness is too late at the original
+        // cutoff. Only the initial already-unique observation bypasses waiting.
+        if Instant::now() >= deadline {
+            return Err(owners);
+        }
+        if owners == 1 {
+            return Ok(());
+        }
     }
 }
 
@@ -300,7 +309,7 @@ fn main() -> anyhow::Result<()> {
     drop(worker);
     wait_for_sole_owner(&store, Duration::from_secs(10), std::thread::park_timeout)
         .map_err(|owners| anyhow::anyhow!(
-            "worker did not release actual Store ownership within 10s before closed receipt ({owners} owners remain)"
+            "worker Store ownership was not observed released within 10s before closed receipt (last observed {owners} owners)"
         ))?;
     drop(store);
     println!("{}", json!({"action":"released","closed":true}));
@@ -343,6 +352,28 @@ mod release_tests {
         assert_eq!(observations, 1);
         assert_eq!(result, Ok(()));
         assert_eq!(Arc::strong_count(&store), 1);
+    }
+
+    #[test]
+    fn ownership_released_only_after_original_deadline_is_not_accepted() {
+        let store = Arc::new(());
+        let mut retained = Some(store.clone());
+        let timeout = Duration::from_millis(5);
+        let started = Instant::now();
+        let result = wait_for_sole_owner(&store, timeout, |_| {
+            assert_eq!(Arc::strong_count(&store), 2);
+            // The helper's deadline precedes this pause. Keep the extra owner
+            // for another full timeout, then make the late observation unique.
+            thread::sleep(timeout);
+            assert!(started.elapsed() >= timeout);
+            drop(retained.take().unwrap());
+        });
+        assert_eq!(Arc::strong_count(&store), 1);
+        assert_eq!(
+            result,
+            Err(1),
+            "late uniqueness must not renew the original deadline"
+        );
     }
 
     #[test]

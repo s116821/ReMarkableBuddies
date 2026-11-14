@@ -46,8 +46,8 @@ runs:
         cargo --version > qualification-evidence/old-cargo.txt
         sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/source-input-hashes.txt
         test "$(git -C .predecessor-qualification-source rev-parse HEAD)" = 68e42968b4c58b6f8ed1102078d78b40fad33ffc
-        echo '3019fc442438995e1196061d78fa7b8a40ca5072ac6e8d6d29f509e68a605590  scripts/predecessor/old_storage_lease_driver.rs' | sha256sum --check
-        echo '48c69e3bb7ad4d508a74a78db2f897d7f6e4af9a1ada6079e8c2d0f6e10aa1ad  scripts/predecessor/old_library_outer.py' | sha256sum --check
+        echo '1520b0913849ef68e0d6f82d76cb7949897392461e570b6b9b2d9e4a4e033528  scripts/predecessor/old_storage_lease_driver.rs' | sha256sum --check
+        echo '58b5b3051218dcdffc218c6a035bbb5e04db5d64f38c3359870335587ad419b3  scripts/predecessor/old_library_outer.py' | sha256sum --check
         echo 'adae04b64e8f21d7ec39be20d3dfe019686d7d01d14c4c856005118223da49ba  scripts/predecessor/test_old_library_outer.py' | sha256sum --check
         rustc --edition=2021 --test scripts/predecessor/old_storage_lease_driver.rs -o "$RUNNER_TEMP/predecessor-release-unit-tests"
         "$RUNNER_TEMP/predecessor-release-unit-tests" --nocapture > qualification-evidence/old-release-unit-tests.log 2>&1
