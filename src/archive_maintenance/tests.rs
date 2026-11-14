@@ -457,6 +457,250 @@ fn command_json(
     serde_json::from_slice(&bytes).unwrap()
 }
 
+// Opt in with READER_BUDDY_ISOLATED_FIXTURE_OUTPUT set to an ABSENT absolute
+// canonical-temp child named reader-buddy-isolated-fixtures-<UUID>. Commit first,
+// source the explicit Cargo environment, then reproduce with default features:
+// cargo test --locked --offline --lib \
+//   archive_maintenance::tests::emit_isolated_producer_fixtures \
+//   -- --ignored --exact --nocapture
+// Fresh UUIDs mean semantic reproduction, not byte-identical fixtures. Only the
+// exporter-created closure and receipt survive; the source fixture owns its
+// normal Store/cache/credential teardown. Never delete/reuse the output root.
+#[test]
+#[ignore = "explicit absent scratch output and clean committed source required"]
+fn emit_isolated_producer_fixtures() -> Result<()> {
+    use std::{collections::BTreeMap, io::Write, process::Command};
+
+    fn git(args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture source identity unavailable"
+        );
+        output.stdout
+    }
+    fn source() -> serde_json::Value {
+        assert!(
+            git(&["status", "--porcelain", "--untracked-files=normal"]).is_empty(),
+            "fixture source must be clean"
+        );
+        let commit = String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap();
+        assert_eq!(commit.trim(), env!("VERGEN_GIT_SHA"));
+        assert_eq!(option_env!("VERGEN_GIT_DIRTY"), Some("false"));
+        let tree = String::from_utf8(git(&["rev-parse", "HEAD^{tree}"])).unwrap();
+        let lock = git(&["show", "HEAD:Cargo.lock"]);
+        let parsed: toml::Value = toml::from_str(std::str::from_utf8(&lock).unwrap()).unwrap();
+        let sdk = parsed["package"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"].as_str() == Some("remarkable-open-sdk"))
+            .unwrap();
+        serde_json::json!({"commit":commit.trim(),"tree":tree.trim(),"clean":true,
+            "compiled_commit":env!("VERGEN_GIT_SHA"),"git_derived_identity":env!("READER_BUDDY_VERSION"),
+            "cargo_lock_sha256":storage::digest(&lock),"sdk_source":sdk["source"]})
+    }
+    fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+    fn closure(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+        fn visit(
+            root: &Path,
+            directory: &Path,
+            files: &mut BTreeMap<String, Vec<u8>>,
+        ) -> Result<()> {
+            for entry in fs::read_dir(directory)? {
+                let path = entry?.path();
+                let relative = path
+                    .strip_prefix(root)?
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/");
+                let metadata = fs::symlink_metadata(&path)?;
+                if metadata.is_dir() {
+                    ensure!(
+                        matches!(relative.as_str(), "data" | "data/objects"),
+                        "unexpected fixture directory"
+                    );
+                    visit(root, &path, files)?;
+                } else {
+                    ensure!(metadata.is_file(), "nonregular fixture member");
+                    ensure!(
+                        matches!(
+                            relative.as_str(),
+                            "data/backup.json"
+                                | "isolated-backup.json"
+                                | "portable-configuration.json"
+                        ) || relative
+                            .strip_prefix("data/objects/")
+                            .is_some_and(storage::valid_digest),
+                        "unexpected fixture member"
+                    );
+                    ensure!(
+                        files.len() < 16 && metadata.len() <= 64 * 1024,
+                        "fixture exceeds small emission bound"
+                    );
+                    files.insert(relative, fs::read(path)?);
+                }
+            }
+            Ok(())
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files)?;
+        ensure!(
+            files.values().map(Vec::len).sum::<usize>() <= 128 * 1024,
+            "fixture exceeds aggregate bound"
+        );
+        Ok(files)
+    }
+
+    let output = PathBuf::from(
+        std::env::var_os("READER_BUDDY_ISOLATED_FIXTURE_OUTPUT")
+            .expect("explicit fixture output is required"),
+    );
+    let temporary = fs::canonicalize(std::env::temp_dir())?;
+    ensure!(
+        output.is_absolute() && output.parent().map(Path::as_os_str) == Some(temporary.as_os_str()),
+        "output must be a direct canonical-temp child"
+    );
+    let suffix = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("reader-buddy-isolated-fixtures-"));
+    ensure!(
+        suffix.is_some_and(|suffix| Uuid::parse_str(suffix).is_ok()),
+        "output requires the fixture prefix and UUID"
+    );
+    let features = [
+        cfg!(feature = "drive-slot-qualification"),
+        cfg!(feature = "development-input-diagnostics"),
+        cfg!(feature = "development-resident-bootstrap"),
+        cfg!(feature = "development-native-close"),
+        cfg!(feature = "installed-resident-output"),
+    ];
+    ensure!(
+        !features.into_iter().any(|enabled| enabled),
+        "emitter requires default features"
+    );
+    let source_before = source();
+    let settings: BTreeMap<_, _> = [
+        "RUSTUP_TOOLCHAIN",
+        "CARGO_BUILD_JOBS",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key,
+            std::env::var(key).expect("explicit Cargo setting required"),
+        )
+    })
+    .collect();
+    let compiler = Command::new("rustc").arg("-Vv").output()?;
+    ensure!(
+        compiler.status.success(),
+        "reproduction compiler unavailable"
+    );
+    let mut directory = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory.create(&output)?; // Existing paths are refused; no overwrite/cleanup.
+    ensure!(
+        fs::canonicalize(&output)?.as_os_str() == output.as_os_str(),
+        "output identity changed"
+    );
+    let mut cases = BTreeMap::new();
+    for (name, partial) in [("complete", false), ("media-omitted", true)] {
+        let (fixture, package, marker, expected) = isolated_package(partial);
+        let before = fixture.inventory();
+        let original = closure(&package)?;
+        let destination = output.join(name);
+        fs::create_dir(&destination)?;
+        fs::create_dir(destination.join("data"))?;
+        fs::create_dir(destination.join("data/objects"))?;
+        // Copy the actual producer marker last without reserializing any bytes.
+        for (path, bytes) in original
+            .iter()
+            .filter(|(path, _)| path.as_str() != "isolated-backup.json")
+        {
+            write_new(&destination.join(path), bytes)?;
+        }
+        write_new(
+            &destination.join("isolated-backup.json"),
+            &original["isolated-backup.json"],
+        )?;
+        let report = command_json(
+            Operation::InspectIsolated,
+            &serde_json::to_vec(&serde_json::json!({"path":destination,"marker_sha256":marker}))?,
+            output.join("absent-config"),
+        );
+        assert_eq!(
+            report,
+            serde_json::json!({"report_version":1,"operation":"inspect-isolated","status":"ok",
+            "incomplete":partial,"activation_performed":false,"data":{"isolated_package":expected}})
+        );
+        assert_eq!(closure(&destination)?, original);
+        assert_eq!(closure(&package)?, original);
+        assert_eq!(fixture.inventory(), before);
+        let inventory: BTreeMap<_, _> = original
+            .iter()
+            .map(|(path, bytes)| {
+                (
+                    path,
+                    serde_json::json!({"bytes":bytes.len(),"sha256":storage::digest(bytes)}),
+                )
+            })
+            .collect();
+        cases.insert(
+            name,
+            serde_json::json!({"directory":name,"marker_sha256":marker,
+            "files":inventory,"expected_report":report}),
+        );
+    }
+    assert_eq!(
+        source(),
+        source_before,
+        "source changed during fixture emission"
+    );
+    let receipt = serde_json::json!({"fixture_receipt_version":1,"synthetic_test_content_only":true,
+        "producer":"Store::export_isolated_package with the original sync-mode lease via isolated_package(false/true)",
+        "source":source_before,"cases":cases,"reproduction":{"cargo_args":["test","--locked","--offline","--lib",
+        "archive_maintenance::tests::emit_isolated_producer_fixtures","--","--ignored","--exact","--nocapture"],
+        "required_output_env":"READER_BUDDY_ISOLATED_FIXTURE_OUTPUT","output_policy":"absent canonical-temp child reader-buddy-isolated-fixtures-<UUID>; never reuse/delete",
+        "environment":settings,"runtime_rustc_verbose":String::from_utf8(compiler.stdout)?,
+        "profile":"test","debug_assertions":cfg!(debug_assertions),"crate_features":"default",
+        "uuid_reproduction":"fresh synthetic UUIDs; semantics reproducible, bytes differ",
+        "evidence_limits":"actual synthetic isolated-producer package and in-process archive handler only; test-only SDK features may unify; no retained normal release, native platform, provider publication or restore proof"}});
+    let mut bytes = serde_json::to_vec_pretty(&receipt)?;
+    bytes.push(b'\n');
+    ensure!(bytes.len() <= 32 * 1024, "fixture receipt too large");
+    write_new(&output.join("receipt.json"), &bytes)?;
+    println!(
+        "emitted actual synthetic isolated fixtures; receipt_sha256={}",
+        storage::digest(&bytes)
+    );
+    Ok(())
+}
+
 #[test]
 fn isolated_command_inspects_actual_export_with_exact_redacted_output_and_zero_byte_object() {
     let (fixture, package, marker, expected) = isolated_package(false);
