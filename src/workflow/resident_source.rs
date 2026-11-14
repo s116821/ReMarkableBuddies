@@ -1,4 +1,8 @@
 //! Real selected Workflow source route. Historical pixels confer no output lease.
+// The researched route is deliberately disabled pending intent admission.
+#[allow(dead_code)]
+pub(super) mod original_pdf;
+
 #[cfg(test)]
 use super::resident_runtime::ReadOnlyAdmission;
 use super::{

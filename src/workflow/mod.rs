@@ -21,6 +21,9 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+#[doc(hidden)]
+pub use resident_source::original_pdf::development_original_pdf;
 #[cfg(all(
     test,
     target_os = "linux",

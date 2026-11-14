@@ -258,6 +258,11 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(result) = remarkable_reader_buddy::retrieval::pdf_worker::dispatch() {
+        return result;
+    }
+
     let args = Args::parse();
     if let Some(operation) = args.shared_preferences_operation {
         let report = remarkable_reader_buddy::shared_preferences::run(
