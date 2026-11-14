@@ -1185,6 +1185,13 @@ impl Selected {
             self.interpretation.as_ref()
         }
         .unwrap();
+        #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+        if generated && self.researched() {
+            crate::workflow::orchestrator::researched_fixture::record_generation(
+                &frozen.accepted,
+                &frozen.request,
+            )?;
+        }
         #[cfg(any(target_os = "linux", test))]
         let guarded = if let Some(policy) = &self.resident {
             let mut reads = policy.reads(ReaderPhase::Result)?;
@@ -1295,6 +1302,10 @@ impl Selected {
                 "historical selected acknowledgment cannot install current Attempt state"
             );
         };
+        #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+        if generated && self.researched() {
+            crate::workflow::orchestrator::researched_fixture::after_generated_ack()?;
+        }
         self.token = publication.token;
         self.root = acknowledgment.root.clone();
         if !generated {

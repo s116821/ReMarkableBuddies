@@ -4,6 +4,8 @@ use crate::storage::drive::shared_fixture::Wire;
 mod corrections;
 mod passive_slots;
 mod readiness;
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+mod researched_reader;
 mod writer_image;
 
 struct Fixture(PathBuf);

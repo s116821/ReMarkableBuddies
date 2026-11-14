@@ -15,6 +15,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "development-resident-bootstrap")]
+use {
+    image::{DynamicImage, ImageFormat, RgbaImage},
+    remarkable_open_sdk::{
+        native_adapter::{HistoricalCapture, ReaderFacts},
+        PageKey, Uuid as SdkUuid,
+    },
+    remarkable_reader_buddy::{
+        retrieval::pdf_worker::PendingIndex, workflow::development_original_pdf,
+    },
+    sha2::{Digest, Sha256},
+    std::{
+        io::Cursor,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+        path::{Path, PathBuf},
+    },
+};
+
 const DOCUMENT: u128 = 1;
 const REQUEST: u128 = 2;
 const PAGES: u32 = 2;
@@ -340,76 +358,110 @@ fn selected_pdf_worker_binary_refuses_extra_arguments_and_short_input() {
 }
 
 #[cfg(feature = "development-resident-bootstrap")]
-#[test]
-fn actual_original_pdf_producer_joins_binary_index_and_keeps_source_pin() {
-    use image::{DynamicImage, ImageFormat, RgbaImage};
-    use remarkable_open_sdk::{
-        native_adapter::{HistoricalCapture, ReaderFacts},
-        PageKey, Uuid as SdkUuid,
-    };
-    use remarkable_reader_buddy::workflow::development_original_pdf;
-    use sha2::{Digest, Sha256};
-    use std::{
-        io::Cursor,
-        os::unix::fs::DirBuilderExt,
-        path::{Path, PathBuf},
-    };
+struct OwnedRoot(PathBuf);
 
-    struct OwnedRoot(PathBuf);
-    impl Drop for OwnedRoot {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+#[cfg(feature = "development-resident-bootstrap")]
+impl Drop for OwnedRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
+}
 
-    let root =
-        OwnedRoot(std::env::temp_dir().join(format!("buddy-original-pdf-{}", Uuid::new_v4())));
-    fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
-    let document = Uuid::from_u128(DOCUMENT);
-    let id = |value| SdkUuid::parse(&Uuid::from_u128(value).to_string()).unwrap();
-    let facts = ReaderFacts::new(
-        PageKey {
-            document: id(DOCUMENT),
-            page: id(4),
-        },
-        vec![id(3), id(4)],
-    )
-    .unwrap();
-    fs::write(
-        root.0.join(format!("{document}.content")),
-        serde_json::to_vec(&json!({
-            "fileType": "pdf",
-            "cPages": { "original": { "value": PAGES }, "pages": [
-                { "id": Uuid::from_u128(3), "idx": { "value": "a" }, "redir": { "value": 0 } },
-                { "id": Uuid::from_u128(4), "idx": { "value": "b" }, "redir": { "value": 1 } },
-            ] },
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let bytes = fixture_pdf_bytes();
-    fs::write(root.0.join(format!("{document}.pdf")), &bytes).unwrap();
+#[cfg(feature = "development-resident-bootstrap")]
+struct OriginalPdfFixture {
+    root: OwnedRoot,
+    bytes: Vec<u8>,
+    document: Uuid,
+    facts: ReaderFacts,
+    capture: HistoricalCapture,
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+fn fixture_capture(facts: &ReaderFacts) -> HistoricalCapture {
     let mut png = Cursor::new(Vec::new());
     DynamicImage::ImageRgba8(RgbaImage::new(2, 2))
         .write_to(&mut png, ImageFormat::Png)
         .unwrap();
     let png = png.into_inner();
     let hash = Sha256::digest(&png).into();
-    let capture =
-        HistoricalCapture::new(facts.clone(), facts.clone(), [2, 2], 1.0, png.clone(), hash)
-            .unwrap();
+    HistoricalCapture::new(facts.clone(), facts.clone(), [2, 2], 1.0, png, hash).unwrap()
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+impl OriginalPdfFixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("buddy-original-pdf-{}", Uuid::new_v4()));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        let root = OwnedRoot(path);
+        let bytes = fixture_pdf_bytes();
+        let document = Uuid::from_u128(DOCUMENT);
+        let id = |value| SdkUuid::parse(&Uuid::from_u128(value).to_string()).unwrap();
+        let facts = ReaderFacts::new(
+            PageKey {
+                document: id(DOCUMENT),
+                page: id(4),
+            },
+            vec![id(3), id(4)],
+        )
+        .unwrap();
+        fs::write(
+            root.0.join(format!("{document}.content")),
+            serde_json::to_vec(&json!({
+                "fileType": "pdf",
+                "cPages": { "original": { "value": PAGES }, "pages": [
+                    { "id": Uuid::from_u128(3), "idx": { "value": "a" }, "redir": { "value": 0 } },
+                    { "id": Uuid::from_u128(4), "idx": { "value": "b" }, "redir": { "value": 1 } },
+                ] },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(root.0.join(format!("{document}.pdf")), &bytes).unwrap();
+        let capture = fixture_capture(&facts);
+        Self {
+            root,
+            bytes,
+            document,
+            facts,
+            capture,
+        }
+    }
+
+    fn index(&self, executable: &Path, deadline: Instant) -> anyhow::Result<PendingIndex> {
+        Ok(development_original_pdf(
+            &self.root.0,
+            executable,
+            self.document,
+            &self.facts,
+            &self.capture,
+            deadline,
+            &mut || Ok(()),
+        )?
+        .index)
+    }
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn actual_original_pdf_producer_joins_binary_index_and_keeps_source_pin() {
+    let OriginalPdfFixture {
+        root,
+        bytes,
+        document,
+        facts,
+        capture,
+    } = OriginalPdfFixture::new();
     let executable = Path::new(env!("CARGO_BIN_EXE_reader-buddy"));
     let deadline = Instant::now() + FIXTURE_WINDOW;
     let foreign = ReaderFacts::new(
         PageKey {
-            document: id(99),
+            document: SdkUuid::parse(&Uuid::from_u128(99).to_string()).unwrap(),
             page: facts.page().page,
         },
         facts.order().to_vec(),
     )
     .unwrap();
-    let foreign_capture =
-        HistoricalCapture::new(foreign.clone(), foreign, [2, 2], 1.0, png, hash).unwrap();
+    let foreign_capture = fixture_capture(&foreign);
     let refused = development_original_pdf(
         &root.0,
         executable,
@@ -504,4 +556,138 @@ fn actual_original_pdf_producer_joins_binary_index_and_keeps_source_pin() {
     );
     assert!(called);
     assert!(result.is_err());
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+fn owned_worker_pid() -> libc::pid_t {
+    // The producer spawns on this test thread. Other fixtures can run in parallel.
+    let children = fs::read_to_string("/proc/thread-self/children").unwrap();
+    let mut children = children.split_whitespace();
+    let pid = children.next().expect("owned worker").parse().unwrap();
+    assert!(children.next().is_none(), "unexpected additional worker");
+    pid
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+fn observe_worker(pid: libc::pid_t, events: libc::c_int) -> io::Result<libc::pid_t> {
+    // WNOWAIT observes stopped/exited children without reaping them.
+    let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid.try_into().unwrap(),
+            status.as_mut_ptr(),
+            events | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // With WNOHANG, a zero PID means that no matching event is ready.
+    Ok(unsafe { status.assume_init().si_pid() })
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+fn assert_worker_reaped(pid: libc::pid_t) {
+    assert_eq!(
+        observe_worker(pid, libc::WEXITED)
+            .expect_err("worker still belongs to the test process")
+            .raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn actual_original_pdf_cancellation_reaps_stalled_query_before_next_request() {
+    let fixture = OriginalPdfFixture::new();
+    let executable = Path::new(env!("CARGO_BIN_EXE_reader-buddy"));
+    let deadline = Instant::now() + FIXTURE_WINDOW;
+    let index = fixture.index(executable, deadline).unwrap();
+    let key = index.key().clone();
+    let pid = owned_worker_pid();
+    // Freeze the real worker after Ready. While stopped it cannot consume the
+    // one query or exit on EOF. The parent still writes into the actual pipe.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGSTOP) }, 0);
+    bounded(deadline, || match observe_worker(pid, libc::WSTOPPED)? {
+        0 => Err(io::ErrorKind::WouldBlock.into()),
+        observed => {
+            assert_eq!(observed, pid);
+            Ok(())
+        }
+    });
+    let input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(format!("/proc/{pid}/fd/0"))
+        .unwrap();
+    let result = index.query(&key, "acceleration", 2, 4096, false, deadline, &mut || {
+        let mut descriptor = libc::pollfd {
+            fd: input.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut descriptor, 1, 0) } < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let submitted = libc::POLLIN | libc::POLLHUP;
+        if descriptor.revents & submitted == submitted {
+            anyhow::bail!("fixture canceled after query submission and input EOF");
+        }
+        Ok(())
+    });
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "fixture canceled after query submission and input EOF"
+    );
+    assert_worker_reaped(pid);
+
+    let deadline = Instant::now() + FIXTURE_WINDOW;
+    let next = fixture.index(executable, deadline).unwrap();
+    let pid = owned_worker_pid();
+    let result = next
+        .query(&key, "acceleration", 2, 4096, false, deadline, &mut || {
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(result.source, key);
+    assert_eq!(result.passages.len(), 1);
+    assert_eq!(result.passages[0].page, Some(2));
+    assert_worker_reaped(pid);
+}
+
+#[cfg(feature = "development-resident-bootstrap")]
+#[test]
+fn actual_original_pdf_parent_refuses_invalid_worker_output_and_reaps() {
+    let fixture = OriginalPdfFixture::new();
+    let units = pdf::normalize(fixture.document, fixture.bytes.as_slice())
+        .unwrap()
+        .document
+        .units;
+    let units = serde_json::to_string(&units).unwrap();
+    for (fault, expected) in [
+        ("key", "PDF worker returned invalid passage provenance"),
+        ("frame", "Unexpected PDF worker frame"),
+        ("truncated", "PDF worker frame truncated"),
+        ("abrupt", "PDF worker frame truncated"),
+        ("extra", "PDF worker returned extra bytes"),
+        ("exit", "PDF worker exited unsuccessfully"),
+    ] {
+        let executable = fixture.root.0.join(format!("worker-{fault}"));
+        let script = format!(
+            "#!/usr/bin/python3\nFAULT = {fault:?}\nUNITS = {units:?}\n{}",
+            include_str!("fixtures/selected_reader_pdf_worker_fault.py")
+        );
+        fs::write(&executable, script).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let deadline = Instant::now() + FIXTURE_WINDOW;
+        let index = fixture.index(&executable, deadline).unwrap();
+        let key = index.key().clone();
+        let pid = owned_worker_pid();
+        let result = index.query(&key, "acceleration", 2, 4096, false, deadline, &mut || {
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().to_string(), expected, "{fault}");
+        assert_worker_reaped(pid);
+    }
 }

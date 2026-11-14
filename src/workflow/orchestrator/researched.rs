@@ -247,6 +247,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     &mut || workflow_progress(&workflow),
                     |handoff, deadline| {
                         let (model, endpoint, key) = models.required_search()?;
+                        let endpoint = endpoint.to_owned();
+                        #[cfg(all(test, feature = "development-resident-bootstrap"))]
+                        let endpoint = fixture::endpoint(&endpoint)?;
                         let mut progress = |_| {
                             attempt
                                 .model_progress()
@@ -254,7 +257,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         };
                         let provider = OpenAIWebResearch::new(
                             model.into(),
-                            endpoint.into(),
+                            endpoint,
                             key.into(),
                             TransportOptions {
                                 timeout: Duration::from_secs(67),
@@ -454,3 +457,6 @@ fn render_references(draft: &AnswerDraft) -> Result<String> {
     }
     Ok(text)
 }
+
+#[cfg(all(test, feature = "development-resident-bootstrap"))]
+pub(crate) mod fixture;

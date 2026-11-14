@@ -10,6 +10,8 @@ use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 #[cfg(target_os = "linux")]
 mod researched;
+#[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+pub(crate) use researched::fixture as researched_fixture;
 
 /// Shared by the live workflow and bounded vision-comparison helper.
 pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
