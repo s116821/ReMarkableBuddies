@@ -48,6 +48,22 @@ but can reject valid handwriting when the readings differ; agreement is not a
 guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
 for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
 
+### Handwritten question marks
+
+Automatic question erasure is disabled in the standard installation. Under the
+planned Reader convention, a handwritten `?` anywhere in a fragment lets Buddy
+erase that fragment after capture. The mark gives permission without a
+separate intent check or confirmation prompt. When enabled, erasure preserves
+surrounding notes, circles, highlights, and underlying content. Unmarked
+handwriting stays in place. Typed requests and Writer keep their existing
+behavior. Buddy will save the screenshot and interpreted question before
+erasure, then show that question on the Buddy page even if it cannot answer.
+You can review and correct the saved interpretation; erasure does not confirm
+that Buddy read it correctly.
+
+Tablet support and live handwriting recognition still require qualification.
+See [the technical notes](docs/TECHNICAL.md#marked-questions-and-erasure).
+
 ## Undo and redo the latest answer
 
 On a supported native editing contract, hold four stationary fingers for two
