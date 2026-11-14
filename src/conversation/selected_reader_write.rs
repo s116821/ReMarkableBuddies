@@ -366,6 +366,7 @@ fn recover(
             },
         },
         admitted_intent: None,
+        marked_question: None,
     };
     expected.push(record(
         actor,
@@ -531,6 +532,7 @@ impl SelectedAdmission {
                     },
                 },
                 admitted_intent: None,
+                marked_question: None,
             };
             records.push(record(
                 store.actor_id,

@@ -315,6 +315,7 @@ fn actually_inconsistent_imported_pairs_remain_refused() {
                     binding: None,
                 },
                 admitted_intent: None,
+                marked_question: None,
             })
         } else {
             Record::RequestEvidence(Box::new(fact))

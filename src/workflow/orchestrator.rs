@@ -55,6 +55,8 @@ pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on t
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
+const MARKED_QUESTION_PROMPT: &str = "For this handwritten source request, add exactly one header field HANDWRITTEN_QUESTION_MARK: present, absent, or unclear. Use present only when a visible handwritten question mark belongs to the same fragment in QUESTION, anywhere within that fragment. Keep its written text, punctuation, and shorthand, and give one tight QUESTION_BOX for the fragment in the overview. Ignore printed question marks and marks in other writing. If you can read a marked fragment and localize it but cannot answer, retain QUESTION and QUESTION_BOX with the mark field and write ANSWER: NONE after the separator. For all other cases follow the original answer instructions.";
+
 /// Result from LLM analysis containing question, answer, question bounds and selected-content center
 struct AnalysisResult {
     question: String,
@@ -64,6 +66,12 @@ struct AnalysisResult {
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
     target: Option<crate::conversation::target::Candidate>,
     about: Option<String>,
+}
+
+struct MarkedFragment {
+    text: String,
+    region: [i32; 4],
+    target: Option<crate::conversation::target::Candidate>,
 }
 
 /// High-level orchestrator for the complete workflow
@@ -522,7 +530,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let result = self.analyze_and_answer(
+        let (result, marked) = self.analyze_and_answer(
             attempt,
             screenshot_base64,
             screenshot_png_data,
@@ -532,6 +540,17 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         match result {
             None => {
+                if let Some(marked) = marked {
+                    self.workflow.check_request_progress()?;
+                    attempt.interpret_marked_question(
+                        &self.ledger,
+                        &marked.text,
+                        marked.region,
+                        marked.target.as_ref(),
+                    )?;
+                    self.workflow.report_failure(Failure::Selection)?;
+                    return Ok(());
+                }
                 info!("No clear selected region or readable question detected");
                 // Record a non-ink diagnostic (no text output)
                 self.workflow.report_failure(Failure::Selection)?;
@@ -574,11 +593,21 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                attempt.interpret_source_target(
-                    &self.ledger,
-                    &result.question,
-                    result.target.as_ref(),
-                )?;
+                if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
+                    self.workflow.check_request_progress()?;
+                    attempt.interpret_marked_question(
+                        &self.ledger,
+                        &result.question,
+                        marked.region,
+                        result.target.as_ref(),
+                    )?;
+                } else {
+                    attempt.interpret_source_target(
+                        &self.ledger,
+                        &result.question,
+                        result.target.as_ref(),
+                    )?;
+                }
                 if attempt.source_target_enabled() {
                     result.about = Some(match result.target.as_ref() {
                         Some(candidate) => candidate.about()?,
@@ -828,7 +857,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         screenshot_png_data: Vec<u8>,
         details: &[String],
         context: Option<&crate::handwriting::ConfirmedContext>,
-    ) -> Result<Option<AnalysisResult>> {
+    ) -> Result<(Option<AnalysisResult>, Option<MarkedFragment>)> {
         #[cfg(any(target_os = "linux", test))]
         let context = context.or_else(|| attempt.selected_handwriting());
         attempt.check_selected()?;
@@ -864,6 +893,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .0
                 .add_text_content(crate::conversation::target::GEOMETRY_CONTRACT);
         }
+        if !attempt.is_selected() {
+            owned.0.add_text_content(MARKED_QUESTION_PROMPT);
+        }
         let mut progress_failed = false;
         // Stored source readback, recipe verification, base64 encoding and model
         // payload assembly all consume the original acquisition budget. Retire
@@ -887,10 +919,61 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.workflow.check_request_progress()?;
         info!("Analysis response received ({} bytes)", response.len());
         attempt.check_selected()?;
-        Ok(Self::parse_analysis_response(
-            &response,
-            screenshot_png_data,
+        let marked = if attempt.is_selected() {
+            None
+        } else {
+            Self::parse_marked_fragment(&response)
+        };
+        Ok((
+            Self::parse_analysis_response(&response, screenshot_png_data),
+            marked,
         ))
+    }
+
+    fn analysis_separator(response: &str) -> Option<usize> {
+        response.match_indices("---").find_map(|(i, _)| {
+            let before = response[..i].rsplit('\n').next().unwrap_or("");
+            let after = response[i + 3..].split('\n').next().unwrap_or("");
+            (before.trim().is_empty() && after.trim().is_empty()).then_some(i)
+        })
+    }
+
+    fn parse_marked_fragment(response: &str) -> Option<MarkedFragment> {
+        let separator = Self::analysis_separator(response)?;
+        let answer = response[separator + 3..]
+            .trim()
+            .strip_prefix("ANSWER:")?
+            .trim();
+        if answer.is_empty() {
+            return None;
+        }
+        let header = &response[..separator];
+        let field = |prefix: &str| {
+            let mut values = header
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix(prefix));
+            let value = values.next()?.trim();
+            values.next().is_none().then_some(value)
+        };
+        if field("HANDWRITTEN_QUESTION_MARK:")? != "present" {
+            return None;
+        }
+        let question = field("QUESTION:")?;
+        if question.trim().is_empty()
+            || question.len() > 4096
+            || question.eq_ignore_ascii_case("NONE")
+            || question.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let bounds = Self::parse_bounding_box(field("QUESTION_BOX:")?)?;
+        let region = [bounds.x, bounds.y, bounds.width, bounds.height];
+        crate::conversation::reader_plan::checked_region(region).ok()?;
+        Some(MarkedFragment {
+            text: question.to_owned(),
+            region,
+            target: field("TARGET_JSON:").and_then(Self::parse_target_candidate),
+        })
     }
 
     fn parse_target_candidate(raw: &str) -> Option<crate::conversation::target::Candidate> {
@@ -908,11 +991,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let separator = response.match_indices("---").find_map(|(i, _)| {
-            let before = response[..i].rsplit('\n').next().unwrap_or("");
-            let after = response[i + 3..].split('\n').next().unwrap_or("");
-            (before.trim().is_empty() && after.trim().is_empty()).then_some(i)
-        })?;
+        let separator = Self::analysis_separator(response)?;
         let (header, body) = (&response[..separator], &response[separator + 3..]);
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
@@ -1374,6 +1453,33 @@ impl<M: LLMEngine> Orchestrator<M> {
 mod tests {
     use super::Orchestrator;
     use crate::OpenAI;
+
+    #[test]
+    fn marked_fragment_preserves_nonterminal_shorthand_even_without_an_answer() {
+        let response = "QUESTION: G? unc. here\nQUESTION_BOX: 12,24,48,16\nHANDWRITTEN_QUESTION_MARK: present\n---\nANSWER: NONE";
+        let marked = Orchestrator::<OpenAI>::parse_marked_fragment(response).unwrap();
+        assert_eq!(marked.text, "G? unc. here");
+        assert_eq!(marked.region, [12, 24, 48, 16]);
+        assert!(Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).is_none());
+        for (old, new) in [
+            ("present", "absent"), // Printed punctuation alone remains absent.
+            ("present", "unclear"),
+            ("HANDWRITTEN_QUESTION_MARK: present\n", ""),
+            ("present", "present\nHANDWRITTEN_QUESTION_MARK: present"),
+            ("12,24,48,16", "12,24,48,16\nQUESTION_BOX: 12,24,48,16"),
+            ("12,24,48,16", "-1,24,48,16"),
+            ("12,24,48,16", "12,24,0,16"),
+            ("12,24,48,16", "762,24,48,16"),
+            ("12,24,48,16", "12,1020,48,16"),
+            ("12,24,48,16", "2147483647,24,48,16"),
+        ] {
+            assert!(
+                Orchestrator::<OpenAI>::parse_marked_fragment(&response.replace(old, new))
+                    .is_none(),
+                "{new}"
+            );
+        }
+    }
 
     #[test]
     fn source_target_header_preserves_subject_dashes_and_refuses_duplicate_candidates() {

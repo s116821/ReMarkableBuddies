@@ -16,12 +16,13 @@ pub mod evidence;
 mod export;
 pub mod feedback;
 mod historical_association;
+pub(crate) mod marked_question;
 mod pending;
 #[cfg(test)]
 pub(crate) use pending::tests::{fixture_defer_pending_for_worker, fixture_pending_for_worker};
 #[cfg(test)]
 mod reader_dispatch;
-mod reader_plan;
+pub(crate) mod reader_plan;
 pub(crate) mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
@@ -60,6 +61,7 @@ pub use historical_association::{
     HistoricalPageAssociationUnresolved,
 };
 pub use intent::*;
+pub use marked_question::MarkedQuestion;
 pub use notebook::ArchivedNormalizedSource;
 pub use pending::{
     PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
@@ -141,6 +143,9 @@ impl Ledger {
                 | Record::RegionSource(_)
                 | Record::TargetUse(_)
                 | Record::TargetState(_) => target::SCHEMA,
+                Record::Receipt(receipt) if receipt.marked_question.is_some() => {
+                    marked_question::SCHEMA
+                }
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
@@ -172,7 +177,11 @@ impl Ledger {
         ensure!(
             matches!(
                 envelope.domain_schema_version,
-                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA | target::SCHEMA
+                SCHEMA
+                    | INTENT_SCHEMA
+                    | notebook::NOTEBOOK_SOURCE_SCHEMA
+                    | target::SCHEMA
+                    | marked_question::SCHEMA
             ),
             "unsupported conversation schema"
         );
@@ -350,7 +359,7 @@ impl Ledger {
                 (export.id, Namespace::ExportAssociation, export.conversation)
             }
             Record::Receipt(receipt) => {
-                intent::validate_receipt_schema(envelope.domain_schema_version, receipt)?;
+                marked_question::validate_receipt_shape(envelope, receipt)?;
                 ensure!(
                     crate::storage::valid_digest(&receipt.fingerprint)
                         && !receipt.acknowledgment.applied_root_revision.is_nil()
@@ -482,7 +491,16 @@ impl Ledger {
         records: Vec<Envelope>,
         binding: Option<Uuid>,
     ) -> Result<(WriteResult, bool)> {
-        self.publish_with_capture(operation, fingerprint, root, records, binding, None, None)
+        self.publish_with_capture(
+            operation,
+            fingerprint,
+            root,
+            records,
+            binding,
+            None,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -495,6 +513,7 @@ impl Ledger {
         binding: Option<Uuid>,
         captured: Option<&crate::storage::captured::Captured>,
         published: Option<&mut Vec<Envelope>>,
+        marked_question: Option<marked_question::MarkedQuestion>,
     ) -> Result<(WriteResult, bool)> {
         if self.store.source_target_generation()?.is_some() {
             let users = records
@@ -535,6 +554,11 @@ impl Ledger {
             binding,
         };
         let root_revision = root.revision_id;
+        let fingerprint = if let Some(marked) = &marked_question {
+            marked.fingerprint(&ack)?
+        } else {
+            fingerprint
+        };
         let receipt = self.envelope(
             Namespace::Conversation,
             Self::receipt_id(operation),
@@ -543,6 +567,7 @@ impl Ledger {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
                 admitted_intent: None,
+                marked_question,
             }),
             vec![],
         )?;
@@ -814,6 +839,7 @@ impl Ledger {
             binding,
             captured.as_deref(),
             Some(&mut published),
+            None,
         )?;
         ensure!(
             !fresh_only || fresh,
@@ -1325,6 +1351,7 @@ impl Ledger {
             reason,
             target,
             None,
+            None,
         )
     }
 
@@ -1336,7 +1363,16 @@ impl Ledger {
         turn: Turn,
         captured: &crate::storage::captured::Captured,
     ) -> Result<WriteResult> {
-        self.advance_with_capture(operation, root, draft, turn, None, None, Some(captured))
+        self.advance_with_capture(
+            operation,
+            root,
+            draft,
+            turn,
+            None,
+            None,
+            Some(captured),
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1349,6 +1385,7 @@ impl Ledger {
         reason: Option<AttemptReason>,
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
         captured: Option<&crate::storage::captured::Captured>,
+        marked: Option<marked_question::PreparedMark>,
     ) -> Result<WriteResult> {
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
@@ -1363,7 +1400,14 @@ impl Ledger {
         } else {
             Self::fingerprint(&("advance", &turn))?
         };
-        if let Some(prior) = self.replay(operation, &fingerprint)? {
+        if marked.is_some() {
+            ensure!(
+                self.store
+                    .value(Namespace::Conversation, Self::receipt_id(operation))?
+                    .is_none(),
+                "marked question interpretation is historical"
+            );
+        } else if let Some(prior) = self.replay(operation, &fingerprint)? {
             ensure!(
                 captured.is_none(),
                 "Reader follow-up completion is historical"
@@ -1458,6 +1502,7 @@ impl Ledger {
             Record::Turn(turn),
             vec![],
         )?;
+        let marked_question = marked.map(|mark| mark.bind(&updated)).transpose()?;
         let root = self.envelope(
             Namespace::Conversation,
             root.id,
@@ -1489,7 +1534,39 @@ impl Ledger {
                 vec![],
             )?);
         }
-        if target.is_some() {
+        if let Some(marked_question) = marked_question {
+            let mut published = Vec::new();
+            let (result, fresh) = self.publish_with_capture(
+                operation,
+                fingerprint,
+                root,
+                records,
+                binding,
+                captured,
+                Some(&mut published),
+                Some(marked_question),
+            )?;
+            ensure!(fresh, "marked question interpretation is historical");
+            let mut current = captured
+                .context("marked question lost captured ownership")?
+                .clone();
+            current.advance(published)?;
+            let receipt = current
+                .records
+                .iter()
+                .find(|(envelope, _)| {
+                    envelope.namespace == Namespace::Conversation
+                        && envelope.record_id == Self::receipt_id(operation)
+                })
+                .context("marked question receipt absent")?;
+            self.validate_marked_question(
+                &receipt.0,
+                result.historical.conversation,
+                &mut crate::storage::captured::ReadBudget::default(),
+            )?;
+            current.with_current(&self.store, || Ok(()))?;
+            Ok(result)
+        } else if target.is_some() {
             let (result, fresh) =
                 self.publish_observed(operation, fingerprint, root, records, binding)?;
             ensure!(
@@ -1505,6 +1582,7 @@ impl Ledger {
                 records,
                 binding,
                 Some(captured),
+                None,
                 None,
             )
             .map(|(result, _)| result)

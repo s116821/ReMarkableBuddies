@@ -198,6 +198,7 @@ impl ResidentPrepared {
                 binding: None,
             },
             admitted_intent: None,
+            marked_question: None,
         };
         Ok(Self {
             operation,

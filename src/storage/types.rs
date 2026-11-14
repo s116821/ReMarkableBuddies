@@ -111,7 +111,13 @@ impl Envelope {
                             Some("target-use" | "target-state")
                         ),
                         _ => false,
-                    }),
+                    })
+                || (self.domain_schema_version == 5
+                    && self.namespace == Namespace::Conversation
+                    && self.kind == Kind::Value
+                    && self.parents.is_empty()
+                    && self.media_descriptors.is_empty()
+                    && self.payload["record_kind"] == "receipt"),
             "unsupported domain schema version for namespace"
         );
         ensure!(

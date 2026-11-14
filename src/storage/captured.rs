@@ -10,6 +10,7 @@ pub struct RecordRef {
     pub revision: Uuid,
     pub object: ObjectRef,
 }
+#[derive(Clone)]
 pub(crate) struct Captured {
     store: Weak<Store>,
     pub generation: Uuid,
@@ -380,6 +381,7 @@ impl Store {
     pub(crate) fn original_transaction(
         &self,
         revision: Uuid,
+        member_limit: usize,
         budget: &mut ReadBudget,
     ) -> Result<Vec<Envelope>> {
         let inner = self
@@ -402,7 +404,10 @@ impl Store {
             .manifests
             .get(transactions.first().unwrap())
             .context("transaction absent")?;
-        ensure!(manifest.records.len() == 3, "evidence transaction size");
+        ensure!(
+            (3..=member_limit).contains(&manifest.records.len()),
+            "evidence transaction size"
+        );
         let members = manifest.records.clone();
         let mut result = Vec::new();
         for r in members {

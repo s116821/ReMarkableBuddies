@@ -604,6 +604,7 @@ impl Ledger {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
                 admitted_intent: None,
+                marked_question: None,
             }),
             vec![],
         )?;
@@ -773,6 +774,23 @@ impl Ledger {
         for record in records {
             if let Record::RequestEvidence(fact) = record {
                 self.validate_evidence(fact, &mut budget)?;
+            } else if let Record::Receipt(
+                receipt @ super::Receipt {
+                    marked_question: Some(_),
+                    ..
+                },
+            ) = record
+            {
+                let ack = &receipt.acknowledgment;
+                let envelope = self
+                    .store
+                    .value(Namespace::Conversation, Self::receipt_id(ack.operation))?
+                    .context("marked question receipt absent")?;
+                ensure!(
+                    Self::decode(&envelope)? == *record,
+                    "marked question receipt changed"
+                );
+                self.validate_marked_question(&envelope, ack.conversation, &mut budget)?;
             }
         }
         Ok(())
@@ -803,6 +821,19 @@ impl Ledger {
                     fact,
                     head(RequestEvidence::identity(fact.operation))?,
                     head(Self::receipt_id(fact.operation))?,
+                    &mut budget,
+                )?;
+            } else if let Record::Receipt(
+                receipt @ super::Receipt {
+                    marked_question: Some(_),
+                    ..
+                },
+            ) = record
+            {
+                let ack = &receipt.acknowledgment;
+                self.validate_marked_question(
+                    head(Self::receipt_id(ack.operation))?,
+                    ack.conversation,
                     &mut budget,
                 )?;
             }
@@ -847,7 +878,7 @@ impl Ledger {
         );
         let transaction = self
             .store
-            .original_transaction(envelope.revision_id, budget)?;
+            .original_transaction(envelope.revision_id, 3, budget)?;
         let ack = validate_transaction(fact, &transaction)?;
         validate_root_successor(fact, &records[0], &transaction)?;
         ensure!(

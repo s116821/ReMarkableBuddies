@@ -96,6 +96,8 @@ pub struct State {
     #[cfg(test)]
     pub acquisition_kind: crate::device::backend::AcquisitionKind,
     #[cfg(test)]
+    pub sdk_capture: Option<remarkable_open_sdk::capture::CapturedBatch>,
+    #[cfg(test)]
     pub detail_queries: usize,
     #[cfg(test)]
     pub refuse_repeated_details: bool,
@@ -239,6 +241,8 @@ impl State {
             #[cfg(test)]
             acquisition_kind: crate::device::backend::AcquisitionKind::LegacyUnqualified,
             #[cfg(test)]
+            sdk_capture: None,
+            #[cfg(test)]
             detail_queries: 0,
             #[cfg(test)]
             refuse_repeated_details: false,
@@ -368,6 +372,14 @@ impl DeviceBackend for SimDevice {
         }
         #[cfg(not(test))]
         crate::device::backend::AcquisitionKind::LegacyUnqualified
+    }
+    #[cfg(test)]
+    fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
+        self.0
+            .borrow_mut()
+            .sdk_capture
+            .take()
+            .context("SDK fixture capture absent")
     }
     #[cfg(test)]
     fn wait_for_interactions(

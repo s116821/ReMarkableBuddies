@@ -104,7 +104,11 @@ fn with_stored_feedback<R>(
     let mut seen = BTreeSet::new();
     for envelope in &snapshot {
         ensure!(
-            envelope.kind == Kind::Value && envelope.domain_schema_version == 1,
+            envelope.kind == Kind::Value
+                && matches!(
+                    envelope.domain_schema_version,
+                    1 | super::marked_question::SCHEMA
+                ),
             "unsupported stored feedback history"
         );
         ensure!(
@@ -126,6 +130,13 @@ fn with_stored_feedback<R>(
     }
     let records = Ledger::inspect_snapshot(conversation, false, &snapshot)
         .map_err(|_| anyhow!("invalid stored feedback chronology"))?;
+    let mut marked_budget = crate::storage::captured::ReadBudget::default();
+    for envelope in snapshot
+        .iter()
+        .filter(|e| e.domain_schema_version == super::marked_question::SCHEMA)
+    {
+        ledger.validate_marked_question(envelope, conversation, &mut marked_budget)?;
+    }
     let selected = records
         .iter()
         .find_map(|record| match record {

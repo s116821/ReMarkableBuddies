@@ -288,6 +288,8 @@ pub struct Receipt {
     pub acknowledgment: Acknowledgment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_intent: Option<super::AdmittedIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked_question: Option<super::MarkedQuestion>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(

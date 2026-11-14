@@ -934,6 +934,7 @@ mod tests {
                 binding: None,
             },
             admitted_intent: Some(intent),
+            marked_question: None,
         }))
         .unwrap();
         let saved = reference(&receipt);

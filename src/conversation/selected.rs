@@ -254,6 +254,10 @@ impl SelectedDomainProjection {
                     anyhow::bail!("ordinary request evidence excluded from selected projection")
                 }
                 Record::Receipt(receipt) => {
+                    ensure!(
+                        receipt.marked_question.is_none(),
+                        "ordinary marked question excluded from selected projection"
+                    );
                     let ack = &receipt.acknowledgment;
                     ensure!(
                         matches!(self.records.get(&ack.applied_root_revision), Some(Record::Root(r)) if r.id == conversation),

@@ -363,6 +363,7 @@ fn add_receipt(
             binding,
         },
         admitted_intent: None,
+        marked_question: None,
     };
     records.push(record(
         operation,

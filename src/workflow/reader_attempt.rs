@@ -34,6 +34,7 @@ pub(super) struct Attempt {
     reader_preparation: Option<ReaderPreparation>,
     selected: Option<selected::Selected>,
     target_frame: Option<crate::conversation::target_source::SourceFrame>,
+    marked_capture: Option<crate::storage::captured::Captured>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -153,6 +154,7 @@ pub(crate) fn assert_attachment_behavior(
         reader_preparation: None,
         selected: None,
         target_frame: None,
+        marked_capture: None,
     };
     assert!(attempt
         .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
@@ -208,6 +210,7 @@ impl Attempt {
             reader_preparation: None,
             selected: Some(selected),
             target_frame: None,
+            marked_capture: None,
         }
     }
     pub(super) fn check_selected(&self) -> Result<()> {
@@ -533,11 +536,18 @@ impl Attempt {
             reader_preparation: None,
             selected: None,
             target_frame: None,
+            marked_capture: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
         if ledger.store().source_target_generation()?.is_some() {
             attempt.target_frame =
                 Some(ledger.target_source_frame(attempt.user.conversation, attempt.evidence)?);
+        }
+        if kind == EvidenceKind::SdkFixture
+            && crate::storage::sync::mode::ordinary_local(ledger.store())?
+        {
+            attempt.marked_capture =
+                Some(ledger.capture_marked_question(attempt.user.conversation)?);
         }
         Ok(attempt)
     }
@@ -673,6 +683,75 @@ impl Attempt {
             candidate,
         )?;
         frame.acknowledge(ledger, &result)?;
+        self.user = user;
+        Ok(())
+    }
+
+    pub(super) fn interpret_marked_question(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        region: [i32; 4],
+        candidate: Option<&crate::conversation::target::Candidate>,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.is_selected(), "marked question is ordinary only");
+        // Only the modeled SDK batch currently supplies the exact capture
+        // observation. Other routes can retain the question without an
+        // association until the installed capture owner supplies these facts.
+        let Some(captured) = self.marked_capture.as_ref() else {
+            log::debug!("Marked question has no admitted full-frame source association");
+            return self.interpret_source_target(ledger, text, candidate);
+        };
+        let (envelope, _) = captured
+            .records
+            .iter()
+            .find(|(envelope, _)| {
+                envelope.namespace == Namespace::Source && envelope.record_id == self.evidence
+            })
+            .context("marked question capture absent")?;
+        let Record::Capture(capture) = Ledger::decode(envelope)? else {
+            anyhow::bail!("marked question capture differs");
+        };
+        if capture.facts.images.first().is_none_or(|overview| {
+            overview.dimensions != [768, 1024]
+                || !overview.full_frame_of(&capture.facts.native_parent)
+        }) {
+            log::debug!("Marked question overview does not match the full-page coordinate frame");
+            return self.interpret_source_target(ledger, text, candidate);
+        }
+        let source = crate::conversation::marked_question::modeled_source(&capture.facts);
+        let unresolved = unresolved_target();
+        let target = self
+            .target_frame
+            .as_ref()
+            .map(|frame| (frame, candidate.unwrap_or(&unresolved)));
+        let (root, _) = captured
+            .records
+            .iter()
+            .find(|(envelope, _)| {
+                envelope.namespace == Namespace::Conversation
+                    && envelope.record_id == self.user.conversation
+            })
+            .context("marked question prepared root absent")?;
+        let root = ExpectedHeads([root.revision_id].into_iter().collect());
+        let mut user = self.user.clone();
+        user.text = Some(text.into());
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = now()?;
+        let operation = crate::writer::stage(user.exchange, "reader-interpret-marked-question");
+        let result = ledger.interpret_marked_question(
+            operation,
+            user.clone(),
+            root,
+            captured,
+            self.evidence,
+            &source,
+            region,
+            target,
+        )?;
+        if let Some(frame) = self.target_frame.as_mut() {
+            frame.acknowledge(ledger, &result)?;
+        }
         self.user = user;
         Ok(())
     }

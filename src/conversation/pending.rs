@@ -477,6 +477,7 @@ fn publish_in_store(
             evidence: request.evidence,
             media: request.media.clone(),
         }),
+        marked_question: None,
     };
     let envelope = new_record(
         store.actor_id,

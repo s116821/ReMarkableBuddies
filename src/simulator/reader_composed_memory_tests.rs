@@ -30,6 +30,15 @@ fn composed_sdk_batch(
     document: Uuid,
     page: Uuid,
 ) -> remarkable_open_sdk::capture::CapturedBatch {
+    sdk_batch_with_overview(device, document, page, [2, 3])
+}
+
+fn sdk_batch_with_overview(
+    device: Uuid,
+    document: Uuid,
+    page: Uuid,
+    overview: [u32; 2],
+) -> remarkable_open_sdk::capture::CapturedBatch {
     use remarkable_open_sdk::{
         capture::{synthetic::*, *},
         mock::MockPlatform,
@@ -85,9 +94,13 @@ fn composed_sdk_batch(
                 width: 4,
                 height: 6,
             },
-            output_dimensions: [2, 3],
+            output_dimensions: overview,
             filter: ResizeFilter::Nearest,
-            png: encode_png(&native.resize_exact(2, 3, image::imageops::FilterType::Nearest)),
+            png: encode_png(&native.resize_exact(
+                overview[0],
+                overview[1],
+                image::imageops::FilterType::Nearest,
+            )),
         },
         remarkable_open_sdk::capture::synthetic::ImageInput {
             role: ImageRole::Detail(7),
@@ -103,6 +116,283 @@ fn composed_sdk_batch(
         },
     ];
     validate_batch(&request, acquisition, images, CaptureLimits::default()).unwrap()
+}
+
+#[test]
+fn marked_question_receipt_retains_exact_original_projection_and_refuses_replay() -> Result<()> {
+    use crate::conversation::{marked_question, ContextBudget};
+    use crate::workflow::exchange_history::{self, PageOwner};
+    for case in [
+        "fresh",
+        "lost acknowledgment",
+        "changed root",
+        "changed Prepared",
+    ] {
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open()?;
+        let conversation = Uuid::new_v4();
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let batch = sdk_batch_with_overview(Uuid::new_v4(), document, page, [768, 1024]);
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let mut user = Turn {
+            id: Uuid::new_v4(),
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        let prepared = ledger.prepare_sdk_fixture(
+            Uuid::new_v4(),
+            ledger.expected(Namespace::Conversation, conversation)?,
+            user.clone(),
+            &batch,
+        )?;
+        let envelope = ledger
+            .store()
+            .value(Namespace::Source, prepared.capture)?
+            .unwrap();
+        let Record::Capture(capture) = Ledger::decode(&envelope)? else {
+            anyhow::bail!("expected SDK capture")
+        };
+        let source = marked_question::modeled_source(&capture.facts);
+        assert_eq!((source.document, source.page), (document, page));
+        let buddy = Uuid::new_v4();
+        let binding = BindingReceipt {
+            acquisition: Default::default(),
+            operation: Uuid::new_v4(),
+            conversation,
+            request_fingerprint: "modeled marked question".into(),
+            adapter_fingerprint: "modeled presentation".into(),
+            source: source.clone(),
+            intended_target: Some(buddy),
+            observed_document: document,
+            observed_page: buddy,
+            expected_order: vec![page],
+            observed_order: vec![page, buddy],
+            persisted_revision: "modeled binding".into(),
+            observed_ms: 1,
+            evidence_origin: "synthetic".into(),
+        };
+        ledger.bind(
+            binding.operation,
+            ledger.expected(Namespace::Conversation, conversation)?,
+            Default::default(),
+            binding,
+        )?;
+        let history = ledger.inspect(conversation, false)?;
+        user = history
+            .into_iter()
+            .find_map(|record| match record {
+                Record::Turn(turn) if turn.id == user.id => Some(turn),
+                _ => None,
+            })
+            .unwrap();
+        let root = ledger.expected(Namespace::Conversation, conversation)?;
+        let captured = ledger.capture_marked_question(conversation)?;
+        user.outcome = Outcome::Interpreted;
+        user.text = Some("G? unc. here".into());
+        user.updated_ms = 2;
+        let region = [12, 24, 48, 16];
+        let operation = crate::writer::stage(user.exchange, "reader-interpret-marked-question");
+        let mut wrong = source.clone();
+        wrong.page = Uuid::new_v4();
+        assert!(ledger
+            .interpret_marked_question(
+                operation,
+                user.clone(),
+                root.clone(),
+                &captured,
+                prepared.capture,
+                &wrong,
+                region,
+                None
+            )
+            .is_err());
+        if case == "changed root" {
+            let mut unrelated = user.clone();
+            unrelated.id = Uuid::new_v4();
+            unrelated.exchange = Uuid::new_v4();
+            unrelated.sequence = 0;
+            unrelated.sources.clear();
+            ledger.append(Uuid::new_v4(), root.clone(), unrelated, vec![])?;
+        } else if case == "changed Prepared" {
+            let (old, _) = captured
+                .records
+                .iter()
+                .find(|(envelope, _)| envelope.record_id == user.id)
+                .unwrap();
+            let mut changed = old.clone();
+            changed.parents = [old.revision_id].into_iter().collect();
+            changed.revision_id = Uuid::new_v4();
+            changed.operation_id = Uuid::new_v4();
+            changed.payload["record"]["updated_ms"] = serde_json::json!(2);
+            ledger.store().commit(vec![changed], BTreeMap::new())?;
+        } else if case == "lost acknowledgment" {
+            ledger.store().set_fault(StorageFault::AfterCommit)?;
+        }
+        let result = ledger.interpret_marked_question(
+            operation,
+            user.clone(),
+            root.clone(),
+            &captured,
+            prepared.capture,
+            &source,
+            region,
+            None,
+        );
+        assert_eq!(result.is_ok(), case == "fresh", "{case}");
+        assert!(ledger
+            .interpret_marked_question(
+                operation,
+                user.clone(),
+                root,
+                &captured,
+                prepared.capture,
+                &source,
+                region,
+                None
+            )
+            .is_err());
+        let records = ledger.inspect(conversation, false)?;
+        let receipts: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Receipt(receipt) if receipt.marked_question.is_some() => Some(receipt),
+                _ => None,
+            })
+            .collect();
+        if case.starts_with("changed") {
+            assert!(receipts.is_empty(), "{case} produced a marked receipt");
+            continue;
+        }
+        assert_eq!(receipts.len(), 1);
+        let receipt = receipts[0];
+        assert_eq!(receipt.acknowledgment.operation, operation);
+        let json = serde_json::to_value(receipt)?;
+        let marked = &json["marked_question"];
+        assert_eq!(marked["region"], serde_json::json!(region));
+        assert_eq!(marked["source"], serde_json::to_value(&source)?);
+        assert_eq!(
+            marked["overview"],
+            serde_json::to_value(capture.facts.images[0].media())?
+        );
+        assert_eq!(
+            marked["capture"]["record"],
+            serde_json::json!(prepared.capture)
+        );
+        assert_eq!(
+            marked["capture"]["revision"],
+            serde_json::json!(envelope.revision_id)
+        );
+        let interpreted = ledger
+            .store()
+            .value(Namespace::Conversation, user.id)?
+            .unwrap();
+        assert_eq!(
+            marked["interpreted_turn"]["revision"],
+            serde_json::json!(interpreted.revision_id)
+        );
+        assert_eq!(Ledger::decode(&interpreted)?, Record::Turn(user.clone()));
+        let persisted = ledger
+            .store()
+            .snapshot_heads_matching(&[Namespace::Conversation], 8, |envelope| {
+                envelope.payload["record"]["acknowledgment"]["operation"]
+                    == serde_json::json!(operation)
+            })?
+            .pop()
+            .unwrap();
+        assert_eq!(persisted.domain_schema_version, marked_question::SCHEMA);
+        let mut selected = persisted.clone();
+        selected.payload["record"]["admitted_intent"] = serde_json::Value::Null;
+        assert!(Ledger::decode(&selected).is_err());
+        let mut wrong_schema = persisted.clone();
+        wrong_schema.domain_schema_version = 1;
+        assert!(Ledger::decode(&wrong_schema).is_err());
+        let mut wrong_region = persisted.clone();
+        wrong_region.payload["record"]["marked_question"]["region"] =
+            serde_json::json!([13, 24, 48, 16]);
+        assert!(Ledger::decode(&wrong_region).is_err());
+
+        let context = ledger.presentation_context(
+            conversation,
+            &ContextBudget {
+                max_text_bytes: 4096,
+                max_turns: 8,
+                provider_token_limit: Some(4096),
+            },
+            |turns| Ok(turns.len()),
+        )?;
+        assert_eq!(context.turns, vec![user.clone()]);
+        let owner = PageOwner {
+            document,
+            page: buddy,
+            visit: "modeled Buddy visit".into(),
+            session: source.session.clone(),
+        };
+        let projection = exchange_history::project(&ledger, conversation, &owner, "")?;
+        assert_eq!(projection.exchanges.len(), 1);
+        assert_eq!(projection.exchanges[0].turns.len(), 1);
+        let presented = &projection.exchanges[0].turns[0];
+        assert_eq!(presented.id, user.id);
+        assert_eq!(presented.revision, interpreted.revision_id);
+        assert_eq!(presented.text, "G? unc. here");
+        assert!(records
+            .iter()
+            .all(|record| !matches!(record, Record::Turn(turn) if turn.role == Role::Assistant)));
+    }
+    Ok(())
+}
+
+#[test]
+fn ordinary_modeled_sdk_reader_persists_mark_and_abstains_without_any_effect() {
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open().unwrap();
+    let store = ledger.store().clone();
+    let state = setup();
+    let initial = state.borrow().pages[0].image();
+    {
+        let mut device = state.borrow_mut();
+        device.acquisition_kind = crate::device::backend::AcquisitionKind::Sdk;
+        device.sdk_capture = Some(sdk_batch_with_overview(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            [768, 1024],
+        ));
+    }
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut recording = model(store.clone(), calls.clone());
+    recording.replies = VecDeque::from([
+        "QUESTION: G? unc. here\nQUESTION_BOX: 12,24,48,16\nHANDWRITTEN_QUESTION_MARK: present\n---\nANSWER: NONE".into(),
+    ]);
+    let mut orchestrator = Orchestrator::new(
+        Workflow::with_device(Box::new(SimDevice(state.clone())), false),
+        recording,
+        ledger,
+    );
+    orchestrator.set_trigger_enabled(false);
+    orchestrator.run_iteration().unwrap();
+    assert_eq!(calls.borrow().len(), 1);
+    let device = state.borrow();
+    assert_eq!(device.pages[0].image(), initial);
+    assert!(!device.events.iter().any(|event| event.action == "erase"));
+    assert_eq!(device.counts.get(&Operation::Text), None);
+    let saved = records(&Ledger::new(store));
+    assert!(saved
+        .iter()
+        .any(|r| matches!(r, Record::Receipt(receipt) if receipt.marked_question.is_some())));
+    assert!(!saved
+        .iter()
+        .any(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant)));
 }
 
 struct SelectedModel {
