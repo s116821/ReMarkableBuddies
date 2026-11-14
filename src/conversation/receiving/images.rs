@@ -41,7 +41,7 @@ pub(crate) fn resolve_followup(
 ) -> Result<Images> {
     let mut view = context.clone();
     let mut request = request.clone();
-    if let Some(source) = source {
+    if let Some(source) = source.filter(|r| !matches!(r, Record::ArchivedNormalizedSource(_))) {
         let id = super::source_id(source).context("follow-up source identity absent")?;
         if !request.sources.contains(&id)
             && !view.turns.iter().any(|turn| turn.sources.contains(&id))

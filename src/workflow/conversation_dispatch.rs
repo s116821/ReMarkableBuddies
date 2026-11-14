@@ -10,7 +10,10 @@ use crate::{
         TurnRange,
     },
     device::interaction::Interaction,
-    retrieval::{IndexKey, Provider},
+    retrieval::{
+        notebook::{NotebookText, PageImage, SuppliedNotebook},
+        IndexKey, Provider,
+    },
     storage::{Namespace, Uuid},
     writer, LLMEngine,
 };
@@ -414,7 +417,7 @@ impl<'a> Dispatch<'a> {
         })
     }
 
-    /// The trusted owner supplies the independently observed original source
+    /// The trusted owner supplies the independently observed PDF or EPUB
     /// separately from the input visit and a deadline-aware, single-request
     /// answering engine. The observer must refuse revoked input or configuration.
     #[allow(dead_code, clippy::too_many_arguments)]
@@ -427,6 +430,78 @@ impl<'a> Dispatch<'a> {
         admitted: &RequestScope,
         source: SourceDirective,
         original: Option<FollowupSource<'_>>,
+        research: FollowupResearch<'_>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.reader_with_original(
+            ledger,
+            engine,
+            request,
+            history_range,
+            admitted,
+            source,
+            original,
+            None,
+            research,
+            observe,
+        )
+    }
+
+    /// Admit a bounded, independently supplied historical OCR page set.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn reader_with_notebook(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        notebook: NotebookFollowupSource<'_>,
+        research: FollowupResearch<'_>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Reader, false), "Reader disabled");
+        admitted.check(ledger, observe)?;
+        let mut check = |_| {
+            research.check(admitted, request)?;
+            (notebook.check)()
+        };
+        check(crate::retrieval::notebook::Progress::BeforeReturn)?;
+        let original = notebook
+            .ocr
+            .admit_supplied(notebook.input, notebook.pages, &mut check)?;
+        let retrieval = FollowupSource {
+            key: original.index().key().clone(),
+            provider: original.index(),
+            check: notebook.check,
+        };
+        self.reader_with_original(
+            ledger,
+            engine,
+            request,
+            history_range,
+            admitted,
+            source,
+            Some(retrieval),
+            Some(&original),
+            research,
+            observe,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reader_with_original(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        original: Option<FollowupSource<'_>>,
+        notebook: Option<&SuppliedNotebook<'_>>,
         research: FollowupResearch<'_>,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
     ) -> Result<PendingOutput> {
@@ -450,6 +525,11 @@ impl<'a> Dispatch<'a> {
         ensure!(
             original.as_ref().map(|original| &original.key) == expected,
             "Reader source admission changed"
+        );
+        ensure!(
+            expected.is_some_and(|key| key.format == crate::retrieval::SourceFormat::Notebook)
+                == notebook.is_some(),
+            "Reader notebook requires independent supplied OCR admission"
         );
         let source_check = original.as_ref().map(|original| original.check.clone());
         let check_source = || verify_followup_source(&source_check);
@@ -507,6 +587,7 @@ impl<'a> Dispatch<'a> {
             retrieval.as_ref().map(|provider| provider as &dyn Provider),
             |text| Ok(text.len()),
             Some(head),
+            notebook,
         )?;
         check_visit()?;
         check_source()?;
@@ -721,11 +802,20 @@ pub(crate) struct PendingOutput {
 
 type SourceCurrent = Arc<dyn Fn() -> Result<()> + Send + Sync>;
 
-/// Host-only material from an independent PDF observation. `check` must
+/// Host-only material from independent source observation. `check` must
 /// revalidate that original observation, not just assert a cache key.
 pub(crate) struct FollowupSource<'a> {
     pub(crate) key: IndexKey,
     pub(crate) provider: &'a dyn Provider,
+    pub(crate) check: SourceCurrent,
+}
+
+/// Fresh observation of the supplied notebook for this Reader operation.
+/// `check` samples that observation only and must not reopen the Store.
+pub(crate) struct NotebookFollowupSource<'a> {
+    pub(crate) input: &'a writer::notebook::ValidatedNotebook,
+    pub(crate) ocr: &'a NotebookText,
+    pub(crate) pages: &'a [PageImage<'a>],
     pub(crate) check: SourceCurrent,
 }
 

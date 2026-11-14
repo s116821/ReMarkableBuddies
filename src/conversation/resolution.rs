@@ -116,6 +116,7 @@ impl Ledger {
             &records,
             anchor.as_ref(),
             false,
+            false,
         )
     }
 }
@@ -128,6 +129,7 @@ fn from_records(
     records: &[Record],
     historical: Option<&RequestEvidence>,
     exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     use SourceResolutionRefusal as Refusal;
     ensure!(
@@ -137,7 +139,7 @@ fn from_records(
     let current = request(records, conversation, request_turn)?;
     match directive {
         SourceDirective::Explicit(choice) => {
-            match original(records, current, choice, 512 * 1024)
+            match original(records, current, choice, 512 * 1024, allow_notebook)
                 .map_err(|_| Refusal::InvalidSource)?
             {
                 SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
@@ -203,13 +205,15 @@ fn from_records(
                         origin_turn,
                         source_record: current_source,
                         expected,
-                    } = original(records, current, choice, 512 * 1024)
+                    } = original(records, current, choice, 512 * 1024, allow_notebook)
                         .map_err(|_| Refusal::InvalidSource)?
                     else {
                         return Err(Refusal::InvalidSource.into());
                     };
                     ensure!(current_source == source_record, Refusal::ChangedSource);
-                    if exact_original_bytes {
+                    if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_)) {
+                        ensure!(expected == original_key, Refusal::ChangedSource);
+                    } else if exact_original_bytes {
                         ensure!(
                             expected.document == original_key.document
                                 && expected.format == original_key.format
@@ -235,6 +239,7 @@ pub(super) fn for_frame(
     request_turn: Uuid,
     directive: SourceDirective,
     exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     match directive {
         SourceDirective::Explicit(source) => Ok(source),
@@ -245,6 +250,7 @@ pub(super) fn for_frame(
             records,
             None,
             exact_original_bytes,
+            allow_notebook,
         ),
     }
 }

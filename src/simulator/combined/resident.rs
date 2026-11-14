@@ -826,6 +826,618 @@ mod tests {
         Ok(())
     }
 
+    fn seed_notebook_archive(
+        ledger: &Ledger,
+        config: &Config,
+        scope: &RequestScope,
+        input: &writer::notebook::ValidatedNotebook,
+    ) -> Result<crate::conversation::ArchivedNormalizedSource> {
+        use writer::notebook::command::{self, Generate, Request};
+
+        let request = Request::GenerateNotebook(Box::new(Generate {
+            conversation: scope.conversation,
+            operation: scope.operation,
+            request: "Summarize the supplied notebook.".into(),
+            document_file: "owner-frozen-unused.json".into(),
+            document_sha256: input.raw_sha256().into(),
+            selection: crate::conversation::TextScope::SuppliedNotebook,
+            guidance: None,
+            max_model_calls: 2,
+            history_range: None,
+        }));
+        let prepared = command::prepare_receiving(
+            ledger,
+            &request,
+            &config.personalization_snapshot()?,
+            Some(input.clone()),
+            &scope.root,
+            scope.source.document,
+            None,
+        )?;
+        let archive = prepared.admission.archive.clone();
+        assert!(ledger.admit_notebook(prepared.admission)?.is_some());
+        Ok(archive)
+    }
+
+    #[test]
+    fn ordinary_reader_notebook_followups_require_fresh_supplied_ocr() -> Result<()> {
+        use crate::{
+            conversation::{receiving::ReceivingRefusal, TurnRange},
+            retrieval::notebook::{self, Options, PageImage},
+            workflow::conversation_dispatch::NotebookFollowupSource,
+            writer::notebook::ValidatedNotebook,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let fixture = SimulatorLedger::new();
+        let base = fixture.open()?;
+        let paths = base.store().paths.clone();
+        drop(base);
+        let ledger = Ledger::new(Arc::new(crate::storage::Store::prepare_notebook(paths)?));
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let source = fixture_source(Uuid::new_v4());
+        let target = fixture_source(Uuid::new_v4());
+        let buddy = fixture_source(Uuid::new_v4());
+        let config = Config {
+            research_policy: Some(Some(ResearchPolicy::Disabled)),
+            ..Config::default()
+        };
+        let one = fixture_png(17)?;
+        let blank = fixture_png(29)?;
+        let last = fixture_png(41)?;
+        let pages = [
+            PageImage { page: 3, png: &one },
+            PageImage {
+                page: 9,
+                png: &blank,
+            },
+            PageImage {
+                page: 14,
+                png: &last,
+            },
+        ];
+        let normalize = |document, profile: &str, text: &str| {
+            let mut model = Model::default();
+            model.replies.push_back(
+                json!({"pages": [
+                    {"page":3,"status":"transcribed","text":"Trajectory calibration."},
+                    {"page":9,"status":"blank","text":""},
+                    {"page":14,"status":"transcribed","text":text}
+                ]})
+                .to_string(),
+            );
+            notebook::normalize(
+                document,
+                &pages,
+                profile,
+                &mut model,
+                Options::default(),
+                &mut |_| Ok(()),
+            )
+        };
+        let normalize_input = |ocr: &notebook::NotebookText| {
+            let bytes = serde_json::to_vec(&ocr.document)?;
+            ValidatedNotebook::from_bytes(&bytes, &digest(&bytes))
+        };
+        let pressure = "Pressure compensation procedure.";
+        let ocr = normalize(source.document, "notebook-fixture", pressure)?;
+        let input = normalize_input(&ocr)?;
+        let original = seed_notebook_archive(
+            &ledger,
+            &config,
+            &scope(&ledger, conversation, &source)?,
+            &input,
+        )?;
+        let other_ocr = normalize(
+            target.document,
+            "notebook-fixture",
+            "Thermal insulation procedure.",
+        )?;
+        let other_input = normalize_input(&other_ocr)?;
+        let other = seed_notebook_archive(
+            &ledger,
+            &config,
+            &scope(&ledger, conversation, &target)?,
+            &other_input,
+        )?;
+        let (_, png) = seed_image(&ledger, conversation, &buddy, 61)?;
+        let key = Index::build(input.document().clone())?.key().clone();
+        let first_choice = RequestSource::Original {
+            origin_turn: original.turn,
+            source_record: original.id,
+            expected: key.clone(),
+        };
+        let first = scope(&ledger, conversation, &source)?;
+        let mut dispatch = Dispatch::local(&config, &ledger)?;
+        let mut model = FollowupModel {
+            structured_reply: true,
+            ..Default::default()
+        };
+        let response =
+            json!({"status":"answered","text":"See [S1].","citations":["S1"]}).to_string();
+        for _ in 0..3 {
+            model.model.replies.push_back(response.clone());
+        }
+        model.model.replies.push_back(
+            json!({"status":"clarification","text":"No match in the supplied pages.","citations":[]})
+                .to_string(),
+        );
+        let admission = || NotebookFollowupSource {
+            input: &input,
+            ocr: &ocr,
+            pages: &pages,
+            check: Arc::new(|| Ok(())),
+        };
+        let question = "Trajectory calibration?";
+        dispatch.reader_with_notebook(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &first,
+            SourceDirective::Explicit(first_choice.clone()),
+            admission(),
+            use_saved_policy(&first, question),
+            &mut || Ok(source.clone()),
+        )?;
+        let first_user = writer::stage(first.operation, "reader-user");
+        let first_operation = writer::stage(first.operation, "reader-source-evidence");
+        let inherited = || SourceDirective::Inherit {
+            request_turn: first_user,
+            operation: Some(first_operation),
+            expected: Some(key.clone()),
+        };
+        let first_payload = followup_payload(&model.model.seen[0].0)?;
+        let first_passages = first_payload["retrieval"]["passages"].as_array().unwrap();
+        assert_eq!(
+            first_passages
+                .iter()
+                .filter(|p| p["direct_match"] == true)
+                .count(),
+            1
+        );
+        assert_eq!(first_passages[0]["page"], 3);
+        assert!(first_passages.iter().all(|p| p["page"] != 14));
+
+        let second = scope(&ledger, conversation, &buddy)?;
+        let read = |visit: &RequestScope| {
+            let user = writer::stage(visit.operation, "reader-user");
+            let operation = writer::stage(visit.operation, "reader-source-evidence");
+            ledger.request_evidence(conversation, user, operation)
+        };
+        let question = "Pressure compensation?";
+        let second_output = dispatch.reader_with_notebook(
+            &ledger,
+            &mut model,
+            question,
+            Some(TurnRange {
+                start: 2,
+                end_exclusive: 6,
+            }),
+            &second,
+            inherited(),
+            admission(),
+            use_saved_policy(&second, question),
+            &mut || Ok(buddy.clone()),
+        )?;
+        let completion_scope = RequestScope {
+            operation: second.operation,
+            root: second_output.root().clone(),
+            ..scope(&ledger, conversation, &buddy)?
+        };
+        let effect = Cell::new(0);
+        assert!(second_output
+            .admit_followup_output(
+                &ledger,
+                &completion_scope,
+                &mut || Ok(source.clone()),
+                || {
+                    effect.set(effect.get() + 1);
+                    Ok(())
+                },
+            )
+            .is_err());
+        assert_eq!(effect.get(), 0);
+        let (parts, attachments) = &model.model.seen[1];
+        assert_eq!(attachments.as_slice(), std::slice::from_ref(&png));
+        assert!(parts[0].contains("unverified historical OCR"));
+        let payload = followup_payload(parts)?;
+        assert_eq!(payload["request"]["text"], question);
+        let expected_history: Vec<_> = ledger
+            .inspect(conversation, false)?
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn) if [2, 3].contains(&turn.sequence) => Some(turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payload["history"], json!(expected_history));
+        assert!(expected_history.iter().all(|turn| turn.id != original.turn));
+        assert_eq!(payload["source"]["origin_turn"], json!(original.turn));
+        assert_eq!(
+            payload["source"]["source_record"]["record"]["id"],
+            json!(original.id)
+        );
+        let later = &payload["retrieval"]["passages"][0];
+        assert_eq!(later["page"], 14);
+        assert_eq!(later["unit"], 2);
+        assert_eq!(later["range"], json!([0, pressure.len()]));
+        assert_eq!(later["text"], pressure);
+        assert!(later["section"].is_null());
+        let saved = read(&second)?.unwrap();
+        assert!(saved.record.sources.iter().any(|r| r.record == original.id));
+        assert_eq!(
+            serde_json::from_str::<Value>(&saved.record.frame_json)?["source"],
+            payload["source"]
+        );
+        assert!(saved.unavailable_media.is_empty());
+        let second_draft = writer::stage(second.operation, "reader-draft");
+        let record = ledger
+            .store()
+            .value(Namespace::Conversation, second_draft)?
+            .unwrap();
+        let Record::Turn(draft) = Ledger::decode(&record)? else {
+            anyhow::bail!("notebook answer draft absent")
+        };
+        assert_eq!(draft.outcome, Outcome::Generated);
+        assert!(draft
+            .text
+            .unwrap()
+            .contains("page 14 (unverified historical OCR)"));
+
+        let retarget = scope(&ledger, conversation, &buddy)?;
+        let other_key = Index::build(other_input.document().clone())?.key().clone();
+        let question = "Thermal insulation?";
+        dispatch.reader_with_notebook(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &retarget,
+            SourceDirective::Explicit(RequestSource::Original {
+                origin_turn: other.turn,
+                source_record: other.id,
+                expected: other_key,
+            }),
+            NotebookFollowupSource {
+                input: &other_input,
+                ocr: &other_ocr,
+                pages: &pages,
+                check: Arc::new(|| Ok(())),
+            },
+            use_saved_policy(&retarget, question),
+            &mut || Ok(buddy.clone()),
+        )?;
+        let payload = followup_payload(&model.model.seen[2].0)?;
+        assert_eq!(payload["source"]["origin_turn"], json!(other.turn));
+        assert_eq!(
+            payload["retrieval"]["passages"][0]["text"],
+            "Thermal insulation procedure."
+        );
+
+        let empty = scope(&ledger, conversation, &buddy)?;
+        let question = "Unlisted geology?";
+        dispatch.reader_with_notebook(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &empty,
+            inherited(),
+            admission(),
+            use_saved_policy(&empty, question),
+            &mut || Ok(buddy.clone()),
+        )?;
+        let payload = followup_payload(&model.model.seen[3].0)?;
+        assert_eq!(payload["retrieval"]["source"], json!(key));
+        assert_eq!(payload["retrieval"]["passages"], json!([]));
+        assert_eq!(model.submits, 4);
+        for success in [&first, &second, &retarget, &empty] {
+            let generated_id = writer::stage(success.operation, "reader-draft");
+            let expected = ledger.expected(Namespace::Conversation, generated_id)?;
+            assert_eq!(expected.0.len(), 1);
+            assert!(read(success)?.is_some());
+        }
+
+        let budget = ReceivingBudget {
+            context: crate::conversation::ContextBudget {
+                max_text_bytes: 16 * 1024,
+                max_turns: 64,
+                provider_token_limit: Some(96 * 1024),
+            },
+            max_encoded_bytes: 96 * 1024,
+            max_passages: 8,
+            max_passage_bytes: 16 * 1024,
+            neighbors: false,
+        };
+        let probe = FollowupIndex {
+            original: Index::build(input.document().clone())?,
+            calls: Cell::new(0),
+            after_query: None,
+        };
+        assert!(ledger
+            .source_request_context(
+                conversation,
+                first_user,
+                None,
+                first_choice.clone(),
+                budget.clone(),
+                Some(&probe),
+                |text| Ok(text.len()),
+            )
+            .is_err());
+        assert!(ledger
+            .prepare_request_evidence(
+                conversation,
+                first_user,
+                None,
+                first_choice,
+                budget.clone(),
+                Some(&probe),
+                |text| Ok(text.len()),
+            )
+            .is_err());
+        let no_document = ledger.prepare_request_evidence(
+            conversation,
+            first_user,
+            None,
+            RequestSource::NoDocument,
+            budget.clone(),
+            None,
+            |text| Ok(text.len()),
+        )?;
+        let no_document_operation = Uuid::new_v4();
+        ledger.persist_request_evidence(no_document_operation, 1, &no_document)?;
+        let history = ledger
+            .request_evidence(conversation, first_user, no_document_operation)?
+            .unwrap();
+        assert!(history
+            .record
+            .sources
+            .iter()
+            .any(|r| r.record == original.id));
+
+        let captured_origin = ledger
+            .inspect(conversation, false)?
+            .into_iter()
+            .find_map(|record| match record {
+                Record::Source(source) if source.conversation == conversation => {
+                    Some((source.turn, source.id))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let pdf = FollowupIndex {
+            original: pdf_index(buddy.document, b"ordinary history control", "pdf-fixture")?,
+            calls: Cell::new(0),
+            after_query: None,
+        };
+        let pdf_evidence = ledger.prepare_request_evidence(
+            conversation,
+            first_user,
+            None,
+            RequestSource::Original {
+                origin_turn: captured_origin.0,
+                source_record: captured_origin.1,
+                expected: pdf.original.key().clone(),
+            },
+            budget,
+            Some(&pdf),
+            |text| Ok(text.len()),
+        )?;
+        let pdf_operation = Uuid::new_v4();
+        ledger.persist_request_evidence(pdf_operation, 1, &pdf_evidence)?;
+        assert_eq!(pdf.calls.get(), 1);
+        let history = ledger
+            .request_evidence(conversation, first_user, pdf_operation)?
+            .unwrap();
+        assert!(history
+            .record
+            .sources
+            .iter()
+            .any(|r| r.record == original.id));
+
+        let refused = scope(&ledger, conversation, &buddy)?;
+        let question = "Pressure compensation?";
+        assert!(dispatch
+            .reader_with_source(
+                &ledger,
+                &mut model,
+                question,
+                None,
+                &refused,
+                inherited(),
+                Some(FollowupSource {
+                    key: key.clone(),
+                    provider: &probe,
+                    check: Arc::new(|| Ok(()))
+                }),
+                use_saved_policy(&refused, question),
+                &mut || Ok(buddy.clone()),
+            )
+            .is_err());
+        assert_eq!(probe.calls.get(), 0);
+
+        let mut raw = serde_json::to_vec(&ocr.document)?;
+        raw.push(b' ');
+        let altered_raw = ValidatedNotebook::from_bytes(&raw, &digest(&raw))?;
+        let altered_profile = normalize(source.document, "different-profile", pressure)?;
+        let altered_profile_input = normalize_input(&altered_profile)?;
+        let altered_units = normalize(source.document, "notebook-fixture", "Unexpected words.")?;
+        let altered_units_input = normalize_input(&altered_units)?;
+        let changed_images = [
+            PageImage {
+                page: 3,
+                png: &last,
+            },
+            PageImage {
+                page: 9,
+                png: &blank,
+            },
+            PageImage {
+                page: 14,
+                png: &one,
+            },
+        ];
+        for (frozen, report, set) in [
+            (&altered_raw, &ocr, &pages[..]),
+            (&altered_profile_input, &altered_profile, &pages[..]),
+            (&altered_units_input, &altered_units, &pages[..]),
+            (&input, &ocr, &changed_images[..]),
+            (&input, &ocr, &pages[..2]),
+        ] {
+            let attempt = scope(&ledger, conversation, &buddy)?;
+            let attempt_key = Index::build(frozen.document().clone())?.key().clone();
+            assert!(dispatch
+                .reader_with_notebook(
+                    &ledger,
+                    &mut model,
+                    question,
+                    None,
+                    &attempt,
+                    SourceDirective::Inherit {
+                        request_turn: first_user,
+                        operation: Some(first_operation),
+                        expected: Some(attempt_key)
+                    },
+                    NotebookFollowupSource {
+                        input: frozen,
+                        ocr: report,
+                        pages: set,
+                        check: Arc::new(|| Ok(()))
+                    },
+                    use_saved_policy(&attempt, question),
+                    &mut || Ok(buddy.clone()),
+                )
+                .is_err());
+            assert!(read(&attempt)?.is_none());
+        }
+        assert_eq!(model.submits, 4);
+
+        let healthy = Arc::new(AtomicBool::new(true));
+        let drift = healthy.clone();
+        model.before_submission = Some(Box::new(move || {
+            drift.store(false, Ordering::SeqCst);
+            Ok(())
+        }));
+        let attempt = scope(&ledger, conversation, &buddy)?;
+        assert!(dispatch
+            .reader_with_notebook(
+                &ledger,
+                &mut model,
+                question,
+                None,
+                &attempt,
+                inherited(),
+                NotebookFollowupSource {
+                    check: Arc::new(move || {
+                        ensure!(
+                            healthy.load(Ordering::SeqCst),
+                            "modeled notebook owner revoked"
+                        );
+                        Ok(())
+                    }),
+                    ..admission()
+                },
+                use_saved_policy(&attempt, question),
+                &mut || Ok(buddy.clone()),
+            )
+            .is_err());
+        assert!(model.before_submission.is_none());
+        assert!(read(&attempt)?.is_some());
+        assert_eq!(model.submits, 4);
+        assert!(ledger
+            .expected(
+                Namespace::Conversation,
+                writer::stage(attempt.operation, "reader-draft")
+            )?
+            .0
+            .is_empty());
+
+        let uncertain = scope(&ledger, conversation, &buddy)?;
+        let user = writer::stage(uncertain.operation, "reader-user");
+        let evidence = writer::stage(uncertain.operation, "reader-source-evidence");
+        let store = ledger.store().clone();
+        let after_append = Arc::new(AtomicUsize::new(0));
+        let seen = after_append.clone();
+        let fault = Arc::new(move || {
+            if store.value(Namespace::Conversation, user)?.is_some()
+                && seen.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                // The second source check after append is the post-query guard.
+                store.set_fault(crate::storage::Fault::AfterCommit)?;
+            }
+            Ok(())
+        });
+        for _ in 0..2 {
+            assert!(dispatch
+                .reader_with_notebook(
+                    &ledger,
+                    &mut model,
+                    question,
+                    None,
+                    &uncertain,
+                    inherited(),
+                    NotebookFollowupSource {
+                        check: fault.clone(),
+                        ..admission()
+                    },
+                    use_saved_policy(&uncertain, question),
+                    &mut || Ok(buddy.clone()),
+                )
+                .is_err());
+        }
+        let saved = read(&uncertain)?.expect("original notebook evidence receipt");
+        assert_eq!(saved.acknowledgment.operation, evidence);
+        assert_eq!(after_append.load(Ordering::SeqCst), 3);
+        assert_eq!(model.submits, 4);
+        assert!(ledger
+            .expected(
+                Namespace::Conversation,
+                writer::stage(uncertain.operation, "reader-draft")
+            )?
+            .0
+            .is_empty());
+
+        let generation = saved.record.snapshot.generation;
+        let path = ledger
+            .store()
+            .paths
+            .data
+            .join("generations")
+            .join(generation.to_string())
+            .join("objects")
+            .join(&original.media.sha256);
+        std::fs::remove_file(path)?;
+        let unavailable = scope(&ledger, conversation, &buddy)?;
+        let error = dispatch
+            .reader_with_notebook(
+                &ledger,
+                &mut model,
+                question,
+                None,
+                &unavailable,
+                inherited(),
+                admission(),
+                use_saved_policy(&unavailable, question),
+                &mut || Ok(buddy.clone()),
+            )
+            .err()
+            .expect("missing canonical JSON must refuse");
+        assert_eq!(
+            error.downcast_ref::<ReceivingRefusal>(),
+            Some(&ReceivingRefusal::OriginalUnavailable)
+        );
+        assert!(read(&unavailable)?.is_none());
+        assert!(read(&second)?
+            .unwrap()
+            .unavailable_media
+            .contains(&original.media));
+        assert_eq!(model.submits, 4);
+        Ok(())
+    }
+
     #[test]
     fn ordinary_reader_epub_followup_preserves_archive_identity_and_section() -> Result<()> {
         use super::epub_fixture::{book, package, xhtml, CONTAINER};

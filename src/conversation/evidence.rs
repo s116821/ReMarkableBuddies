@@ -262,6 +262,7 @@ impl Ledger {
             capture,
             records,
             false,
+            None,
         )
     }
     /// Declare and assemble against one capture; publication keeps existing guards.
@@ -285,6 +286,7 @@ impl Ledger {
             retrieval,
             token_count,
             None,
+            None,
         )
     }
 
@@ -299,8 +301,14 @@ impl Ledger {
         retrieval: Option<&dyn crate::retrieval::Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
         followup: Option<FollowupRequestHead>,
+        notebook: Option<&crate::retrieval::notebook::SuppliedNotebook<'_>>,
     ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
+        let allow_notebook = notebook.is_some();
+        ensure!(
+            !allow_notebook || followup.is_some(),
+            "notebook input requires a captured Reader follow-up"
+        );
         let (capture, records) = self
             .capture_request_records(conversation, followup.is_some())
             .map_err(|_| SourceResolutionRefusal::HistoryUnavailable)?;
@@ -332,21 +340,24 @@ impl Ledger {
             request_turn,
             directive,
             followup.is_some(),
+            allow_notebook,
         )?;
+        let mut verified_notebook = None;
         if followup.is_some() {
             match &source {
                 RequestSource::Original {
                     expected,
                     source_record,
-                    ..
+                    origin_turn,
                 } => {
+                    use crate::retrieval::SourceFormat;
                     ensure!(
-                        matches!(
-                            expected.format,
-                            crate::retrieval::SourceFormat::Pdf
-                                | crate::retrieval::SourceFormat::Epub
-                        ) && retrieval.is_some(),
-                        "Reader follow-up requires an admitted PDF or EPUB"
+                        retrieval.is_some()
+                            && match expected.format {
+                                SourceFormat::Pdf | SourceFormat::Epub => !allow_notebook,
+                                SourceFormat::Notebook => allow_notebook,
+                            },
+                        "Reader follow-up requires independently admitted source input"
                     );
                     if let Some(operation) = anchor {
                         let prior = records
@@ -372,10 +383,34 @@ impl Ledger {
                                 .any(|(_, reference)| reference == pinned),
                             SourceResolutionRefusal::ChangedSource
                         );
+                        if allow_notebook {
+                            let origin = prior.turns.iter().find(|reference| {
+                                reference.namespace == Namespace::Conversation
+                                    && reference.record == *origin_turn
+                            });
+                            ensure!(
+                                origin.is_some_and(|pinned| capture
+                                    .records
+                                    .iter()
+                                    .any(|(_, reference)| reference == pinned)),
+                                SourceResolutionRefusal::ChangedSource
+                            );
+                        }
+                    }
+                    if let Some(input) = notebook {
+                        verified_notebook = Some(self.verify_followup_notebook(
+                            &records,
+                            *source_record,
+                            expected,
+                            input.source(),
+                        )?);
                     }
                 }
                 RequestSource::NoDocument => {
-                    ensure!(retrieval.is_none(), "source-less follow-up has a provider")
+                    ensure!(
+                        retrieval.is_none() && !allow_notebook,
+                        "source-less follow-up has source input"
+                    )
                 }
             }
         }
@@ -390,8 +425,47 @@ impl Ledger {
             capture,
             records,
             followup.is_some(),
+            verified_notebook.as_ref(),
         )
     }
+
+    fn verify_followup_notebook(
+        &self,
+        records: &[Record],
+        source_record: Uuid,
+        key: &crate::retrieval::IndexKey,
+        input: &crate::writer::notebook::ValidatedNotebook,
+    ) -> Result<Media> {
+        let archive = records
+            .iter()
+            .find_map(|record| match record {
+                Record::ArchivedNormalizedSource(archive) if archive.id == source_record => {
+                    Some(archive.as_ref())
+                }
+                _ => None,
+            })
+            .ok_or(SourceResolutionRefusal::InvalidSource)?;
+        ensure!(
+            archive.format == crate::retrieval::SourceFormat::Notebook
+                && archive.selection == super::TextScope::SuppliedNotebook
+                && notebook_key_matches(archive, key)
+                && input.raw_sha256() == archive.raw_input_sha256
+                && input.raw_bytes() as u64 == archive.raw_input_bytes,
+            SourceResolutionRefusal::ChangedSource
+        );
+        // The capture holds the Source3 revision and its media descriptor,
+        // but no lock. Loading verifies reachable canonical media and lineage.
+        let committed = archive
+            .load(&self.store)
+            .map_err(|_| ReceivingRefusal::OriginalUnavailable)?;
+        ensure!(
+            committed.canonical_bytes() == input.canonical_bytes()
+                && committed.units_sha256() == input.units_sha256(),
+            SourceResolutionRefusal::ChangedSource
+        );
+        Ok(archive.media.clone())
+    }
+
     fn capture_request_records(
         &self,
         conversation: Uuid,
@@ -425,6 +499,7 @@ impl Ledger {
         capture: Captured,
         records: Vec<Record>,
         keep_media: bool,
+        verified_notebook: Option<&Media>,
     ) -> Result<PreparedRequestEvidence> {
         let context = self.assemble_ordinary_request_context(
             conversation,
@@ -436,6 +511,7 @@ impl Ledger {
             token_count,
             records,
             keep_media,
+            verified_notebook,
         )?;
         let mut needed = context
             .history()
@@ -693,6 +769,7 @@ impl Ledger {
             &fact,
             &receipt,
             &mut ReadBudget::default(),
+            false,
         )?;
         ensure!(
             historical.record.fingerprint()? == fingerprint
@@ -737,6 +814,7 @@ impl Ledger {
                     &fact,
                     &receipt,
                     &mut ReadBudget::default(),
+                    true,
                 )
                 .map(Some),
             _ => bail!("incomplete request-evidence operation"),
@@ -751,6 +829,7 @@ impl Ledger {
         envelope: &Envelope,
         receipt: &Envelope,
         budget: &mut ReadBudget,
+        observe_media: bool,
     ) -> Result<HistoricalRequestEvidence> {
         ensure!(envelope.parents.is_empty(), "mutable evidence");
         let Record::RequestEvidence(fact) = Self::decode(envelope)? else {
@@ -762,7 +841,8 @@ impl Ledger {
                 && fact.operation == operation,
             "historical evidence identity mismatch"
         );
-        let (ack, media) = self.validate_evidence_pair(&fact, envelope, receipt, budget)?;
+        let (ack, media) =
+            self.validate_evidence_pair(&fact, envelope, receipt, budget, observe_media)?;
         Ok(HistoricalRequestEvidence {
             record: *fact,
             acknowledgment: ack,
@@ -822,6 +902,7 @@ impl Ledger {
                     head(RequestEvidence::identity(fact.operation))?,
                     head(Self::receipt_id(fact.operation))?,
                     &mut budget,
+                    false,
                 )?;
             } else if let Record::Receipt(
                 receipt @ super::Receipt {
@@ -851,6 +932,7 @@ impl Ledger {
             &envelope.context("evidence head absent")?,
             &receipt.context("evidence receipt absent")?,
             budget,
+            false,
         )
     }
     fn validate_evidence_pair(
@@ -859,6 +941,7 @@ impl Ledger {
         envelope: &Envelope,
         receipt: &Envelope,
         budget: &mut ReadBudget,
+        observe_media: bool,
     ) -> Result<(Acknowledgment, Vec<Media>)> {
         fact.validate_shape()?;
         let mut records = Vec::new();
@@ -885,17 +968,23 @@ impl Ledger {
             transaction.iter().any(|e| e == receipt),
             "receipt head mismatch"
         );
-        let unavailable = media
-            .into_iter()
-            .filter(|m| {
-                self.store
-                    .open_object(&ObjectRef {
-                        sha256: m.sha256.clone(),
-                        bytes: m.bytes,
-                    })
-                    .is_err()
-            })
-            .collect();
+        // Internal validations and replay need structural evidence only. Avoid
+        // rereading every historical object's media while admitting a new turn.
+        let unavailable = if observe_media {
+            media
+                .into_iter()
+                .filter(|item| {
+                    self.store
+                        .open_object(&ObjectRef {
+                            sha256: item.sha256.clone(),
+                            bytes: item.bytes,
+                        })
+                        .is_err()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok((ack, unavailable))
     }
 }

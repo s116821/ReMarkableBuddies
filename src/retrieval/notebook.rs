@@ -92,7 +92,7 @@ pub enum Progress {
     BeforeReturn,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, PartialEq, Eq)]
 pub struct ImageIdentity {
     pub page: u32,
     pub png_sha256: String,
@@ -156,6 +156,92 @@ pub struct NotebookText {
     pub prompt_bytes: usize,
     pub response_sha256: String,
 }
+pub(crate) struct SuppliedNotebook<'a> {
+    source: &'a crate::writer::notebook::ValidatedNotebook,
+    index: super::Index,
+}
+
+impl<'a> SuppliedNotebook<'a> {
+    pub(crate) fn source(&self) -> &'a crate::writer::notebook::ValidatedNotebook {
+        self.source
+    }
+
+    pub(crate) fn index(&self) -> &super::Index {
+        &self.index
+    }
+}
+
+impl NotebookText {
+    /// Revalidate the existing complete whole-page result against the owner's
+    /// supplied images and normalized input without another transcription.
+    pub(crate) fn admit_supplied<'a>(
+        &self,
+        source: &'a crate::writer::notebook::ValidatedNotebook,
+        pages: &[PageImage<'_>],
+        progress: &mut dyn FnMut(Progress) -> Result<()>,
+    ) -> Result<SuppliedNotebook<'a>> {
+        let options = Options::default();
+        let profile = &self.profile;
+        ensure!(
+            profile.protocol == 1
+                && profile.prompt_revision == "transcribe-visible-v2"
+                && !profile.caller_model_profile.trim().is_empty()
+                && profile.caller_model_profile.len() <= 128
+                && !profile.caller_model_profile.chars().any(char::is_control)
+                && profile.confirmed_context.is_none()
+                && self.authority == "unverified-historical-page-image-ocr"
+                && self.prompt_bytes > 0
+                && self.prompt_bytes <= options.max_input_bytes
+                && crate::storage::valid_digest(&self.prompt_sha256)
+                && crate::storage::valid_digest(&self.response_sha256)
+                && &self.document == source.document()
+                && self.document.format == SourceFormat::Notebook
+                && self.document.units.len() == pages.len()
+                && self.images.len() == pages.len(),
+            "invalid supplied notebook OCR"
+        );
+        ensure!(
+            self.document.extractor_revision
+                == format!(
+                    "{PROFILE_REVISION}{}",
+                    digest(&serde_json::to_vec(profile)?)
+                ),
+            "supplied notebook OCR profile changed"
+        );
+        let (images, source_sha256) = admit_pages(pages, options, progress)?;
+        ensure!(
+            images == self.images && source_sha256 == self.document.source_sha256,
+            "supplied notebook images changed"
+        );
+        let mut blank = Vec::new();
+        let mut text_bytes = 0;
+        for (unit, image) in self.document.units.iter().zip(&images) {
+            ensure!(
+                unit.page == Some(image.page)
+                    && unit.section.is_none()
+                    && unit.text.len() <= options.max_page_text_bytes
+                    && valid_text_controls(&unit.text)
+                    && (unit.text.is_empty() || !unit.text.trim().is_empty()),
+                "invalid supplied notebook page"
+            );
+            if unit.text.is_empty() {
+                blank.push(image.page);
+            }
+            text_bytes += unit.text.len();
+        }
+        ensure!(
+            blank == self.blank_pages
+                && text_bytes <= options.max_text_bytes
+                && serde_json::to_vec(self)?.len() <= options.max_result_bytes,
+            "incomplete supplied notebook OCR"
+        );
+        progress(Progress::BeforeReturn)?;
+        let index = super::Index::build(source.document().clone())?;
+        progress(Progress::BeforeReturn)?;
+        Ok(SuppliedNotebook { source, index })
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum PartialSpan {
