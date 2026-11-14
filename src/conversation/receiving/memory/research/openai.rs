@@ -52,10 +52,10 @@ pub struct OpenAIWebResearch<'a> {
     progress: RefCell<&'a mut dyn FnMut(Progress) -> Result<()>>,
     retain_exchange: bool,
     observation: RefCell<Option<ExchangeObservation>>,
-    guarded: Option<GuardedDispatch<'a>>,
 }
-struct GuardedDispatch<'a> {
-    handoff: RefCell<Box<ModelHandoff<'a>>>,
+pub(crate) struct GuardedWebResearch<'a, 'handoff, 'guard> {
+    research: OpenAIWebResearch<'a>,
+    handoff: RefCell<&'handoff mut ModelHandoff<'guard>>,
     deadline: Instant,
     used: Cell<bool>,
 }
@@ -84,17 +84,18 @@ impl ExchangeObservation {
 impl<'a> OpenAIWebResearch<'a> {
     /// Request-local selected dispatch. The caller owns all joined admission;
     /// neither a progress callback nor this adapter can create that authority.
-    pub(crate) fn with_guarded_dispatch(
-        mut self,
-        handoff: &'a mut ModelHandoff<'_>,
+    #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+    pub(crate) fn with_guarded_dispatch<'handoff, 'guard>(
+        self,
+        handoff: &'handoff mut ModelHandoff<'guard>,
         deadline: Instant,
-    ) -> Self {
-        self.guarded = Some(GuardedDispatch {
-            handoff: RefCell::new(Box::new(move |submit| handoff(submit))),
+    ) -> GuardedWebResearch<'a, 'handoff, 'guard> {
+        GuardedWebResearch {
+            research: self,
+            handoff: RefCell::new(handoff),
             deadline,
             used: Cell::new(false),
-        });
-        self
+        }
     }
     /// Default is off; this builder performs neither I/O nor persistence.
     pub fn with_exchange_observation(mut self) -> Self {
@@ -167,7 +168,6 @@ impl<'a> OpenAIWebResearch<'a> {
             progress: RefCell::new(progress),
             retain_exchange: false,
             observation: RefCell::new(None),
-            guarded: None,
         })
     }
 
@@ -236,12 +236,28 @@ impl Drop for OwnedRequest {
 
 impl Provider for OpenAIWebResearch<'_> {
     fn research(&self, request: &ResearchRequest<'_>) -> Result<ResearchResult> {
+        self.research_request(request, None)
+    }
+}
+
+impl Provider for GuardedWebResearch<'_, '_, '_> {
+    fn research(&self, request: &ResearchRequest<'_>) -> Result<ResearchResult> {
+        self.research.research_request(request, Some(self))
+    }
+}
+
+impl OpenAIWebResearch<'_> {
+    fn research_request(
+        &self,
+        request: &ResearchRequest<'_>,
+        guarded: Option<&GuardedWebResearch<'_, '_, '_>>,
+    ) -> Result<ResearchResult> {
         let start = Instant::now();
         let mut progress = self
             .progress
             .try_borrow_mut()
             .map_err(|_| anyhow::anyhow!("web research already active"))?;
-        let deadline = if let Some(guarded) = &self.guarded {
+        let deadline = if let Some(guarded) = guarded {
             ensure!(
                 !guarded.used.replace(true),
                 "web research allowance consumed"
@@ -343,7 +359,7 @@ impl Provider for OpenAIWebResearch<'_> {
                 });
                 Ok(())
             };
-            if let Some(guarded) = &self.guarded {
+            if let Some(guarded) = guarded {
                 let mut handoff = guarded
                     .handoff
                     .try_borrow_mut()
@@ -355,7 +371,7 @@ impl Provider for OpenAIWebResearch<'_> {
         }
         ensure!(!duplicate, "web research duplicate submission refused");
         let mut owned = owned.ok_or_else(|| anyhow::anyhow!("web research was not handed off"))?;
-        let poll = if self.guarded.is_some() {
+        let poll = if guarded.is_some() {
             crate::workflow::indicator::CADENCE
         } else {
             POLL
@@ -397,6 +413,198 @@ fn transport_error(error: reqwest::Error) -> anyhow::Error {
     } else {
         anyhow::anyhow!("web research transport failed")
     }
+}
+
+fn parse(bytes: &[u8], request: &ResearchRequest<'_>) -> Result<ResearchResult> {
+    // Never expose decoder fields/provider bodies, including serde's duplicate-key diagnostic.
+    parse_inner(bytes, request).map_err(|_| anyhow::anyhow!("invalid web research evidence"))
+}
+fn parse_inner(bytes: &[u8], request: &ResearchRequest<'_>) -> Result<ResearchResult> {
+    let value = strict_json(bytes)?;
+    ensure!(
+        value.is_object()
+            && value["status"] == "completed"
+            && value.get("error").is_none_or(Value::is_null)
+            && value.get("incomplete_details").is_none_or(Value::is_null),
+        "incomplete response"
+    );
+    let output = value["output"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("missing output"))?;
+    ensure!(output.len() <= 128, "output item bound");
+    let mut queries = Vec::new();
+    let mut query_seen = BTreeSet::new();
+    let mut consulted = BTreeSet::new();
+    let mut raw_queries = 0usize;
+    let mut raw_urls = 0usize;
+    let mut calls = 0usize;
+    let mut searches = 0usize;
+    let mut text = None;
+    for item in output {
+        match item["type"].as_str() {
+            Some("reasoning") => {
+                ensure!(
+                    item.get("status").is_none_or(
+                        |status| status.is_null() || status.as_str() == Some("completed")
+                    ),
+                    "incomplete reasoning item"
+                );
+            }
+            Some("web_search_call") => {
+                calls += 1;
+                ensure!(
+                    calls <= request.options.max_queries && item["status"] == "completed",
+                    "invalid tool completion"
+                );
+                let action = &item["action"];
+                match action["type"].as_str() {
+                    Some("search") => {
+                        searches += 1;
+                        let mut reported = Vec::new();
+                        if let Some(value) = action.get("queries").filter(|v| !v.is_null()) {
+                            let values = value
+                                .as_array()
+                                .ok_or_else(|| anyhow::anyhow!("invalid queries"))?;
+                            ensure!(values.len() <= 64, "invalid queries");
+                            for v in values {
+                                reported.push(
+                                    v.as_str().ok_or_else(|| anyhow::anyhow!("invalid query"))?,
+                                );
+                            }
+                        }
+                        if let Some(value) = action.get("query").filter(|v| !v.is_null()) {
+                            reported.push(
+                                value
+                                    .as_str()
+                                    .ok_or_else(|| anyhow::anyhow!("invalid query"))?,
+                            );
+                        }
+                        ensure!(!reported.is_empty(), "missing query witness");
+                        for query in reported {
+                            raw_queries += 1;
+                            ensure!(raw_queries <= 64 && super::text(query, 2048), "query bound");
+                            if query_seen.insert(query) {
+                                ensure!(
+                                    queries.len() < request.options.max_queries,
+                                    "distinct query bound"
+                                );
+                                queries.push(query.to_owned());
+                            }
+                        }
+                        let sources = action["sources"]
+                            .as_array()
+                            .ok_or_else(|| anyhow::anyhow!("missing consulted URLs"))?;
+                        ensure!(sources.len() <= 1024, "consulted URL bound");
+                        for source in sources {
+                            raw_urls += 1;
+                            ensure!(
+                                raw_urls <= 1024 && source["type"] == "url",
+                                "consulted URL bound"
+                            );
+                            let url = source["url"]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("invalid consulted URL"))?;
+                            ensure!(url.len() <= 2048, "consulted URL bound");
+                            let url = reqwest::Url::parse(url)?;
+                            ensure!(
+                                matches!(url.scheme(), "https" | "http")
+                                    && url.host_str().is_some(),
+                                "invalid consulted URL"
+                            );
+                            consulted.insert(url.to_string());
+                        }
+                    }
+                    Some("open_page" | "find_in_page") => {}
+                    _ => bail!("unsupported search action"),
+                }
+            }
+            Some("message") => {
+                ensure!(
+                    text.is_none() && item["role"] == "assistant" && item["status"] == "completed",
+                    "invalid message"
+                );
+                let content = item["content"]
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("missing content"))?;
+                ensure!(
+                    content.len() == 1 && content[0]["type"] == "output_text",
+                    "invalid output text"
+                );
+                let output_text = content[0]["text"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing text"))?;
+                ensure!(output_text.len() <= 128 * 1024, "output text bound");
+                text = Some(output_text);
+            }
+            _ => bail!("unsupported output item"),
+        }
+    }
+    ensure!(searches > 0, "missing search witness");
+    let selected = strict_json(
+        text.ok_or_else(|| anyhow::anyhow!("missing selection"))?
+            .as_bytes(),
+    )?;
+    ensure!(
+        selected
+            .as_object()
+            .is_some_and(|o| o.len() == 1 && o.contains_key("sources")),
+        "invalid selection shape"
+    );
+    let selected = selected["sources"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("invalid selected sources"))?;
+    ensure!(
+        selected.len() <= request.options.max_sources,
+        "source selection bound"
+    );
+    let mut sources = Vec::new();
+    for source in selected {
+        ensure!(
+            source.as_object().is_some_and(|o| o.len() == 3
+                && ["url", "title", "excerpt"]
+                    .iter()
+                    .all(|k| o.contains_key(*k))),
+            "invalid selected source"
+        );
+        let field = |name: &str, max| -> Result<&str> {
+            let v = source[name]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("invalid source field"))?;
+            ensure!(super::text(v, max), "source field bound");
+            Ok(v)
+        };
+        let url = field("url", 2048)?;
+        let title = field("title", 512)?;
+        let excerpt = field("excerpt", 4096)?;
+        ensure!(
+            consulted.contains(reqwest::Url::parse(url)?.as_str()),
+            "unwitnessed source URL"
+        );
+        sources.push(Citation {
+            url: url.into(),
+            title: title.into(),
+            excerpt: excerpt.into(),
+            published_ms: None,
+        });
+    }
+    let result = ResearchResult {
+        identity: request.identity.clone(),
+        status: if sources.is_empty() {
+            Status::CompleteEmpty
+        } else {
+            Status::Complete
+        },
+        basis: EvidenceBasis::ProviderAsserted,
+        diagnostic: None,
+        queries,
+        sources,
+    };
+    super::validate(&result, &request.identity, request.options)?;
+    ensure!(
+        serde_json::to_vec(&result)?.len() <= request.options.max_evidence_bytes,
+        "evidence byte bound"
+    );
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -726,196 +934,4 @@ pub(crate) mod guarded_tests {
             });
         }
     }
-}
-
-fn parse(bytes: &[u8], request: &ResearchRequest<'_>) -> Result<ResearchResult> {
-    // Never expose decoder fields/provider bodies, including serde's duplicate-key diagnostic.
-    parse_inner(bytes, request).map_err(|_| anyhow::anyhow!("invalid web research evidence"))
-}
-fn parse_inner(bytes: &[u8], request: &ResearchRequest<'_>) -> Result<ResearchResult> {
-    let value = strict_json(bytes)?;
-    ensure!(
-        value.is_object()
-            && value["status"] == "completed"
-            && value.get("error").is_none_or(Value::is_null)
-            && value.get("incomplete_details").is_none_or(Value::is_null),
-        "incomplete response"
-    );
-    let output = value["output"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("missing output"))?;
-    ensure!(output.len() <= 128, "output item bound");
-    let mut queries = Vec::new();
-    let mut query_seen = BTreeSet::new();
-    let mut consulted = BTreeSet::new();
-    let mut raw_queries = 0usize;
-    let mut raw_urls = 0usize;
-    let mut calls = 0usize;
-    let mut searches = 0usize;
-    let mut text = None;
-    for item in output {
-        match item["type"].as_str() {
-            Some("reasoning") => {
-                ensure!(
-                    item.get("status").is_none_or(
-                        |status| status.is_null() || status.as_str() == Some("completed")
-                    ),
-                    "incomplete reasoning item"
-                );
-            }
-            Some("web_search_call") => {
-                calls += 1;
-                ensure!(
-                    calls <= request.options.max_queries && item["status"] == "completed",
-                    "invalid tool completion"
-                );
-                let action = &item["action"];
-                match action["type"].as_str() {
-                    Some("search") => {
-                        searches += 1;
-                        let mut reported = Vec::new();
-                        if let Some(value) = action.get("queries").filter(|v| !v.is_null()) {
-                            let values = value
-                                .as_array()
-                                .ok_or_else(|| anyhow::anyhow!("invalid queries"))?;
-                            ensure!(values.len() <= 64, "invalid queries");
-                            for v in values {
-                                reported.push(
-                                    v.as_str().ok_or_else(|| anyhow::anyhow!("invalid query"))?,
-                                );
-                            }
-                        }
-                        if let Some(value) = action.get("query").filter(|v| !v.is_null()) {
-                            reported.push(
-                                value
-                                    .as_str()
-                                    .ok_or_else(|| anyhow::anyhow!("invalid query"))?,
-                            );
-                        }
-                        ensure!(!reported.is_empty(), "missing query witness");
-                        for query in reported {
-                            raw_queries += 1;
-                            ensure!(raw_queries <= 64 && super::text(query, 2048), "query bound");
-                            if query_seen.insert(query) {
-                                ensure!(
-                                    queries.len() < request.options.max_queries,
-                                    "distinct query bound"
-                                );
-                                queries.push(query.to_owned());
-                            }
-                        }
-                        let sources = action["sources"]
-                            .as_array()
-                            .ok_or_else(|| anyhow::anyhow!("missing consulted URLs"))?;
-                        ensure!(sources.len() <= 1024, "consulted URL bound");
-                        for source in sources {
-                            raw_urls += 1;
-                            ensure!(
-                                raw_urls <= 1024 && source["type"] == "url",
-                                "consulted URL bound"
-                            );
-                            let url = source["url"]
-                                .as_str()
-                                .ok_or_else(|| anyhow::anyhow!("invalid consulted URL"))?;
-                            ensure!(url.len() <= 2048, "consulted URL bound");
-                            let url = reqwest::Url::parse(url)?;
-                            ensure!(
-                                matches!(url.scheme(), "https" | "http")
-                                    && url.host_str().is_some(),
-                                "invalid consulted URL"
-                            );
-                            consulted.insert(url.to_string());
-                        }
-                    }
-                    Some("open_page" | "find_in_page") => {}
-                    _ => bail!("unsupported search action"),
-                }
-            }
-            Some("message") => {
-                ensure!(
-                    text.is_none() && item["role"] == "assistant" && item["status"] == "completed",
-                    "invalid message"
-                );
-                let content = item["content"]
-                    .as_array()
-                    .ok_or_else(|| anyhow::anyhow!("missing content"))?;
-                ensure!(
-                    content.len() == 1 && content[0]["type"] == "output_text",
-                    "invalid output text"
-                );
-                let output_text = content[0]["text"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("missing text"))?;
-                ensure!(output_text.len() <= 128 * 1024, "output text bound");
-                text = Some(output_text);
-            }
-            _ => bail!("unsupported output item"),
-        }
-    }
-    ensure!(searches > 0, "missing search witness");
-    let selected = strict_json(
-        text.ok_or_else(|| anyhow::anyhow!("missing selection"))?
-            .as_bytes(),
-    )?;
-    ensure!(
-        selected
-            .as_object()
-            .is_some_and(|o| o.len() == 1 && o.contains_key("sources")),
-        "invalid selection shape"
-    );
-    let selected = selected["sources"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("invalid selected sources"))?;
-    ensure!(
-        selected.len() <= request.options.max_sources,
-        "source selection bound"
-    );
-    let mut sources = Vec::new();
-    for source in selected {
-        ensure!(
-            source.as_object().is_some_and(|o| o.len() == 3
-                && ["url", "title", "excerpt"]
-                    .iter()
-                    .all(|k| o.contains_key(*k))),
-            "invalid selected source"
-        );
-        let field = |name: &str, max| -> Result<&str> {
-            let v = source[name]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid source field"))?;
-            ensure!(super::text(v, max), "source field bound");
-            Ok(v)
-        };
-        let url = field("url", 2048)?;
-        let title = field("title", 512)?;
-        let excerpt = field("excerpt", 4096)?;
-        ensure!(
-            consulted.contains(reqwest::Url::parse(url)?.as_str()),
-            "unwitnessed source URL"
-        );
-        sources.push(Citation {
-            url: url.into(),
-            title: title.into(),
-            excerpt: excerpt.into(),
-            published_ms: None,
-        });
-    }
-    let result = ResearchResult {
-        identity: request.identity.clone(),
-        status: if sources.is_empty() {
-            Status::CompleteEmpty
-        } else {
-            Status::Complete
-        },
-        basis: EvidenceBasis::ProviderAsserted,
-        diagnostic: None,
-        queries,
-        sources,
-    };
-    super::validate(&result, &request.identity, request.options)?;
-    ensure!(
-        serde_json::to_vec(&result)?.len() <= request.options.max_evidence_bytes,
-        "evidence byte bound"
-    );
-    Ok(result)
 }
