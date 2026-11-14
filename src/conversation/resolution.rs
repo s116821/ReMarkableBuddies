@@ -127,7 +127,7 @@ fn from_records(
     directive: SourceDirective,
     records: &[Record],
     historical: Option<&RequestEvidence>,
-    exact_pdf: bool,
+    exact_original_bytes: bool,
 ) -> Result<RequestSource> {
     use SourceResolutionRefusal as Refusal;
     ensure!(
@@ -209,10 +209,9 @@ fn from_records(
                         return Err(Refusal::InvalidSource.into());
                     };
                     ensure!(current_source == source_record, Refusal::ChangedSource);
-                    if exact_pdf {
+                    if exact_original_bytes {
                         ensure!(
-                            expected.format == crate::retrieval::SourceFormat::Pdf
-                                && expected.document == original_key.document
+                            expected.document == original_key.document
                                 && expected.format == original_key.format
                                 && expected.source_sha256 == original_key.source_sha256,
                             Refusal::ChangedSource
@@ -235,7 +234,7 @@ pub(super) fn for_frame(
     conversation: Uuid,
     request_turn: Uuid,
     directive: SourceDirective,
-    exact_pdf: bool,
+    exact_original_bytes: bool,
 ) -> Result<RequestSource> {
     match directive {
         SourceDirective::Explicit(source) => Ok(source),
@@ -245,7 +244,7 @@ pub(super) fn for_frame(
             inherited,
             records,
             None,
-            exact_pdf,
+            exact_original_bytes,
         ),
     }
 }

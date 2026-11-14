@@ -341,9 +341,12 @@ impl Ledger {
                     ..
                 } => {
                     ensure!(
-                        expected.format == crate::retrieval::SourceFormat::Pdf
-                            && retrieval.is_some(),
-                        "Reader follow-up requires an admitted PDF"
+                        matches!(
+                            expected.format,
+                            crate::retrieval::SourceFormat::Pdf
+                                | crate::retrieval::SourceFormat::Epub
+                        ) && retrieval.is_some(),
+                        "Reader follow-up requires an admitted PDF or EPUB"
                     );
                     if let Some(operation) = anchor {
                         let prior = records

@@ -156,6 +156,10 @@ pub(super) fn seed(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/fixtures/epub.rs"]
+mod epub_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -278,6 +282,253 @@ mod tests {
             },
             BTreeMap::from([(sha256, bytes)]),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_reader_epub_followup_preserves_archive_identity_and_section() -> Result<()> {
+        use super::epub_fixture::{book, package, xhtml, CONTAINER};
+        use crate::retrieval::epub;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open()?;
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let original = fixture_source(Uuid::new_v4());
+        let buddy = fixture_source(Uuid::new_v4());
+        let (capture, images) = seed(
+            &ledger,
+            conversation,
+            &original,
+            include_bytes!("../../../docs/validation/images/selected-memory/source-page.png")
+                .to_vec(),
+        )?;
+        let opf = package(
+            r#"<item id="later" href="later.xhtml" media-type="application/xhtml+xml"/><item id="intro" href="intro.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<itemref idref="intro"/><itemref idref="later"/>"#,
+        );
+        let archive = |comment: &str| {
+            book(
+                CONTAINER,
+                &opf,
+                &[
+                    (
+                        "book/later.xhtml",
+                        xhtml("<p>Pressure compensation procedure.</p>"),
+                    ),
+                    (
+                        "book/intro.xhtml",
+                        xhtml(&format!("<p>Earlier image question.</p><!-- {comment} -->")),
+                    ),
+                ],
+            )
+        };
+        let bytes = archive("original");
+        let baseline = epub::normalize(original.document, bytes.as_slice())?.document;
+        assert_eq!(baseline.source_sha256, digest(&bytes));
+        let original_index = Index::build(baseline.clone())?;
+        let operation = Uuid::new_v4();
+        let prior = ledger.prepare_request_evidence(
+            conversation,
+            capture.turn,
+            None,
+            RequestSource::Original {
+                origin_turn: capture.turn,
+                source_record: capture.id,
+                expected: original_index.key().clone(),
+            },
+            ReceivingBudget {
+                context: crate::conversation::ContextBudget {
+                    max_text_bytes: 16 * 1024,
+                    max_turns: 64,
+                    provider_token_limit: Some(96 * 1024),
+                },
+                max_encoded_bytes: 96 * 1024,
+                max_passages: 8,
+                max_passage_bytes: 16 * 1024,
+                neighbors: false,
+            },
+            Some(&original_index),
+            |text| Ok(text.len()),
+        )?;
+        let prior_passages = &prior.context().retrieval().unwrap().passages;
+        assert_eq!(prior_passages.len(), 1);
+        assert_eq!(
+            prior_passages[0].section.as_deref(),
+            Some("book/intro.xhtml")
+        );
+        ledger.persist_request_evidence(operation, 1, &prior)?;
+
+        // Model a new extractor revision over the independently normalized
+        // same archive. A new complete key does not change original bytes.
+        let mut reindexed = epub::normalize(original.document, bytes.as_slice())?.document;
+        assert_eq!(reindexed, baseline);
+        reindexed.extractor_revision = "epub-fixture-reindex-v2".into();
+        let index = FollowupIndex {
+            original: Index::build(reindexed)?,
+            calls: Cell::new(0),
+            after_query: None,
+        };
+        let key = index.original.key().clone();
+        assert_ne!(&key, original_index.key());
+        assert_eq!(key.source_sha256, original_index.key().source_sha256);
+
+        let config = Config::default();
+        let mut dispatch = Dispatch::local(&config, &ledger)?;
+        let mut model = FollowupModel::default();
+        model
+            .model
+            .replies
+            .push_back("See the pressure section.".into());
+        let healthy = Arc::new(AtomicBool::new(true));
+        let observer = healthy.clone();
+        let check = Arc::new(move || {
+            ensure!(
+                observer.load(Ordering::SeqCst),
+                "modeled EPUB archive changed"
+            );
+            Ok(())
+        });
+        let admitted = scope(&ledger, conversation, &buddy)?;
+        let question = "Pressure compensation?";
+        let old_request = prior.context().request().clone();
+        dispatch.reader_with_source(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &admitted,
+            SourceDirective::Inherit {
+                request_turn: capture.turn,
+                operation: Some(operation),
+                expected: Some(key.clone()),
+            },
+            Some(FollowupSource {
+                key: key.clone(),
+                provider: &index,
+                check: check.clone(),
+            }),
+            &mut || Ok(buddy.clone()),
+        )?;
+        assert_ne!(buddy.document, original.document);
+        assert_eq!(index.calls.get(), 1);
+        assert_eq!(model.submits, 1);
+        let (parts, attached) = &model.model.seen[0];
+        let payload: Value =
+            serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
+        assert_eq!(payload["request"], question);
+        assert_eq!(payload["history"], json!([old_request]));
+        assert_eq!(payload["source"]["origin_turn"], json!(capture.turn));
+        assert_eq!(payload["source"]["source_record"], json!(capture.id));
+        assert_eq!(payload["source"]["expected"], json!(key));
+        let passages = payload["retrieval"]["passages"].as_array().unwrap();
+        assert_eq!(passages.len(), 1);
+        assert_eq!(passages[0]["section"], "book/later.xhtml");
+        assert!(passages[0]["page"].is_null());
+        assert_eq!(passages[0]["text"], "Pressure compensation procedure.");
+        assert_eq!(
+            *attached,
+            images
+                .iter()
+                .map(|image| STANDARD.encode(image))
+                .collect::<Vec<_>>()
+        );
+
+        let prior_turn = writer::stage(admitted.operation, "reader-user");
+        let prior_evidence = writer::stage(admitted.operation, "reader-source-evidence");
+        let persisted = ledger
+            .request_evidence(conversation, prior_turn, prior_evidence)?
+            .unwrap();
+        let frame: Value = serde_json::from_str(&persisted.record.frame_json)?;
+        assert_eq!(frame["retrieval"], payload["retrieval"]);
+        assert_eq!(frame["history"], payload["history"]);
+
+        let changed_bytes = archive("changed bytes without changed text");
+        let changed_archive =
+            epub::normalize(original.document, changed_bytes.as_slice())?.document;
+        assert_eq!(changed_archive.document, baseline.document);
+        assert_eq!(changed_archive.units, baseline.units);
+        assert_ne!(changed_archive.source_sha256, baseline.source_sha256);
+        let mut changed_archive = changed_archive;
+        changed_archive.extractor_revision = key.extractor_revision.clone();
+        let changed = FollowupIndex {
+            original: Index::build(changed_archive)?,
+            calls: Cell::new(0),
+            after_query: None,
+        };
+        assert_eq!(
+            changed.original.key().normalized_sha256,
+            key.normalized_sha256
+        );
+        let changed_key = changed.original.key().clone();
+        let changed_scope = scope(&ledger, conversation, &buddy)?;
+        let result = dispatch.reader_with_source(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &changed_scope,
+            SourceDirective::Inherit {
+                request_turn: prior_turn,
+                operation: Some(prior_evidence),
+                expected: Some(changed_key.clone()),
+            },
+            Some(FollowupSource {
+                key: changed_key,
+                provider: &changed,
+                check: check.clone(),
+            }),
+            &mut || Ok(buddy.clone()),
+        );
+        assert_eq!(
+            result
+                .err()
+                .expect("changed archive must refuse")
+                .downcast_ref::<crate::conversation::resolution::SourceResolutionRefusal>(),
+            Some(&crate::conversation::resolution::SourceResolutionRefusal::ChangedSource),
+        );
+        assert_eq!(changed.calls.get(), 0);
+        assert_eq!(model.submits, 1);
+
+        model.before_submission = Some(Box::new(move || {
+            healthy.store(false, Ordering::SeqCst);
+            Ok(())
+        }));
+        let stale_scope = scope(&ledger, conversation, &buddy)?;
+        let result = dispatch.reader_with_source(
+            &ledger,
+            &mut model,
+            question,
+            None,
+            &stale_scope,
+            SourceDirective::Inherit {
+                request_turn: prior_turn,
+                operation: Some(prior_evidence),
+                expected: Some(key.clone()),
+            },
+            Some(FollowupSource {
+                key,
+                provider: &index,
+                check,
+            }),
+            &mut || Ok(buddy.clone()),
+        );
+        assert_eq!(
+            result.err().expect("stale EPUB must refuse").to_string(),
+            "modeled EPUB archive changed"
+        );
+        assert_eq!(index.calls.get(), 2);
+        assert_eq!(model.submits, 1);
+        for refused in [changed_scope, stale_scope] {
+            assert!(ledger
+                .expected(
+                    Namespace::Conversation,
+                    writer::stage(refused.operation, "reader-draft")
+                )?
+                .0
+                .is_empty());
+        }
         Ok(())
     }
 
