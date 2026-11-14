@@ -11,7 +11,7 @@ use crate::{
         SelectedDomainProjection, SelectedReaderText,
     },
     llm::ModelHandoff,
-    storage::selection::SelectedReadBudget,
+    storage::{selection::SelectedReadBudget, Manifest, Scope},
     workflow::{
         orchestrator::{researched_fixture, Orchestrator},
         resident_supervisor::health::ServiceHealth,
@@ -31,6 +31,7 @@ use remarkable_open_sdk::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     io::{Cursor, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     os::unix::{
@@ -317,6 +318,16 @@ impl Setup {
             .inspect(root)
             .unwrap()
     }
+    fn ordinary_manifests(&self) -> BTreeMap<Uuid, Manifest> {
+        self.f
+            .a
+            .manifests()
+            .unwrap()
+            .into_iter()
+            .filter(|manifest| manifest.scope == Scope::LocalTransaction)
+            .map(|manifest| (manifest.transaction_id, manifest))
+            .collect()
+    }
     fn generated(&self, root: Uuid) -> Vec<crate::conversation::Turn> {
         self.records(root)
             .into_iter()
@@ -343,6 +354,7 @@ impl Setup {
         self.run_with(model, RunOptions::default())
     }
     fn run_with(&self, model: Scripted<'_>, options: RunOptions) -> Run {
+        let ordinary_before = self.ordinary_manifests();
         let before_children = children();
         let command = retained_command();
         let (mut policy, token) = ReaderPreferences::from_binding(
@@ -476,13 +488,13 @@ impl Setup {
             panic!("selected request must retain its resident original");
         };
         assert_eq!(digest(&stored.original_png), original_hash);
-        assert!(
-            self.f
-                .a
-                .heads(Namespace::Conversation, root)
-                .unwrap()
-                .is_empty(),
-            "no ordinary conversation publication"
+        // Ordinary and selected publications share the record-head index.
+        // Compare complete ordinary manifests so success and refusal paths
+        // cannot silently add or replace an ordinary committed transaction.
+        assert_eq!(
+            self.ordinary_manifests(),
+            ordinary_before,
+            "researched Reader must not change ordinary committed storage"
         );
         assert!(self.records(root).iter().all(|r| !matches!(r, Record::Turn(t) if !matches!(t.outcome,Outcome::Prepared|Outcome::Interpreted|Outcome::Generated))));
         Run {
