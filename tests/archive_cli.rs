@@ -5,19 +5,202 @@ use buddy::{
 };
 use remarkable_reader_buddy as buddy;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsString,
     fs,
-    io::Write,
-    path::Path,
+    io::{Read, Write},
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
+    sync::OnceLock,
+    time::{Duration, Instant, SystemTime},
 };
 #[path = "support/archive_fixture.rs"]
 mod fixture;
 use fixture::Fixture;
 
+// Test-only retained-command custody, captured once for this test process:
+// READER_BUDDY_ARCHIVE_TEST_COMMAND = absolute fs::canonicalize path (including
+// the verbatim prefix on Windows), with no symlink/alias or extra arguments.
+// READER_BUDDY_ARCHIVE_TEST_SHA256 = exactly 64 lowercase hexadecimal digits.
+// READER_BUDDY_ARCHIVE_TEST_BYTES = positive canonical decimal executable size.
+// All three must be present or all absent. Absent preserves Cargo's normal
+// CARGO_BIN_EXE_reader-buddy behavior. CI may select a release binary retained
+// BEFORE cargo test (which may unify dev-only SDK features), then ship those
+// same retained bytes. Selecting a Cargo-built local binary only tests this
+// mechanism; it does not establish shipping release/platform qualification.
+const CUSTODY_ENV: [&str; 3] = [
+    "READER_BUDDY_ARCHIVE_TEST_COMMAND",
+    "READER_BUDDY_ARCHIVE_TEST_SHA256",
+    "READER_BUDDY_ARCHIVE_TEST_BYTES",
+];
+static COMMAND_CUSTODY: OnceLock<Option<RetainedCommand>> = OnceLock::new();
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommandStamp {
+    bytes: u64,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, u32, i64, i64),
+}
+impl CommandStamp {
+    fn capture(metadata: &fs::Metadata) -> Result<Self, &'static str> {
+        if !metadata.is_file() {
+            return Err("retained archive command must be a regular file");
+        }
+        Ok(Self {
+            bytes: metadata.len(),
+            modified: metadata
+                .modified()
+                .map_err(|_| "command metadata unavailable")?,
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.mode(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RetainedCommand {
+    path: PathBuf,
+    sha256: String,
+    stamp: CommandStamp,
+}
+impl RetainedCommand {
+    // Pure inputs let controls exercise invalid selectors without changing the
+    // process environment while the actual command tests run concurrently.
+    fn select(values: [Option<OsString>; 3]) -> Result<Option<Self>, &'static str> {
+        let [path, sha256, bytes] = values;
+        let (path, sha256, bytes) = match (path, sha256, bytes) {
+            (None, None, None) => return Ok(None),
+            (Some(path), Some(sha256), Some(bytes)) => (PathBuf::from(path), sha256, bytes),
+            _ => return Err("retained archive command custody requires all three variables"),
+        };
+        let sha256 = sha256
+            .into_string()
+            .map_err(|_| "invalid command SHA-256")?;
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("invalid command SHA-256");
+        }
+        let bytes = bytes.into_string().map_err(|_| "invalid command size")?;
+        let count: u64 = bytes.parse().map_err(|_| "invalid command size")?;
+        if count == 0 || count.checked_add(1).is_none() || count.to_string() != bytes {
+            return Err("invalid command size");
+        }
+        let stamp = Self::path_stamp(&path)?;
+        if stamp.bytes != count {
+            return Err("retained archive command size mismatch");
+        }
+        let value = Self {
+            path,
+            sha256,
+            stamp,
+        };
+        value.verify()?;
+        Ok(Some(value))
+    }
+
+    fn path_stamp(path: &Path) -> Result<CommandStamp, &'static str> {
+        if !path.is_absolute()
+            || fs::canonicalize(path)
+                .map_err(|_| "retained archive command unavailable")?
+                .as_os_str()
+                != path.as_os_str()
+        {
+            return Err("retained archive command path must be absolute and canonical");
+        }
+        CommandStamp::capture(
+            &fs::symlink_metadata(path).map_err(|_| "retained archive command unavailable")?,
+        )
+    }
+
+    fn verify(&self) -> Result<(), &'static str> {
+        if Self::path_stamp(&self.path)? != self.stamp {
+            return Err("retained archive command metadata changed");
+        }
+        let file =
+            fs::File::open(&self.path).map_err(|_| "retained archive command unavailable")?;
+        if CommandStamp::capture(
+            &file
+                .metadata()
+                .map_err(|_| "command metadata unavailable")?,
+        )? != self.stamp
+        {
+            return Err("retained archive command metadata changed");
+        }
+        let mut reader = (&file).take(self.stamp.bytes + 1);
+        let mut hash = Sha256::new();
+        let mut count = 0;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let n = reader
+                .read(&mut buffer)
+                .map_err(|_| "retained archive command unreadable")?;
+            if n == 0 {
+                break;
+            }
+            count += n as u64;
+            hash.update(&buffer[..n]);
+        }
+        if count != self.stamp.bytes || format!("{:x}", hash.finalize()) != self.sha256 {
+            return Err("retained archive command bytes changed");
+        }
+        if CommandStamp::capture(
+            &file
+                .metadata()
+                .map_err(|_| "command metadata unavailable")?,
+        )? != self.stamp
+            || Self::path_stamp(&self.path)? != self.stamp
+        {
+            return Err("retained archive command metadata changed");
+        }
+        Ok(())
+    }
+
+    fn verify_program(&self, cmd: &Command) -> Result<(), &'static str> {
+        if cmd.get_program() != self.path.as_os_str() {
+            return Err("retained archive command substitution");
+        }
+        self.verify()
+    }
+}
+
+fn retained_command() -> Option<&'static RetainedCommand> {
+    COMMAND_CUSTODY
+        .get_or_init(|| {
+            RetainedCommand::select(CUSTODY_ENV.map(std::env::var_os))
+                .expect("invalid retained archive command custody")
+        })
+        .as_ref()
+}
+fn verify_command(cmd: &Command) {
+    if let Some(retained) = retained_command() {
+        retained
+            .verify_program(cmd)
+            .expect("retained archive command custody lost");
+    }
+}
+
 fn command(f: &Fixture) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_reader-buddy"));
+    let path = retained_command().map_or_else(
+        || Path::new(env!("CARGO_BIN_EXE_reader-buddy")),
+        |retained| retained.path.as_path(),
+    );
+    let mut cmd = Command::new(path);
     cmd.current_dir(&f.root)
         .env("REMARKABLE_BUDDIES_CONFIG", f.root.join("config.json"))
         .env("OPENAI_API_KEY", "PRIVATE_ENV_SENTINEL")
@@ -33,6 +216,7 @@ fn output(mut cmd: Command, input: Option<&[u8]>) -> Output {
         } else {
             Stdio::null()
         });
+    verify_command(&cmd);
     let mut child = cmd.spawn().unwrap();
     let writer = input.map(|bytes| {
         let bytes = bytes.to_vec();
@@ -47,6 +231,7 @@ fn output(mut cmd: Command, input: Option<&[u8]>) -> Output {
             if let Some(writer) = writer {
                 let _ = writer.join();
             }
+            verify_command(&cmd);
             panic!("archive CLI exceeded caller deadline")
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -56,7 +241,9 @@ fn output(mut cmd: Command, input: Option<&[u8]>) -> Output {
             assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe)
         }
     }
-    child.wait_with_output().unwrap()
+    let result = child.wait_with_output().unwrap();
+    verify_command(&cmd);
+    result
 }
 fn run_bytes(f: &Fixture, operation: &str, bytes: &[u8], file: bool) -> Value {
     let mut cmd = command(f);
@@ -98,6 +285,144 @@ fn assert_no_sentinels(path: &Path) {
             assert!(!String::from_utf8_lossy(&fs::read(&path).unwrap()).contains("PRIVATE_"));
         }
     }
+}
+
+// Small non-executed fixture files test custody refusal, not product behavior.
+fn custody_values(path: &Path, bytes: &[u8]) -> [Option<OsString>; 3] {
+    [
+        Some(path.as_os_str().to_owned()),
+        Some(buddy::storage::digest(bytes).into()),
+        Some(bytes.len().to_string().into()),
+    ]
+}
+
+#[test]
+fn retained_command_selector_is_explicit_complete_and_closed() {
+    assert!(RetainedCommand::select([None, None, None])
+        .unwrap()
+        .is_none());
+    let f = Fixture::new();
+    let path = f.root.join("retained-command");
+    let bytes = b"retained fixture, never executed";
+    fs::write(&path, bytes).unwrap();
+    let path = fs::canonicalize(path).unwrap();
+    let values = custody_values(&path, bytes);
+    assert!(RetainedCommand::select(values.clone()).unwrap().is_some());
+    for mask in 1..7 {
+        let mut incomplete = values.clone();
+        for (index, value) in incomplete.iter_mut().enumerate() {
+            if mask & (1 << index) == 0 {
+                *value = None;
+            }
+        }
+        assert!(RetainedCommand::select(incomplete).is_err());
+    }
+    for hash in [
+        "".to_owned(),
+        "a".repeat(63),
+        "A".repeat(64),
+        "g".repeat(64),
+        format!("{} ", buddy::storage::digest(bytes)),
+    ] {
+        let mut invalid = values.clone();
+        invalid[1] = Some(hash.into());
+        assert!(RetainedCommand::select(invalid).is_err());
+    }
+    for size in [
+        "",
+        "0",
+        "01",
+        "+1",
+        " 1",
+        "1 ",
+        "-1",
+        "1.0",
+        "18446744073709551615",
+        "18446744073709551616",
+    ] {
+        let mut invalid = values.clone();
+        invalid[2] = Some(size.into());
+        assert!(RetainedCommand::select(invalid).is_err());
+    }
+    for (index, value) in [(1, "0".repeat(64)), (2, (bytes.len() + 1).to_string())] {
+        let mut invalid = values.clone();
+        invalid[index] = Some(value.into());
+        assert!(RetainedCommand::select(invalid).is_err());
+    }
+    for invalid_path in [
+        PathBuf::new(),
+        PathBuf::from("retained-command"),
+        path.with_file_name("missing"),
+        path.parent().unwrap().to_path_buf(),
+        path.parent().unwrap().join(".").join("retained-command"),
+    ] {
+        assert!(RetainedCommand::select(custody_values(&invalid_path, bytes)).is_err());
+    }
+}
+
+#[test]
+fn retained_command_custody_refuses_substitution_mutation_and_removal() {
+    let f = Fixture::new();
+    let path = f.root.join("retained-command");
+    let bytes = b"retained fixture, never executed";
+    fs::write(&path, bytes).unwrap();
+    let path = fs::canonicalize(path).unwrap();
+    let retained = RetainedCommand::select(custody_values(&path, bytes))
+        .unwrap()
+        .unwrap();
+    let cmd = Command::new(&path);
+    retained.verify_program(&cmd).unwrap();
+    assert!(retained
+        .verify_program(&Command::new("reader-buddy"))
+        .is_err());
+    assert!(retained
+        .verify_program(&Command::new(env!("CARGO_BIN_EXE_reader-buddy")))
+        .is_err());
+    // Same-length changed bytes cannot be admitted by a mere size check.
+    fs::write(&path, vec![b'!'; bytes.len()]).unwrap();
+    assert!(retained.verify_program(&cmd).is_err());
+    assert!(RetainedCommand::select(custody_values(&path, bytes)).is_err());
+    // A nonregular replacement or removal cannot recapture command custody.
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(retained.verify_program(&cmd).is_err());
+    fs::remove_dir(&path).unwrap();
+    assert!(retained.verify_program(&cmd).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn retained_command_custody_refuses_symlinks_fifo_and_same_bytes_replacement() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let path = f.root.join("retained-command");
+    let bytes = b"retained fixture, never executed";
+    fs::write(&path, bytes).unwrap();
+    let path = fs::canonicalize(path).unwrap();
+    let retained = RetainedCommand::select(custody_values(&path, bytes))
+        .unwrap()
+        .unwrap();
+    let alias = path.with_file_name("command-alias");
+    symlink(&path, &alias).unwrap();
+    assert!(RetainedCommand::select(custody_values(&alias, bytes)).is_err());
+    let saved = path.with_file_name("saved-command");
+    fs::rename(&path, &saved).unwrap();
+    symlink(&saved, &path).unwrap();
+    assert!(retained.verify().is_err());
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, bytes).unwrap();
+    assert!(retained.verify().is_err());
+    assert!(RetainedCommand::select(custody_values(&path, bytes))
+        .unwrap()
+        .is_some());
+    fs::remove_file(&path).unwrap();
+    assert!(Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(retained.verify().is_err());
+    assert!(RetainedCommand::select(custody_values(&path, bytes)).is_err());
 }
 
 #[test]
