@@ -419,6 +419,7 @@ enum MarkedCase {
     NoAnswerRoute,
     Pair,
     PairAbout,
+    PairSelectedMemoryVeto,
     PairMemoryRefused,
     PairMemoryRepeated,
     PairEnrichmentFailed,
@@ -439,6 +440,7 @@ impl MarkedCase {
         matches!(
             self,
             Pair | PairAbout
+                | PairSelectedMemoryVeto
                 | PairMemoryRefused
                 | PairMemoryRepeated
                 | PairEnrichmentFailed
@@ -501,6 +503,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         NoAnswerRoute,
         Pair,
         PairAbout,
+        PairSelectedMemoryVeto,
         PairMemoryRefused,
         PairMemoryRepeated,
         PairEnrichmentFailed,
@@ -749,6 +752,14 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                 },
             });
         }
+        if case == PairSelectedMemoryVeto {
+            let device = SimDevice(state.clone());
+            assert!(
+                crate::device::backend::DeviceBackend::marked_answer_destination(&device)
+                    == Some(target),
+                "selected-memory veto requires a pair-capable destination"
+            );
+        }
         let calls = Rc::new(RefCell::new(vec![]));
         let mut provider = model(store.clone(), calls.clone());
         let region = match case {
@@ -758,6 +769,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         };
         let mark = if case == NoMark { "absent" } else { "present" };
         let has_answer = case == NoAnswerRoute || case.has_pair();
+        const ENRICHED_ANSWER: &str = "G unc. uses SI gravity units.";
         let answer = if has_answer {
             "A scripted answer."
         } else {
@@ -770,6 +782,11 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             provider
                 .replies
                 .push_back("TRANSCRIPTION: G? unc. here".into());
+        }
+        if case == PairSelectedMemoryVeto {
+            provider
+                .replies
+                .push_back(format!("ANSWER: {ENRICHED_ANSWER}"));
         }
         if matches!(case, PairLostDraft | PairStaleDraft) {
             let store = store.clone();
@@ -817,6 +834,9 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             provider,
             ledger,
         );
+        if case == PairSelectedMemoryVeto {
+            reader.set_selected_subject_memory(selected_gravity_memory(store.clone())?);
+        }
         if matches!(case, PairMemoryRefused | PairMemoryRepeated) {
             reader.set_selected_subject_memory(Arc::new(RefusedPairMemory {
                 inner: crate::memory::LocalMemory::new_local(store.clone(), Uuid::new_v4())?,
@@ -860,7 +880,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         assert_eq!(result.is_err(), failed, "{case:?}: {result:?}");
         assert_eq!(
             calls.borrow().len(),
-            if case == PairEnrichmentFailed {
+            if matches!(case, PairEnrichmentFailed | PairSelectedMemoryVeto) {
                 3
             } else if has_answer {
                 2
@@ -1012,7 +1032,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             PairWrongOperation | PairChangedReadback => Some(Outcome::ReconcileRequired),
             PairPartialErase | PairLostErase | PairLostDraft | PairStaleCompletion
             | PairMemoryRefused | PairMemoryRepeated => Some(Outcome::Generated),
-            PairRefused | NoAnswerRoute => Some(Outcome::Failed),
+            PairRefused | NoAnswerRoute | PairSelectedMemoryVeto => Some(Outcome::Failed),
             _ => None,
         };
         assert_eq!(
@@ -1024,11 +1044,52 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             let user = interpreted.unwrap();
             assert_eq!(answer.exchange, user.exchange);
             assert_eq!(answer.sources, user.sources);
-            assert!(answer
-                .text
-                .as_deref()
-                .unwrap()
-                .contains("A scripted answer."));
+            let expected_body = if case == PairSelectedMemoryVeto {
+                ENRICHED_ANSWER
+            } else {
+                "A scripted answer."
+            };
+            assert!(answer.text.as_deref().unwrap().contains(expected_body));
+            if case == PairSelectedMemoryVeto {
+                let mark_operation =
+                    crate::writer::stage(user.exchange, "reader-interpret-marked-question");
+                let history = ledger.inspect(conversation, false)?;
+                let mark_receipt = history
+                    .iter()
+                    .find_map(|record| match record {
+                        Record::Receipt(receipt)
+                            if receipt.acknowledgment.operation == mark_operation =>
+                        {
+                            receipt.marked_question.as_deref()
+                        }
+                        _ => None,
+                    })
+                    .context("exact mark receipt missing after veto")?;
+                let mark = serde_json::to_value(mark_receipt)?;
+                let current = ledger
+                    .store()
+                    .value(Namespace::Conversation, user.id)?
+                    .context("interpreted user missing after veto")?;
+                assert_eq!(
+                    mark["interpreted_turn"]["record"],
+                    serde_json::json!(user.id)
+                );
+                assert_eq!(
+                    mark["interpreted_turn"]["revision"],
+                    serde_json::json!(current.revision_id)
+                );
+                assert_eq!(
+                    mark["capture"]["record"],
+                    serde_json::json!(user.sources[0])
+                );
+                assert_eq!(mark["region"], serde_json::json!([12, 24, 48, 16]));
+                assert!(saved.iter().any(|r| matches!(r, Record::OutcomeFact(fact)
+                    if fact.turn == answer.id && fact.outcome == Outcome::Failed
+                        && fact.reason == AttemptReason::NativeOutputUnavailable)));
+                let pair_draft = crate::writer::stage(user.exchange, "reader-marked-answer-draft");
+                assert!(!saved.iter().any(|r| matches!(r, Record::Receipt(receipt)
+                    if receipt.acknowledgment.operation == pair_draft)));
+            }
             if case == PairAbout {
                 let text = answer.text.as_deref().unwrap();
                 assert!(text.starts_with("About: Uncertain"));
@@ -1089,11 +1150,25 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             .any(|r| matches!(r, Record::Turn(t) if t.correction_of.is_some())));
         reader.set_subject_memory(None);
         let mode = ledger.store().sync_mode_snapshot()?;
-        ledger.store().set_sync_mode(
+        let transition = ledger.store().set_sync_mode(
             &mode.token,
             Uuid::new_v4(),
             crate::storage::sync::mode::SyncModeChoice::LocalOnly,
-        )?;
+        );
+        if case == PairAbout {
+            // Notebook storage rejects mode transitions independently of the
+            // request lease. The other cases verify release via a transition.
+            assert_eq!(
+                transition
+                    .err()
+                    .context("notebook mode transition unexpectedly accepted")?
+                    .to_string(),
+                "notebook storage does not support sync mode transitions"
+            );
+            assert_eq!(ledger.store().sync_mode_snapshot()?.token, mode.token);
+        } else {
+            transition?;
+        }
         if let Some(user) =
             interpreted.filter(|_| navigated && !matches!(case, FailedPresentation | PairRefused))
         {
@@ -1127,8 +1202,63 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             state.borrow().marked_question.as_ref().unwrap().page.calls,
             usize::from(navigated)
         );
+        if case == PairSelectedMemoryVeto {
+            assert_eq!(calls.borrow().len(), 3);
+            assert_eq!(records(&ledger), saved, "vetoed request wrote on retry");
+            assert!(!state.borrow().counts.contains_key(&Operation::Next));
+            assert!(!state.borrow().counts.contains_key(&Operation::Previous));
+        }
     }
     Ok(())
+}
+
+fn selected_gravity_memory(
+    store: Arc<Store>,
+) -> Result<Arc<crate::memory::selected::SelectedMemory>> {
+    use crate::memory::{self, catalog::Identity, selected};
+
+    let profile = Uuid::new_v4();
+    let provider = selected::SelectedMemory::new(
+        store,
+        Identity {
+            group: Uuid::new_v4(),
+            profile,
+            binding_sha256: crate::storage::digest(b"synthetic marked Reader memory binding"),
+        },
+    )?;
+    let aggregate = provider.initialize_aggregate(selected::InitializeAggregate {
+        operation: Uuid::new_v4(),
+        accepted_base_sha256: crate::storage::digest(b"aggregate"),
+        fact: memory::Fact {
+            key: memory::Key {
+                profile,
+                scope: memory::Scope::Global,
+                fact: Uuid::new_v4(),
+            },
+            claim: "gravity convention".into(),
+            value: "G unc. uses SI gravity units".into(),
+            subject: "gravity".into(),
+            tags: vec!["unc".into()],
+            provenance: memory::Provenance {
+                basis: memory::Basis::UserConfirmed,
+                description: "Explicit host fixture".into(),
+                conversation: None,
+                turn: None,
+                source: None,
+            },
+            confidence_basis_points: 9000,
+            observed_ms: 1,
+            expires_ms: None,
+        },
+    })?;
+    provider.initialize_selection(selected::InitializeSelection {
+        operation: Uuid::new_v4(),
+        accepted_base_sha256: crate::storage::digest(b"catalog"),
+        registrations: vec![aggregate
+            .registration
+            .context("memory registration missing")?],
+    })?;
+    Ok(Arc::new(provider))
 }
 
 struct RefusedPairMemory {
