@@ -118,6 +118,302 @@ fn original_control_resumes_each_stage_with_same_ids_and_complete_bootstrap() {
 }
 
 #[test]
+fn resumed_group_bootstrap_publishes_first_fact_and_passive_store_adopts_it() {
+    use crate::memory::{self, catalog::Identity, selected::SelectedMemory, Provider};
+
+    let publisher_fixture = Fixture::new();
+    let receiver_fixture = Fixture::new();
+    let wire = Wire::new();
+    let group = Uuid::new_v4();
+    let binding = wire
+        .client(publisher_fixture.0.join("provider/drive.json"), group)
+        .binding_digest();
+    let publisher = publisher_fixture.prepared(group, &binding);
+    let req = request(&publisher, group, &binding);
+    let mut control = launch(&wire, publisher.clone(), group);
+    assert!(control
+        .run(req.clone(), |stage| {
+            ensure!(stage != Stage::Root, "synthetic root interruption");
+            Ok(())
+        })
+        .is_err());
+    let interrupted = control.state.selected.as_ref().unwrap().controls[&req.operation].clone();
+    assert!(interrupted.root_verified && interrupted.accepted_catalog.is_none());
+    drop(control);
+    drop(publisher);
+
+    let publisher = Arc::new(Store::open_existing_for_mode(publisher_fixture.paths()).unwrap());
+    let mut control = launch(&wire, publisher.clone(), group);
+    let outcome = control.run(req.clone(), |_| Ok(())).unwrap();
+    assert!(outcome.bootstrap_complete);
+    assert_eq!(outcome.operation, req.operation);
+    let original = control.state.selected.as_ref().unwrap().controls[&req.operation].clone();
+    assert_eq!(original.ids, interrupted.ids);
+    assert_eq!(original.ids.len(), 5);
+    assert_eq!(counts(&wire).0, 5);
+    let root = original.root.as_ref().unwrap();
+    let catalog = original.accepted_catalog.as_ref().unwrap();
+    assert_eq!(outcome.root_id, original.ids[0]);
+    assert_eq!(outcome.root_sha256, root.sha256);
+    assert_eq!(root.bytes, interrupted.root.as_ref().unwrap().bytes);
+    assert_eq!(catalog.bytes, interrupted.catalog.as_ref().unwrap().bytes);
+    let root_body: Root = serde_json::from_slice(&root.bytes).unwrap();
+    let catalog_body: Catalog = serde_json::from_slice(&catalog.bytes).unwrap();
+    assert_eq!(root_body.group, req.group);
+    assert_eq!(root_body.profile, req.profile);
+    assert_eq!(root_body.binding_sha256, req.binding_sha256);
+    assert_eq!(catalog.slot, root_body.catalog_slot);
+    assert_eq!(catalog_body.root_sha256, outcome.root_sha256);
+    assert!(catalog_body.entries.is_empty());
+    let original_control = serde_json::to_value(&original).unwrap();
+    drop(control);
+
+    // Use the actual control output; no fixture root or catalog is installed.
+    let identity = Identity {
+        group: req.group,
+        profile: req.profile,
+        binding_sha256: req.binding_sha256.clone(),
+    };
+    let initial = memory::Fact {
+        key: memory::Key {
+            profile: req.profile,
+            scope: memory::Scope::Global,
+            fact: Uuid::new_v4(),
+        },
+        claim: "bootstrap transfer convention".into(),
+        value: "initial local value".into(),
+        subject: "units".into(),
+        tags: vec![],
+        provenance: memory::Provenance {
+            basis: memory::Basis::UserConfirmed,
+            description: "synthetic CreateGroup to Worker composition".into(),
+            conversation: None,
+            turn: None,
+            source: None,
+        },
+        confidence_basis_points: 9000,
+        observed_ms: 1,
+        expires_ms: None,
+    };
+    let scope = identity
+        .aggregate_scope(&memory::catalog::Owner::GlobalFact {
+            key: initial.key.clone(),
+        })
+        .unwrap();
+    let producer = SelectedMemory::new(publisher.clone(), identity.clone()).unwrap();
+    let initialized = producer
+        .initialize_aggregate(memory::selected::InitializeAggregate {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: genesis_base(&outcome.root_sha256, &scope.key_sha256),
+            fact: initial.clone(),
+        })
+        .unwrap();
+    producer
+        .initialize_selection(memory::selected::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: outcome.root_sha256.clone(),
+            registrations: vec![initialized.registration.unwrap()],
+        })
+        .unwrap();
+    let mut edited = initial.clone();
+    edited.value = "first real edit after resumed CreateGroup".into();
+    let edit = Uuid::new_v4();
+    let committed = producer
+        .put(memory::Mutation {
+            operation: edit,
+            expected: producer
+                .inspect(&initial.key)
+                .unwrap()
+                .iter()
+                .map(|head| head.revision_id)
+                .collect(),
+            fact: edited.clone(),
+        })
+        .unwrap();
+    assert_eq!(committed, edit);
+    let heads = producer.inspect(&initial.key).unwrap();
+    assert_eq!(heads.len(), 1);
+    let revision = heads[0].revision_id;
+    let sent = publisher
+        .selected_snapshot(&scope, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+
+    struct TestWorker(Worker);
+    impl TestWorker {
+        fn request_stop(&self) {
+            self.0.cancel.store(true, Ordering::Relaxed);
+            let _ = self.0.wake.try_send(());
+        }
+        fn stop_and_join(&mut self) {
+            self.request_stop();
+            self.0
+                .done
+                .recv_timeout(Duration::from_secs(15))
+                .expect("original Worker did not stop before phase boundary");
+            self.0
+                .handle
+                .take()
+                .expect("original Worker handle absent")
+                .join()
+                .expect("original Worker panicked");
+        }
+    }
+    impl Drop for TestWorker {
+        fn drop(&mut self) {
+            // Also request cancellation if a postcondition/assertion unwinds.
+            self.request_stop();
+        }
+    }
+    let start = |store: Arc<Store>| {
+        let transport = wire.client(store.paths.credentials.join("drive.json"), req.group);
+        let policy = SyncPolicy {
+            batch_items: 1,
+            poll_seconds: 5,
+            ..Default::default()
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let engine = Engine::new(
+            store.clone(),
+            policy.clone(),
+            transport,
+            Binding {
+                group: req.group,
+                root_id: outcome.root_id.clone(),
+                digest: req.binding_sha256.clone(),
+            },
+            cancel.clone(),
+        )
+        .unwrap();
+        TestWorker(
+            Worker::launch(store, policy, cancel, engine)
+                .unwrap()
+                .unwrap(),
+        )
+    };
+    // Same bounded, postcondition-driven wake/wait as the existing Worker tests.
+    let wait = |worker: &Worker, condition: &mut dyn FnMut() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !condition() {
+            assert!(
+                Instant::now() < deadline,
+                "Worker postcondition missing; health: {:?}",
+                fs::read_to_string(worker.store.paths.data.join("sync/health.json"))
+            );
+            let _ = worker.wake.try_send(());
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let before_publish = wire.requests().len();
+    let mut publishing = start(publisher.clone());
+    wait(&publishing.0, &mut || {
+        publisher
+            .selected_attempt_inventory()
+            .unwrap()
+            .iter()
+            .any(|attempt| {
+                attempt.selection.scope == scope
+                    && attempt.selection.operation == sent.transaction.operation
+                    && attempt.state == SelectedAttemptState::Withdrawn
+            })
+    });
+    publishing.stop_and_join();
+    let state: State = files::json(
+        &publisher.paths.data.join("sync/state.json"),
+        MAX_METADATA as u64,
+    )
+    .unwrap();
+    let selected = state.selected.as_ref().unwrap();
+    assert_eq!(
+        serde_json::to_value(&selected.controls[&req.operation]).unwrap(),
+        original_control
+    );
+    let epoch = publisher.sync_mode_snapshot().unwrap().epoch.unwrap();
+    let checkpoint = &selected.epochs[&epoch];
+    assert_eq!(
+        checkpoint.root.as_ref().unwrap().sha256,
+        outcome.root_sha256
+    );
+    assert!(checkpoint
+        .catalog
+        .iter()
+        .any(|entry| entry.bytes == catalog.bytes));
+    assert!(wire.requests()[before_publish..]
+        .iter()
+        .any(|request| request.starts_with("POST ")));
+
+    let receiver = receiver_fixture.prepared(req.group, &req.binding_sha256);
+    assert_ne!(receiver.actor_id, publisher.actor_id);
+    receiver
+        .set_sync_mode(
+            &receiver.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            mode::SyncModeChoice::SharedGroup {
+                group: req.group,
+                binding_sha256: req.binding_sha256.clone(),
+                root_id: outcome.root_id.clone(),
+            },
+        )
+        .unwrap();
+    let consumer = SelectedMemory::new(receiver.clone(), identity).unwrap();
+    assert!(consumer.inspect(&initial.key).is_err());
+    let before_receive = wire.requests().len();
+    let mut receiving = start(receiver.clone());
+    wait(&receiving.0, &mut || {
+        consumer.inspect(&initial.key).is_ok_and(|heads| {
+            heads.len() == 1
+                && heads[0].revision_id == revision
+                && heads[0].payload == serde_json::to_value(&edited).unwrap()
+        })
+    });
+    receiving.stop_and_join();
+    let received = receiver
+        .selected_snapshot(&scope, MAX_ITEMS)
+        .unwrap()
+        .unwrap();
+    // The recipient mints its local transaction identity, not new portable bytes.
+    let mut expected = sent.transaction.selected.clone();
+    expected.transaction_id = received.transaction.operation;
+    assert_eq!(received.transaction.selected, expected);
+    for reference in &sent.transaction.selected.records {
+        assert_eq!(
+            publisher.read_object(reference).unwrap(),
+            receiver.read_object(reference).unwrap()
+        );
+    }
+    assert_ne!(received.transaction.operation, sent.transaction.operation);
+    assert_ne!(
+        received.token.store_generation(),
+        sent.token.store_generation()
+    );
+    assert!(receiver.selected_attempt_inventory().unwrap().is_empty());
+    let requests = wire.requests();
+    assert!(!requests[before_receive..].is_empty());
+    assert!(requests[before_receive..]
+        .iter()
+        .all(|request| request.starts_with("GET ")));
+    let query = consumer
+        .query(&memory::Query::new("units".into(), 2))
+        .unwrap();
+    assert_eq!(query.status, memory::Status::Complete);
+    assert_eq!(query.context.facts.len(), 1);
+    assert_eq!(
+        query.context.facts[0].record,
+        initial.key.record_id().unwrap()
+    );
+    assert_eq!(query.context.facts[0].revision, revision);
+    assert_eq!(query.context.facts[0].fact, edited);
+    let mut ready = false;
+    consumer
+        .with_current(&query, &mut || {
+            ready = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(ready);
+}
+
+#[test]
 fn changed_mode_before_selection_or_after_receipt_stops_all_original_publication() {
     for stage in [Stage::BeforeMode, Stage::Mode, Stage::Root] {
         let fixture = Fixture::new();
