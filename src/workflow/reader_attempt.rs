@@ -865,22 +865,7 @@ impl Attempt {
             !self.has_reader_preparation(),
             "Selected Reader preparation requires selected domain mutation/settlement"
         );
-        let timestamp = now()?;
-        let turn = Turn {
-            id: Uuid::new_v4(),
-            conversation: self.user.conversation,
-            exchange: self.user.exchange,
-            sequence: 0,
-            role: Role::Assistant,
-            mode: Mode::Reader,
-            outcome: Outcome::Generated,
-            text: Some(text),
-            sources: self.user.sources.clone(),
-            correction_of: None,
-            created_ms: timestamp,
-            updated_ms: timestamp,
-            completion: None,
-        };
+        let turn = self.answer_draft(text)?;
         if let Some(frame) = self.target_frame.as_mut() {
             frame.check(ledger)?;
             let result = ledger.append_target_answer(
@@ -900,6 +885,55 @@ impl Attempt {
         }
         self.assistant = Some(self.load_turn(ledger, turn.id)?);
         Ok(())
+    }
+
+    fn answer_draft(&self, text: String) -> Result<Turn> {
+        let timestamp = now()?;
+        Ok(Turn {
+            id: Uuid::new_v4(),
+            conversation: self.user.conversation,
+            exchange: self.user.exchange,
+            sequence: 0,
+            role: Role::Assistant,
+            mode: Mode::Reader,
+            outcome: Outcome::Generated,
+            text: Some(text),
+            sources: self.user.sources.clone(),
+            correction_of: None,
+            created_ms: timestamp,
+            updated_ms: timestamp,
+            completion: None,
+        })
+    }
+
+    pub(super) fn prepare_marked_answer(
+        &mut self,
+        ledger: &Ledger,
+        fresh: marked_question::FreshMarkedQuestion,
+        text: String,
+        target: super::exchange_history::UserPresentationTarget,
+        binding_revision: Uuid,
+    ) -> Result<marked_question::MarkedAnswer> {
+        anyhow::ensure!(
+            !self.is_selected() && !self.has_reader_preparation(),
+            "marked answer requires ordinary attempt"
+        );
+        let draft = self.answer_draft(text)?;
+        if let Some(frame) = self.target_frame.as_ref() {
+            frame.check(ledger)?;
+        }
+        let (write, prepared) = fresh.publish_answer_draft(
+            ledger,
+            draft,
+            target,
+            binding_revision,
+            self.target_frame.is_some(),
+        )?;
+        self.assistant = Some(prepared.draft().clone());
+        if let Some(frame) = self.target_frame.as_mut() {
+            frame.acknowledge(ledger, &write)?;
+        }
+        Ok(prepared)
     }
 
     #[cfg(target_os = "linux")]

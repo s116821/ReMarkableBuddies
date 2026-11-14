@@ -1352,6 +1352,7 @@ impl Ledger {
             target,
             None,
             None,
+            None,
         )
         .map(|(result, _)| result)
     }
@@ -1373,6 +1374,7 @@ impl Ledger {
             None,
             Some(captured),
             None,
+            None,
         )
         .map(|(result, _)| result)
     }
@@ -1388,6 +1390,7 @@ impl Ledger {
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
         captured: Option<&crate::storage::captured::Captured>,
         marked: Option<marked_question::PreparedMark>,
+        published: Option<&mut Vec<Envelope>>,
     ) -> Result<(WriteResult, Option<marked_question::FreshMarkedQuestion>)> {
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
@@ -1591,7 +1594,7 @@ impl Ledger {
                 records,
                 binding,
                 Some(captured),
-                None,
+                published,
                 None,
             )
             .map(|(result, _)| (result, None))
@@ -2045,15 +2048,37 @@ impl Ledger {
         budget: &ContextBudget,
         token_count: impl Fn(&[Turn]) -> Result<usize>,
     ) -> Result<ContextView> {
+        self.presentation_context_for(
+            conversation,
+            budget,
+            token_count,
+            ContextPurpose::Presentation,
+        )
+    }
+
+    fn presentation_context_for(
+        &self,
+        conversation: Uuid,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+        purpose: ContextPurpose<'_>,
+    ) -> Result<ContextView> {
         let records = self.inspect(conversation, false)?;
-        let mut context = Self::presentation_from_records(records, budget, token_count, |media| {
-            self.store
-                .open_object(&ObjectRef {
-                    sha256: media.sha256.clone(),
-                    bytes: media.bytes,
-                })
-                .is_ok()
-        })?;
+        let mut context = Self::context_records_for(
+            records,
+            None,
+            budget,
+            Some(&token_count),
+            |media| {
+                self.store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_ok()
+            },
+            purpose,
+        )?;
         self.complete_target_view(&mut context)?;
         Ok(context)
     }
@@ -2105,29 +2130,13 @@ impl Ledger {
         )
     }
 
-    pub(super) fn presentation_from_records(
-        records: Vec<Record>,
-        budget: &ContextBudget,
-        token_count: impl Fn(&[Turn]) -> Result<usize>,
-        media_available: impl Fn(&Media) -> bool,
-    ) -> Result<ContextView> {
-        Self::context_records_for(
-            records,
-            None,
-            budget,
-            Some(&token_count),
-            media_available,
-            ContextPurpose::Presentation,
-        )
-    }
-
     fn context_records_for(
         records: Vec<Record>,
         selection: Option<TurnRange>,
         budget: &ContextBudget,
         token_count: Option<&TurnCounter<'_>>,
         media_available: impl Fn(&Media) -> bool,
-        purpose: ContextPurpose,
+        purpose: ContextPurpose<'_>,
     ) -> Result<ContextView> {
         let token_limit = Self::context_token_limit(selection, budget)?;
         let turns: Vec<Turn> = records
@@ -2136,10 +2145,13 @@ impl Ledger {
                 Record::Turn(t)
                     if (t.outcome == Outcome::Completed
                         || t.outcome == Outcome::Interpreted
-                        || (matches!(purpose, ContextPurpose::Presentation)
-                            && t.mode == Mode::Writer
+                        || (matches!(
+                            purpose,
+                            ContextPurpose::Presentation | ContextPurpose::Pair(_)
+                        ) && t.mode == Mode::Writer
                             && t.role == Role::Assistant
-                            && t.outcome == Outcome::Generated))
+                            && t.outcome == Outcome::Generated)
+                        || matches!(purpose, ContextPurpose::Pair(draft) if t.eq(draft)))
                         && selection.is_none_or(|range| {
                             t.sequence >= range.start && t.sequence < range.end_exclusive
                         }) =>
@@ -2377,7 +2389,8 @@ impl Ledger {
 mod append_replay_tests;
 
 #[derive(Clone, Copy)]
-enum ContextPurpose {
+enum ContextPurpose<'a> {
     Model,
     Presentation,
+    Pair(&'a Turn),
 }

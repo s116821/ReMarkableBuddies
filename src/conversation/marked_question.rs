@@ -1,7 +1,8 @@
 //! Ordinary interpretation evidence. A receipt carries no live erase authority.
 use super::{
-    reader_plan::checked_region, target, Acknowledgment, ExpectedHeads, Ledger, Mode, Outcome,
-    Receipt, Record, Role, SourceObservation, Turn,
+    reader_plan::checked_region, target, Acknowledgment, AttemptReason, ContextBudget,
+    ContextPurpose, ContextView, ExpectedHeads, Ledger, Mode, Outcome, Receipt, Record, Role,
+    SourceObservation, Turn,
 };
 use crate::storage::{
     captured::{Captured, ReadBudget, RecordRef},
@@ -40,6 +41,46 @@ pub(crate) struct FreshMarkedQuestion {
     pub(super) ordinary: OrdinaryModeLease,
 }
 
+pub(crate) struct MarkedAnswer {
+    mark: FreshMarkedQuestion,
+    pinned: PinnedAnswer,
+}
+
+struct PinnedAnswer {
+    draft: Turn,
+    revisions: PairRevisions,
+    target: crate::workflow::exchange_history::UserPresentationTarget,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PairRevisions {
+    pub(crate) root: Uuid,
+    pub(crate) binding: Uuid,
+    pub(crate) user: Uuid,
+    pub(crate) draft: Uuid,
+}
+
+pub(crate) struct MarkedAnswerOutput {
+    pinned: PinnedAnswer,
+    current: Captured,
+    _ordinary: OrdinaryModeLease,
+    pair_attempted: bool,
+}
+
+pub(crate) struct CompletedMarkedAnswer {
+    revision: Uuid,
+    current: Captured,
+    _ordinary: OrdinaryModeLease,
+}
+
+impl CompletedMarkedAnswer {
+    pub(crate) fn bind_metadata(self, ledger: &Ledger, bind: impl FnOnce(Uuid) -> bool) -> bool {
+        self.current
+            .with_current(ledger.store(), || Ok(bind(self.revision)))
+            .unwrap_or(false)
+    }
+}
+
 impl FreshMarkedQuestion {
     pub(crate) fn presentation_head(&self) -> (Uuid, Uuid) {
         (self.root_revision, self.mark.interpreted_turn.revision)
@@ -51,14 +92,18 @@ impl FreshMarkedQuestion {
         device: &mut dyn crate::device::backend::DeviceBackend,
         binding: Option<&crate::device::backend::MarkedSourceBinding>,
     ) -> Result<EraseDisposition> {
+        self.submit_erase(ledger, device, binding)
+    }
+
+    fn submit_erase(
+        &self,
+        ledger: &Ledger,
+        device: &mut dyn crate::device::backend::DeviceBackend,
+        binding: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<EraseDisposition> {
         use crate::device::backend::MarkedEraseSubmission;
-        let Self {
-            current,
-            operation,
-            mark,
-            ordinary,
-            ..
-        } = self;
+        let operation = self.operation;
+        let mark = &self.mark;
         let effect = binding
             .filter(|binding| {
                 binding.source == mark.source
@@ -69,10 +114,9 @@ impl FreshMarkedQuestion {
                 device.prepare_marked_question_erase(binding, operation, mark.region)
             });
         // The mode lease's Drop also locks Store. Keep it outside the callback.
-        let submitted = current.with_current(ledger.store(), || {
+        let submitted = self.current.with_current(ledger.store(), || {
             Ok(effect.map_or(MarkedEraseSubmission::Refused, |effect| effect.submit()))
         });
-        drop(ordinary);
         Ok(match submitted? {
             MarkedEraseSubmission::Refused => EraseDisposition::Refused,
             MarkedEraseSubmission::Accepted {
@@ -89,6 +133,242 @@ impl FreshMarkedQuestion {
                 EraseDisposition::Uncertain
             }
         })
+    }
+
+    pub(crate) fn publish_answer_draft(
+        mut self,
+        ledger: &Ledger,
+        draft: Turn,
+        target: crate::workflow::exchange_history::UserPresentationTarget,
+        binding_revision: Uuid,
+        with_about: bool,
+    ) -> Result<(super::WriteResult, MarkedAnswer)> {
+        let user_id = self.mark.interpreted_turn.record;
+        let user = captured_turn(&self.current, user_id)?.0;
+        ensure!(
+            draft.role == Role::Assistant
+                && draft.mode == Mode::Reader
+                && draft.outcome == Outcome::Generated
+                && draft.conversation == user.conversation
+                && draft.conversation == target.conversation
+                && draft.exchange == user.exchange
+                && draft.sources == user.sources,
+            "marked answer draft differs from original User"
+        );
+        let operation = crate::writer::stage(user.exchange, "reader-marked-answer-draft");
+        let about_user = with_about.then_some(user.id);
+        let fingerprint = Ledger::fingerprint(&("reader-marked-answer-draft", &draft, about_user))?;
+        let id = draft.id;
+        let write = ledger.append_with_capture(
+            operation,
+            heads(self.root_revision),
+            draft,
+            vec![],
+            fingerprint,
+            about_user,
+            Some(&mut self.current),
+            true,
+        )?;
+        self.current.with_current(ledger.store(), || Ok(()))?;
+        self.root_revision = captured_root(&self.current, &write)?;
+        let (draft, draft_revision) = captured_turn(&self.current, id)?;
+        ensure!(
+            write.historical.records.contains(&draft.id) && draft.outcome == Outcome::Generated,
+            "marked answer draft acknowledgment differs"
+        );
+        let pinned = PinnedAnswer {
+            draft,
+            revisions: PairRevisions {
+                draft: draft_revision,
+                user: self.mark.interpreted_turn.revision,
+                root: self.root_revision,
+                binding: binding_revision,
+            },
+            target,
+        };
+        Ok((write, MarkedAnswer { mark: self, pinned }))
+    }
+}
+
+fn heads(revision: Uuid) -> ExpectedHeads {
+    ExpectedHeads([revision].into_iter().collect())
+}
+
+fn captured_turn(current: &Captured, id: Uuid) -> Result<(Turn, Uuid)> {
+    let (envelope, reference) = current
+        .records
+        .iter()
+        .find(|(_, reference)| {
+            reference.namespace == Namespace::Conversation && reference.record == id
+        })
+        .context("captured answer turn absent")?;
+    let Record::Turn(turn) = Ledger::decode(envelope)? else {
+        anyhow::bail!("captured answer turn changed");
+    };
+    Ok((turn, reference.revision))
+}
+
+fn captured_root(current: &Captured, write: &super::WriteResult) -> Result<Uuid> {
+    let revision = write.historical.applied_root_revision;
+    ensure!(
+        current.records.iter().any(|(_, reference)| {
+            reference.namespace == Namespace::Conversation
+                && reference.record == write.historical.conversation
+                && reference.revision == revision
+        }),
+        "marked answer applied root differs"
+    );
+    Ok(revision)
+}
+
+impl MarkedAnswer {
+    pub(crate) fn draft(&self) -> &Turn {
+        &self.pinned.draft
+    }
+
+    pub(crate) fn target(&self) -> crate::workflow::exchange_history::UserPresentationTarget {
+        self.pinned.target
+    }
+
+    pub(crate) fn refuse_output(self, ledger: &Ledger) -> Result<()> {
+        self.into_output().record_uncompleted(
+            ledger,
+            Outcome::Failed,
+            AttemptReason::NativeOutputUnavailable,
+        )
+    }
+
+    pub(crate) fn erase(
+        self,
+        ledger: &Ledger,
+        device: &mut dyn crate::device::backend::DeviceBackend,
+        binding: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<(EraseDisposition, Option<MarkedAnswerOutput>)> {
+        let disposition = self.mark.submit_erase(ledger, device, binding)?;
+        let output = (disposition != EraseDisposition::Uncertain).then(|| self.into_output());
+        Ok((disposition, output))
+    }
+
+    fn into_output(self) -> MarkedAnswerOutput {
+        MarkedAnswerOutput {
+            pinned: self.pinned,
+            current: self.mark.current,
+            _ordinary: self.mark.ordinary,
+            pair_attempted: false,
+        }
+    }
+}
+
+impl MarkedAnswerOutput {
+    pub(crate) fn target(&self) -> crate::workflow::exchange_history::UserPresentationTarget {
+        self.pinned.target
+    }
+
+    pub(crate) fn revisions(&self) -> PairRevisions {
+        self.pinned.revisions
+    }
+
+    pub(crate) fn draft(&self) -> &Turn {
+        &self.pinned.draft
+    }
+
+    fn with_current<T>(&self, ledger: &Ledger, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.current.with_current(ledger.store(), f)
+    }
+
+    pub(crate) fn accept_pair(
+        &mut self,
+        ledger: &Ledger,
+        apply: impl FnOnce() -> crate::workflow::exchange_history::Effect,
+    ) -> Result<crate::workflow::exchange_history::Effect> {
+        ensure!(
+            !std::mem::replace(&mut self.pair_attempted, true),
+            "marked answer pair already attempted"
+        );
+        self.with_current(ledger, || Ok(apply()))
+    }
+
+    pub(crate) fn presentation_context(
+        &self,
+        ledger: &Ledger,
+        budget: &ContextBudget,
+        count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
+        self.with_current(ledger, || Ok(()))?;
+        ledger.presentation_context_for(
+            self.pinned.target.conversation,
+            budget,
+            count,
+            ContextPurpose::Pair(self.draft()),
+        )
+    }
+
+    pub(crate) fn complete_answer(
+        self,
+        ledger: &Ledger,
+        receipt: crate::workflow::exchange_history::VerifiedPairReceipt,
+    ) -> Result<CompletedMarkedAnswer> {
+        ensure!(self.pair_attempted, "marked answer has no pair acceptance");
+        let evidence = receipt.consume(self.pinned.target, self.revisions(), self.draft())?;
+        let operation =
+            crate::writer::stage(evidence.native_operation, "reader-marked-answer-complete");
+        let mut turn = self.pinned.draft;
+        turn.outcome = Outcome::Completed;
+        turn.completion = Some(evidence);
+        let id = turn.id;
+        let mut published = Vec::new();
+        let (write, _) = ledger.advance_with_capture(
+            operation,
+            heads(self.pinned.revisions.root),
+            heads(self.pinned.revisions.draft),
+            turn,
+            None,
+            None,
+            Some(&self.current),
+            None,
+            Some(&mut published),
+        )?;
+        let mut current = self.current;
+        current.advance(published)?;
+        current.with_current(ledger.store(), || Ok(()))?;
+        captured_root(&current, &write)?;
+        let (completed, revision) = captured_turn(&current, id)?;
+        ensure!(
+            completed.outcome == Outcome::Completed && write.historical.records.contains(&id),
+            "marked answer completion differs"
+        );
+        Ok(CompletedMarkedAnswer {
+            revision,
+            current,
+            _ordinary: self._ordinary,
+        })
+    }
+
+    pub(crate) fn record_uncompleted(
+        self,
+        ledger: &Ledger,
+        outcome: Outcome,
+        reason: AttemptReason,
+    ) -> Result<()> {
+        ensure!(
+            matches!(outcome, Outcome::Failed | Outcome::ReconcileRequired),
+            "marked answer outcome must remain uncompleted"
+        );
+        let operation = crate::writer::stage(self.draft().exchange, "reader-marked-answer-outcome");
+        let mut turn = self.pinned.draft;
+        turn.outcome = outcome;
+        ledger.advance_with_capture(
+            operation,
+            heads(self.pinned.revisions.root),
+            heads(self.pinned.revisions.draft),
+            turn,
+            Some(reason),
+            None,
+            Some(&self.current),
+            None,
+            None,
+        )?;
+        Ok(())
     }
 }
 
@@ -329,6 +609,7 @@ impl Ledger {
             target,
             Some(captured),
             Some(mark),
+            None,
         )?;
         Ok((
             result,

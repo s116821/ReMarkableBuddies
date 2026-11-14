@@ -3,7 +3,9 @@
 use super::history::Action;
 use crate::{
     conversation::{
-        ContextBudget, HistoricalPageAssociationInspection, Ledger, Outcome, Role, Turn,
+        marked_question::{MarkedAnswerOutput, PairRevisions},
+        CompletionEvidence, ContextBudget, HistoricalPageAssociationInspection, Ledger, Outcome,
+        Role, Turn,
     },
     conversation_layout::{self, Geometry, PresentationIdentity},
     storage::{Namespace, Uuid},
@@ -68,6 +70,7 @@ pub enum EditAction {
     Undo,
     Redo,
     PresentUser,
+    PresentAnswer,
 }
 
 pub struct Edit {
@@ -82,6 +85,10 @@ pub enum Effect {
         operation: Uuid,
         page: Box<PageState>,
     },
+    VerifiedPair {
+        page: Box<PageState>,
+        evidence: Box<CompletionEvidence>,
+    },
     Refused,
     Unknown,
 }
@@ -94,8 +101,62 @@ pub trait PageBackend {
     fn observe(&mut self) -> Result<PageState>;
     /// Compare the complete before-state and active owner at the effect boundary.
     /// Refuse actions the owner does not support before applying any mutation.
+    /// Pair acceptance is synchronous and cannot call Store or wait for readback.
     fn apply(&mut self, edit: &Edit) -> Effect;
+    /// Associate a verified modeled page state with the final durable revision.
+    /// Synchronous metadata only. Implementations cannot re-enter Store.
+    fn bind_completed_answer(
+        &mut self,
+        _operation: Uuid,
+        _verified: &PageState,
+        _draft: Uuid,
+        _completed: Uuid,
+    ) -> bool {
+        false
+    }
 }
+
+pub(crate) struct VerifiedPairReceipt {
+    target: UserPresentationTarget,
+    revisions: PairRevisions,
+    page: Box<PageState>,
+    evidence: Box<CompletionEvidence>,
+}
+
+impl VerifiedPairReceipt {
+    pub(super) fn page(&self) -> &PageState {
+        &self.page
+    }
+
+    pub(super) fn operation(&self) -> Uuid {
+        self.evidence.native_operation
+    }
+
+    pub(crate) fn consume(
+        self,
+        target: UserPresentationTarget,
+        revisions: PairRevisions,
+        draft: &Turn,
+    ) -> Result<CompletionEvidence> {
+        ensure!(
+            self.target == target
+                && self.revisions == revisions
+                && self.evidence.native_operation
+                    == crate::writer::stage(draft.exchange, "reader-present-marked-answer")
+                && draft.text.as_deref() == Some(self.evidence.exact_text.as_str()),
+            "verified pair does not belong to the captured answer"
+        );
+        Ok(*self.evidence)
+    }
+}
+
+pub(super) enum PairPresentation {
+    Verified(VerifiedPairReceipt),
+    Refused,
+    Uncertain,
+}
+
+pub(crate) const MODELED_PAIR_PROCEDURE: &str = "modeled-pair-edit-readback";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutcomeStatus {
@@ -150,24 +211,36 @@ pub(crate) fn project(
     owner: &PageOwner,
     composer: &str,
 ) -> Result<Projection> {
+    project_for(ledger, conversation, owner, composer, None)
+}
+
+fn project_for(
+    ledger: &Ledger,
+    conversation: Uuid,
+    owner: &PageOwner,
+    composer: &str,
+    output: Option<&MarkedAnswerOutput>,
+) -> Result<Projection> {
     let inspect = || ledger.inspect_page_association(conversation, owner.document, owner.page);
     let HistoricalPageAssociationInspection::HistoricalCandidate(before) = inspect()? else {
         anyhow::bail!("presentation binding unavailable")
     };
-    let context = ledger.presentation_context(
-        conversation,
-        &ContextBudget {
-            max_text_bytes: 64 * 1024,
-            max_turns: 128,
-            provider_token_limit: Some(64 * 1024),
-        },
-        |turns| {
-            Ok(turns
-                .iter()
-                .map(|turn| turn.text.as_ref().map_or(0, String::len))
-                .sum())
-        },
-    )?;
+    let budget = ContextBudget {
+        max_text_bytes: 64 * 1024,
+        max_turns: 128,
+        provider_token_limit: Some(64 * 1024),
+    };
+    let count = |turns: &[Turn]| {
+        Ok(turns
+            .iter()
+            .map(|turn| turn.text.as_ref().map_or(0, String::len))
+            .sum())
+    };
+    let context = if let Some(output) = output {
+        output.presentation_context(ledger, &budget, count)?
+    } else {
+        ledger.presentation_context(conversation, &budget, count)?
+    };
     ensure!(
         context.missing_media.is_empty(),
         "presentation source evidence unavailable"
@@ -226,26 +299,128 @@ fn verify_edit(
     backend: &mut dyn PageBackend,
     edit: &Edit,
 ) -> Result<Option<PageState>, OutcomeStatus> {
-    match backend.apply(edit) {
+    let effect = backend.apply(edit);
+    verify_edit_result(backend, edit, effect).map(|result| result.map(|(page, _)| *page))
+}
+
+type VerifiedEdit = (Box<PageState>, Option<Box<CompletionEvidence>>);
+
+fn verify_edit_result(
+    backend: &mut dyn PageBackend,
+    edit: &Edit,
+    effect: Effect,
+) -> Result<Option<VerifiedEdit>, OutcomeStatus> {
+    let verified = match effect {
         Effect::Refused
             if backend
                 .observe()
                 .is_ok_and(|current| current == edit.before) =>
         {
-            Ok(None)
+            return Ok(None);
         }
         Effect::Verified { operation, page }
-            if operation == edit.operation
-                && page.owner == edit.before.owner
-                && page.content == edit.expected
-                && !page.seal.is_empty()
-                && page.seal != edit.before.seal
-                && backend.observe().is_ok_and(|current| current == *page) =>
+            if operation == edit.operation && edit.action != EditAction::PresentAnswer =>
         {
-            Ok(Some(*page))
+            (page, None)
         }
-        _ => Err(OutcomeStatus::ReconcileRequired),
+        Effect::VerifiedPair { page, evidence }
+            if evidence.native_operation == edit.operation
+                && edit.action == EditAction::PresentAnswer =>
+        {
+            (page, Some(evidence))
+        }
+        _ => return Err(OutcomeStatus::ReconcileRequired),
+    };
+    let page = &verified.0;
+    if page.owner != edit.before.owner
+        || page.content != edit.expected
+        || page.seal.is_empty()
+        || page.seal == edit.before.seal
+        || !backend.observe().is_ok_and(|current| current == **page)
+    {
+        return Err(OutcomeStatus::ReconcileRequired);
     }
+    Ok(Some(verified))
+}
+
+pub(super) fn present_answer(
+    ledger: &Ledger,
+    backend: &mut dyn PageBackend,
+    output: &mut MarkedAnswerOutput,
+    user: &Turn,
+) -> Result<PairPresentation> {
+    let before = backend.observe()?;
+    let target = output.target();
+    let revisions = output.revisions();
+    ensure!(
+        before.owner.document == target.document
+            && before.owner.page == target.page
+            && !before.owner.visit.is_empty()
+            && !before.owner.session.is_empty()
+            && !before.seal.is_empty(),
+        "marked answer destination owner differs"
+    );
+    let projection = project_for(
+        ledger,
+        target.conversation,
+        &before.owner,
+        &before.content.composer,
+        Some(output),
+    )?;
+    let (first, earlier) = projection
+        .exchanges
+        .split_first()
+        .context("marked answer exchange absent")?;
+    let [question, answer] = first.turns.as_slice() else {
+        anyhow::bail!("marked answer exchange does not contain the exact pair");
+    };
+    let draft = output.draft();
+    ensure!(
+        projection.root == revisions.root
+            && projection.binding == revisions.binding
+            && first.id == user.exchange
+            && question.id == user.id
+            && question.revision == revisions.user
+            && user.text.as_deref() == Some(question.text.as_str())
+            && answer.id == draft.id
+            && answer.revision == revisions.draft
+            && draft.text.as_deref() == Some(answer.text.as_str())
+            && earlier == before.content.exchanges.as_slice(),
+        "marked answer pair or earlier presentation changed"
+    );
+    let mut expected = before.content.clone();
+    expected.exchanges.insert(0, first.clone());
+    let edit = Edit {
+        operation: crate::writer::stage(user.exchange, "reader-present-marked-answer"),
+        action: EditAction::PresentAnswer,
+        before,
+        expected,
+    };
+    let effect = output.accept_pair(ledger, || backend.apply(&edit))?;
+    let draft = output.draft();
+    // Readback and all Store-facing validation run after synchronous acceptance.
+    Ok(match verify_edit_result(backend, &edit, effect) {
+        Ok(None) => PairPresentation::Refused,
+        Ok(Some((page, Some(evidence))))
+            if draft.text.as_deref() == Some(evidence.exact_text.as_str())
+                && evidence.observation.document == page.owner.document
+                && evidence.observation.page == page.owner.page
+                && evidence.observation.session == page.owner.session
+                && evidence.observation.visit == page.owner.visit
+                && evidence.observation.content_revision.as_deref() == Some(page.seal.as_str())
+                && evidence.procedure == MODELED_PAIR_PROCEDURE
+                && !evidence.observation.evidence_procedure.is_empty()
+                && !evidence.observation.capability_revision.is_empty() =>
+        {
+            PairPresentation::Verified(VerifiedPairReceipt {
+                target,
+                revisions: output.revisions(),
+                page,
+                evidence,
+            })
+        }
+        _ => PairPresentation::Uncertain,
+    })
 }
 
 pub(super) fn present_user(

@@ -547,10 +547,7 @@ impl Workflow {
         source: Option<&crate::device::backend::MarkedSourceBinding>,
         target: exchange_history::UserPresentationTarget,
     ) -> Result<()> {
-        use crate::conversation::{
-            marked_question::EraseDisposition, HistoricalPageAssociationInspection,
-        };
-        use crate::device::backend::NavigationCompletion;
+        use crate::conversation::HistoricalPageAssociationInspection;
         use exchange_history::OutcomeStatus;
 
         let head = fresh.presentation_head();
@@ -569,18 +566,7 @@ impl Workflow {
         let erase = fresh
             .erase(ledger, &mut *self.device, source)
             .map_err(|error| error.context("marked question erase refused before acceptance"))?;
-        info!("Marked question erase: {erase:?}");
-        if erase == EraseDisposition::Uncertain {
-            self.invalidate_captured_viewport();
-            anyhow::bail!("marked question erase is uncertain");
-        }
-
-        self.check_request_progress()?;
-        anyhow::ensure!(
-            self.navigate_to_next_page()? == NavigationCompletion::Settled,
-            "marked question Buddy destination did not settle"
-        );
-        self.check_request_progress()?;
+        self.navigate_after_marked_erase(erase)?;
         let backend = self
             .device
             .exchange_page_backend()
@@ -598,6 +584,117 @@ impl Workflow {
                 anyhow::bail!("marked question presentation is uncertain")
             }
             _ => anyhow::bail!("marked question presentation refused"),
+        }
+    }
+
+    fn navigate_after_marked_erase(
+        &mut self,
+        erase: crate::conversation::marked_question::EraseDisposition,
+    ) -> Result<()> {
+        use crate::conversation::marked_question::EraseDisposition;
+        use crate::device::backend::NavigationCompletion;
+        info!("Marked question erase: {erase:?}");
+        if erase == EraseDisposition::Uncertain {
+            self.invalidate_captured_viewport();
+            anyhow::bail!("marked question erase is uncertain");
+        }
+        self.check_request_progress()?;
+        anyhow::ensure!(
+            self.navigate_to_next_page()? == NavigationCompletion::Settled,
+            "marked question Buddy destination did not settle"
+        );
+        self.check_request_progress()
+    }
+
+    pub(super) fn marked_answer_binding(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        target: exchange_history::UserPresentationTarget,
+        root: crate::storage::Uuid,
+    ) -> Result<Option<crate::storage::Uuid>> {
+        if self.device.marked_answer_destination() != Some(target) {
+            return Ok(None);
+        }
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+        match ledger.inspect_page_association(target.conversation, target.document, target.page)? {
+            HistoricalCandidate(binding) if binding.root_revision() == root => {
+                Ok(Some(binding.binding_revision()))
+            }
+            _ => anyhow::bail!("marked answer binding changed"),
+        }
+    }
+
+    pub(super) fn present_marked_answer(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        prepared: crate::conversation::marked_question::MarkedAnswer,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<()> {
+        use crate::conversation::{AttemptReason, Outcome};
+        use exchange_history::PairPresentation;
+
+        self.check_request_progress()?;
+        if self.device.marked_answer_destination() != Some(prepared.target()) {
+            return prepared.refuse_output(ledger);
+        }
+        let (erase, output) = prepared.erase(ledger, &mut *self.device, source)?;
+        self.navigate_after_marked_erase(erase)?;
+        let mut output =
+            output.ok_or_else(|| anyhow::anyhow!("marked answer output unavailable"))?;
+        let Some(backend) = self.device.exchange_page_backend() else {
+            return output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            );
+        };
+        match exchange_history::present_answer(ledger, backend, &mut output, user)
+            .map_err(|error| error.context("marked answer pair refused before acceptance"))?
+        {
+            PairPresentation::Refused => output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            ),
+            PairPresentation::Uncertain => {
+                self.input_failed = true;
+                output.record_uncompleted(
+                    ledger,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                )?;
+                anyhow::bail!("marked answer presentation is uncertain")
+            }
+            PairPresentation::Verified(receipt) => {
+                let page = receipt.page().clone();
+                let operation = receipt.operation();
+                let draft = output.revisions().draft;
+                if !backend.observe().is_ok_and(|current| current == page) {
+                    self.input_failed = true;
+                    output.record_uncompleted(
+                        ledger,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::DeviceUncertain,
+                    )?;
+                    anyhow::bail!("marked answer presentation changed before completion");
+                }
+                let completed = match output.complete_answer(ledger, receipt) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        self.input_failed = true;
+                        return Err(error.context("marked answer completion is uncertain"));
+                    }
+                };
+                if !completed.bind_metadata(ledger, |revision| {
+                    backend.bind_completed_answer(operation, &page, draft, revision)
+                }) {
+                    log::warn!(
+                        "Marked answer completed without current presentation revision metadata"
+                    );
+                }
+                Ok(())
+            }
         }
     }
 

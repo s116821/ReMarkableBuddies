@@ -129,6 +129,10 @@ pub trait DeviceBackend {
     fn marked_question_destination(&self) -> Option<UserPresentationTarget> {
         None
     }
+    /// The same bound successor positively supports an exact pair edit.
+    fn marked_answer_destination(&self) -> Option<UserPresentationTarget> {
+        None
+    }
     /// Returns the existing page owner only after the bound destination is active.
     fn exchange_page_backend(&mut self) -> Option<&mut dyn PageBackend> {
         None

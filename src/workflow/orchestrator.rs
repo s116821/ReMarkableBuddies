@@ -603,31 +603,30 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
-                    self.workflow.check_request_progress()?;
-                    let fresh = attempt.interpret_marked_question(
-                        &self.ledger,
-                        &result.question,
-                        marked.region,
-                        result.target.as_ref(),
-                    )?;
-                    if fresh.is_some() {
-                        // The SDK route has no qualified answer continuation.
-                        info!("Marked question erase refused: answer presentation unavailable");
-                    }
-                } else {
-                    attempt.interpret_source_target(
-                        &self.ledger,
-                        &result.question,
-                        result.target.as_ref(),
-                    )?;
-                }
+                let mut fresh =
+                    if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
+                        self.workflow.check_request_progress()?;
+                        attempt.interpret_marked_question(
+                            &self.ledger,
+                            &result.question,
+                            marked.region,
+                            result.target.as_ref(),
+                        )?
+                    } else {
+                        attempt.interpret_source_target(
+                            &self.ledger,
+                            &result.question,
+                            result.target.as_ref(),
+                        )?;
+                        None
+                    };
                 if attempt.source_target_enabled() {
                     result.about = Some(match result.target.as_ref() {
                         Some(candidate) => candidate.about()?,
                         None => "About: Uncertain - Selected source could not be localized".into(),
                     });
                 }
+                let preserve_marked_user = fresh.is_some();
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     let enriched =
@@ -635,6 +634,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     if let Err(error) = enriched {
                         log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
+                        if preserve_marked_user {
+                            return Err(error);
+                        }
                         let canceled = self.workflow.input_failed();
                         attempt.outcome(
                             &self.ledger,
@@ -656,16 +658,33 @@ impl<M: LLMEngine> Orchestrator<M> {
                     info!("Got verified Q&A with optional subject memory");
                 }
                 let memory = self.memory.clone();
+                let mut prepared = None;
+                let mut publication_called = false;
                 if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
                     let published = if attempt.is_selected() {
                         self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
                     } else {
                         memory.with_current(view, &mut || {
+                            if preserve_marked_user {
+                                anyhow::ensure!(
+                                    !std::mem::replace(&mut publication_called, true),
+                                    "marked answer publication callback already consumed"
+                                );
+                            }
+                            prepared = self.prepare_marked_answer(
+                                attempt,
+                                &result,
+                                fresh.take(),
+                                !view.selected(),
+                            )?;
+                            if prepared.is_some() {
+                                return Ok(());
+                            }
                             self.publish_answer(attempt, &result, !view.selected(), None)
                         })
                     };
                     if let Err(error) = published {
-                        if attempt.assistant.is_none() {
+                        if attempt.assistant.is_none() && !preserve_marked_user {
                             let canceled = self.workflow.input_failed();
                             attempt.outcome(
                                 &self.ledger,
@@ -685,7 +704,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(error);
                     }
                 } else {
-                    self.publish_answer(attempt, &result, true, None)?;
+                    prepared = self.prepare_marked_answer(attempt, &result, fresh.take(), true)?;
+                    if prepared.is_none() {
+                        self.publish_answer(attempt, &result, true, None)?;
+                    }
+                }
+                if let Some(prepared) = prepared {
+                    self.workflow.present_marked_answer(
+                        &self.ledger,
+                        &attempt.user,
+                        prepared,
+                        attempt.marked_source.as_deref(),
+                    )?;
                 }
             }
         }
@@ -700,6 +730,40 @@ impl<M: LLMEngine> Orchestrator<M> {
             .about
             .as_ref()
             .map_or(body.clone(), |about| format!("{about}\n{body}"))
+    }
+
+    fn prepare_marked_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        fresh: Option<crate::conversation::marked_question::FreshMarkedQuestion>,
+        allow_native: bool,
+    ) -> Result<Option<crate::conversation::marked_question::MarkedAnswer>> {
+        let (Some(fresh), Some(target)) = (fresh, attempt.marked_destination) else {
+            return Ok(None);
+        };
+        if !allow_native || attempt.is_selected() {
+            return Ok(None);
+        }
+        self.workflow.check_request_progress()?;
+        let Some(binding) = self.workflow.marked_answer_binding(
+            &self.ledger,
+            target,
+            fresh.presentation_head().0,
+        )?
+        else {
+            info!("Marked question erase refused: pair presentation unavailable");
+            return Ok(None);
+        };
+        attempt
+            .prepare_marked_answer(
+                &self.ledger,
+                fresh,
+                Self::compose_result(result),
+                target,
+                binding,
+            )
+            .map(Some)
     }
     fn publish_answer(
         &mut self,

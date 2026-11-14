@@ -45,6 +45,7 @@ pub(super) struct MarkedQuestion {
     pub(super) viewport: String,
     pub(super) page: ModeledPage,
     pub(super) has_destination: bool,
+    pub(super) has_answer_destination: bool,
     pub(super) has_source_binding: bool,
     pub(super) erase_fault: Option<EraseFault>,
     pub(super) erase_calls: usize,
@@ -52,6 +53,8 @@ pub(super) struct MarkedQuestion {
     pub(super) capture: Option<MarkedSourceBinding>,
     pub(super) captured_strokes: Vec<Stroke>,
     pub(super) before_erase: Option<Box<dyn FnOnce()>>,
+    pub(super) before_pair_draft: Option<Box<dyn FnOnce()>>,
+    pub(super) after_pair: Option<Box<dyn FnOnce()>>,
 }
 
 fn sdk_id(id: Uuid) -> remarkable_open_sdk::Uuid {

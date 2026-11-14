@@ -387,6 +387,18 @@ impl PageBackend for SimDevice {
         state.marked_question.as_mut()?.page.take_presentation()
     }
     fn observe(&mut self) -> Result<crate::workflow::exchange_history::PageState> {
+        let after_pair = {
+            let mut state = self.0.borrow_mut();
+            state.marked_question.as_mut().and_then(|model| {
+                model
+                    .page
+                    .pair_operation
+                    .and_then(|_| model.after_pair.take())
+            })
+        };
+        if let Some(after_pair) = after_pair {
+            after_pair();
+        }
         let mut state = self.0.borrow_mut();
         anyhow::ensure!(
             state.marked_page_is_active(),
@@ -403,15 +415,35 @@ impl PageBackend for SimDevice {
         &mut self,
         edit: &crate::workflow::exchange_history::Edit,
     ) -> crate::workflow::exchange_history::Effect {
-        use crate::workflow::exchange_history::Effect;
+        use crate::workflow::exchange_history::{EditAction, Effect};
         let mut state = self.0.borrow_mut();
         if !state.marked_page_is_active() {
             return Effect::Refused;
         }
         match state.marked_question.as_mut() {
-            Some(model) => model.page.apply(edit),
-            None => Effect::Refused,
+            Some(model)
+                if edit.action != EditAction::PresentAnswer || model.has_answer_destination =>
+            {
+                model.page.apply(edit)
+            }
+            _ => Effect::Refused,
         }
+    }
+
+    fn bind_completed_answer(
+        &mut self,
+        operation: crate::storage::Uuid,
+        verified: &crate::workflow::exchange_history::PageState,
+        draft: crate::storage::Uuid,
+        completed: crate::storage::Uuid,
+    ) -> bool {
+        let mut state = self.0.borrow_mut();
+        state.marked_page_is_active()
+            && state.marked_question.as_mut().is_some_and(|model| {
+                model
+                    .page
+                    .bind_completed_answer(operation, verified, draft, completed)
+            })
     }
 }
 
@@ -489,6 +521,28 @@ impl DeviceBackend for SimDevice {
             && model.page.state.owner.document == model.target.document
             && model.page.state.owner.page == model.target.page)
             .then_some(model.target)
+    }
+
+    #[cfg(test)]
+    fn marked_answer_destination(
+        &self,
+    ) -> Option<crate::workflow::exchange_history::UserPresentationTarget> {
+        let hook = self
+            .0
+            .borrow_mut()
+            .marked_question
+            .as_mut()
+            .and_then(|model| model.before_pair_draft.take());
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.marked_question_destination().filter(|_| {
+            self.0
+                .borrow()
+                .marked_question
+                .as_ref()
+                .is_some_and(|model| model.has_answer_destination)
+        })
     }
 
     #[cfg(test)]

@@ -417,6 +417,53 @@ enum MarkedCase {
     OutOfFrame,
     DuplicateBox,
     NoAnswerRoute,
+    Pair,
+    PairAbout,
+    PairMemoryRefused,
+    PairMemoryRepeated,
+    PairEnrichmentFailed,
+    PairPartialErase,
+    PairLostErase,
+    PairRefused,
+    PairWrongOperation,
+    PairChangedReadback,
+    PairLostCompletion,
+    PairStaleCompletion,
+    PairLostDraft,
+    PairStaleDraft,
+}
+
+impl MarkedCase {
+    fn has_pair(self) -> bool {
+        use MarkedCase::*;
+        matches!(
+            self,
+            Pair | PairAbout
+                | PairMemoryRefused
+                | PairMemoryRepeated
+                | PairEnrichmentFailed
+                | PairPartialErase
+                | PairLostErase
+                | PairRefused
+                | PairWrongOperation
+                | PairChangedReadback
+                | PairLostCompletion
+                | PairStaleCompletion
+                | PairLostDraft
+                | PairStaleDraft
+        )
+    }
+}
+
+fn modify_marked_fixture_root(store: &Store, conversation: Uuid) {
+    let mut root = store
+        .value(Namespace::Conversation, conversation)
+        .unwrap()
+        .unwrap();
+    root.parents = [root.revision_id].into_iter().collect();
+    root.revision_id = Uuid::new_v4();
+    root.operation_id = Uuid::new_v4();
+    store.commit(vec![root], BTreeMap::new()).unwrap();
 }
 
 #[test]
@@ -452,9 +499,27 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         OutOfFrame,
         DuplicateBox,
         NoAnswerRoute,
+        Pair,
+        PairAbout,
+        PairMemoryRefused,
+        PairMemoryRepeated,
+        PairEnrichmentFailed,
+        PairPartialErase,
+        PairLostErase,
+        PairRefused,
+        PairWrongOperation,
+        PairChangedReadback,
+        PairLostCompletion,
+        PairStaleCompletion,
+        PairLostDraft,
+        PairStaleDraft,
     ] {
         let fixture = SimulatorLedger::new();
-        let ledger = fixture.open()?;
+        let ledger = if case == PairAbout {
+            fixture.open_targets()?
+        } else {
+            fixture.open()?
+        };
         let store = ledger.store().clone();
         let state = setup();
         let [conversation, document, source_page, buddy_page] =
@@ -508,7 +573,9 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             updated_ms: 1,
             completion: None,
         };
-        ledger.append(Uuid::new_v4(), root()?, earlier.clone(), vec![])?;
+        if case != PairAbout {
+            ledger.append(Uuid::new_v4(), root()?, earlier.clone(), vec![])?;
+        }
         let owner = PageOwner {
             document,
             page: buddy_page,
@@ -585,6 +652,17 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                     })
                     .expect("marked interpretation committed before erase preparation");
                 let mode = store.sync_mode_snapshot().unwrap();
+                if case.has_pair() {
+                    let saved = records(&ledger);
+                    assert!(saved.iter().any(|r| matches!(r, Record::Turn(t)
+                        if t.role == Role::Assistant && t.outcome == Outcome::Generated)));
+                    assert!(saved.iter().any(|r| matches!(r, Record::Receipt(draft)
+                        if draft.acknowledgment.operation == crate::writer::stage(
+                            saved.iter().find_map(|r| match r {
+                                Record::Turn(t) if t.role == Role::Assistant => Some(t.exchange),
+                                _ => None,
+                            }).unwrap(), "reader-marked-answer-draft"))));
+                }
                 assert!(store
                     .set_sync_mode(
                         &mode.token,
@@ -633,17 +711,20 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                     },
                     receipt: None,
                     fault: match case {
-                        FailedPresentation => Some(Case::Refused),
-                        UncertainPresentation => Some(Case::WrongOperation),
+                        FailedPresentation | PairRefused => Some(Case::Refused),
+                        UncertainPresentation | PairWrongOperation => Some(Case::WrongOperation),
+                        PairChangedReadback => Some(Case::ChangedReadback),
                         _ => None,
                     },
                     calls: 0,
+                    pair_operation: None,
                 },
                 has_destination: case != NoPresentation,
+                has_answer_destination: case.has_pair(),
                 has_source_binding: case != NoBinding,
                 erase_fault: match case {
-                    PartialErase => Some(EraseFault::Partial),
-                    LostErase => Some(EraseFault::LostReply),
+                    PartialErase | PairPartialErase => Some(EraseFault::Partial),
+                    LostErase | PairLostErase => Some(EraseFault::LostReply),
                     ChangedAtAcceptance => Some(EraseFault::RenewedVisitBeforeAccept),
                     _ => None,
                 },
@@ -652,6 +733,20 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                 capture: None,
                 captured_strokes: vec![],
                 before_erase,
+                before_pair_draft: None,
+                after_pair: match case {
+                    PairLostCompletion | PairStaleCompletion => {
+                        let store = store.clone();
+                        Some(Box::new(move || {
+                            if case == PairLostCompletion {
+                                store.set_fault(StorageFault::AfterCommit).unwrap();
+                            } else {
+                                modify_marked_fixture_root(&store, conversation);
+                            }
+                        }))
+                    }
+                    _ => None,
+                },
             });
         }
         let calls = Rc::new(RefCell::new(vec![]));
@@ -662,7 +757,8 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             _ => "12,24,48,16",
         };
         let mark = if case == NoMark { "absent" } else { "present" };
-        let answer = if case == NoAnswerRoute {
+        let has_answer = case == NoAnswerRoute || case.has_pair();
+        let answer = if has_answer {
             "A scripted answer."
         } else {
             "NONE"
@@ -670,10 +766,25 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         provider.replies = VecDeque::from([format!(
             "QUESTION: G? unc. here\nQUESTION_BOX: {region}\nSELECTION_CENTER: 320,510\nHANDWRITTEN_QUESTION_MARK: {mark}\n---\nANSWER: {answer}"
         )]);
-        if case == NoAnswerRoute {
+        if has_answer {
             provider
                 .replies
                 .push_back("TRANSCRIPTION: G? unc. here".into());
+        }
+        if matches!(case, PairLostDraft | PairStaleDraft) {
+            let store = store.clone();
+            state
+                .borrow_mut()
+                .marked_question
+                .as_mut()
+                .unwrap()
+                .before_pair_draft = Some(Box::new(move || {
+                if case == PairLostDraft {
+                    store.set_fault(StorageFault::AfterCommit).unwrap();
+                } else {
+                    modify_marked_fixture_root(&store, conversation);
+                }
+            }));
         }
         provider.after_first = {
             let state = state.clone();
@@ -706,6 +817,22 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             provider,
             ledger,
         );
+        if matches!(case, PairMemoryRefused | PairMemoryRepeated) {
+            reader.set_selected_subject_memory(Arc::new(RefusedPairMemory {
+                inner: crate::memory::LocalMemory::new_local(store.clone(), Uuid::new_v4())?,
+                repeat: case == PairMemoryRepeated,
+            }));
+        }
+        if case == PairEnrichmentFailed {
+            reader.set_personalization(
+                crate::config::Personalization {
+                    enabled: true,
+                    text: "Use short explanations.".into(),
+                    ..Default::default()
+                }
+                .snapshot()?,
+            );
+        }
         reader.set_trigger_enabled(false);
         let result = reader.run_iteration();
         let failed = matches!(
@@ -718,11 +845,28 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                 | LostErase
                 | FailedPresentation
                 | UncertainPresentation
+                | PairPartialErase
+                | PairLostErase
+                | PairWrongOperation
+                | PairChangedReadback
+                | PairLostCompletion
+                | PairStaleCompletion
+                | PairLostDraft
+                | PairStaleDraft
+                | PairMemoryRefused
+                | PairMemoryRepeated
+                | PairEnrichmentFailed
         );
         assert_eq!(result.is_err(), failed, "{case:?}: {result:?}");
         assert_eq!(
             calls.borrow().len(),
-            if case == NoAnswerRoute { 2 } else { 1 },
+            if case == PairEnrichmentFailed {
+                3
+            } else if has_answer {
+                2
+            } else {
+                1
+            },
             "{case:?}"
         );
         let overview = image::load_from_memory(&calls.borrow()[0][0])?.to_rgba8();
@@ -735,7 +879,20 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
 
         let accepted = matches!(
             case,
-            Applied | PartialErase | LostErase | FailedPresentation | UncertainPresentation
+            Applied
+                | PartialErase
+                | LostErase
+                | FailedPresentation
+                | UncertainPresentation
+                | Pair
+                | PairAbout
+                | PairPartialErase
+                | PairLostErase
+                | PairRefused
+                | PairWrongOperation
+                | PairChangedReadback
+                | PairLostCompletion
+                | PairStaleCompletion
         );
         let navigated = matches!(
             case,
@@ -748,6 +905,13 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                 | ChangedAtAcceptance
                 | FailedPresentation
                 | UncertainPresentation
+                | Pair
+                | PairAbout
+                | PairRefused
+                | PairWrongOperation
+                | PairChangedReadback
+                | PairLostCompletion
+                | PairStaleCompletion
         );
         {
             let device = state.borrow();
@@ -760,7 +924,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             );
             assert_eq!(modeled.page.calls, usize::from(navigated), "{case:?}");
             assert_eq!(modeled.raster.as_ref(), &raster);
-            let expected = if case == PartialErase {
+            let expected = if matches!(case, PartialErase | PairPartialErase) {
                 &strokes[1..]
             } else if accepted {
                 protected.as_slice()
@@ -770,14 +934,18 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             assert_eq!(modeled.strokes.as_slice(), expected, "{case:?}");
             assert!(device.events.iter().all(|e| e.action != "erase"));
             assert_eq!(device.counts.get(&Operation::Text), None);
-            let shown = navigated && case != FailedPresentation;
+            let shown = navigated && !matches!(case, FailedPresentation | PairRefused);
             let mut observed = modeled.page.state.content.clone();
             if shown {
                 let exchange = observed.exchanges.remove(0);
-                assert_eq!(exchange.turns.len(), 1);
+                assert_eq!(exchange.turns.len(), if case.has_pair() { 2 } else { 1 });
                 assert_eq!(exchange.turns[0].text, "G? unc. here");
             }
-            assert_eq!(observed, content, "{case:?}");
+            let mut expected_content = content.clone();
+            if case == PairChangedReadback {
+                expected_content.unrelated.push('!');
+            }
+            assert_eq!(observed, expected_content, "{case:?}");
         }
         let ledger = Ledger::new(store);
         let saved = records(&ledger);
@@ -827,22 +995,108 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                 .count(),
             usize::from(saved_mark && case != StaleReceipt)
         );
+        let assistant = saved.iter().find_map(|r| match r {
+            Record::Turn(t) if t.role == Role::Assistant => Some(t),
+            _ => None,
+        });
         assert_eq!(
             saved
                 .iter()
-                .any(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant)),
-            case == NoAnswerRoute
+                .filter(|r| matches!(r, Record::Turn(t) if t.role == Role::Assistant))
+                .count(),
+            usize::from(assistant.is_some()),
+            "{case:?} published multiple drafts"
         );
+        let expected = match case {
+            Pair | PairAbout | PairLostCompletion => Some(Outcome::Completed),
+            PairWrongOperation | PairChangedReadback => Some(Outcome::ReconcileRequired),
+            PairPartialErase | PairLostErase | PairLostDraft | PairStaleCompletion
+            | PairMemoryRefused | PairMemoryRepeated => Some(Outcome::Generated),
+            PairRefused | NoAnswerRoute => Some(Outcome::Failed),
+            _ => None,
+        };
+        assert_eq!(
+            assistant.map(|turn| turn.outcome.clone()),
+            expected,
+            "{case:?}"
+        );
+        if let Some(answer) = assistant.filter(|_| case.has_pair()) {
+            let user = interpreted.unwrap();
+            assert_eq!(answer.exchange, user.exchange);
+            assert_eq!(answer.sources, user.sources);
+            assert!(answer
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("A scripted answer."));
+            if case == PairAbout {
+                let text = answer.text.as_deref().unwrap();
+                assert!(text.starts_with("About: Uncertain"));
+                let use_record = saved
+                    .iter()
+                    .find_map(|r| match r {
+                        Record::TargetUse(used) if used.turn == user.id => Some(used),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    use_record.inline_body_sha256.as_deref(),
+                    Some(crate::storage::digest(text.as_bytes()).as_str())
+                );
+            }
+            let device = state.borrow();
+            let page = &device.marked_question.as_ref().unwrap().page;
+            assert!(page.receipt.is_none());
+            if answer.outcome == Outcome::Completed {
+                let completion = answer.completion.as_ref().unwrap();
+                assert_eq!(completion.exact_text, *answer.text.as_ref().unwrap());
+                assert_eq!(
+                    completion.native_operation,
+                    crate::writer::stage(user.exchange, "reader-present-marked-answer")
+                );
+                assert_eq!(completion.observation.page, buddy_page);
+                assert_eq!(
+                    completion.observation.content_revision.as_deref(),
+                    Some(page.state.seal.as_str())
+                );
+                assert_eq!(completion.procedure, "modeled-pair-edit-readback");
+                let revision = ledger
+                    .store()
+                    .value(Namespace::Conversation, answer.id)?
+                    .unwrap()
+                    .revision_id;
+                assert_eq!(
+                    page.state.content.exchanges[0].turns[1].revision == revision,
+                    matches!(case, Pair | PairAbout)
+                );
+            } else {
+                assert!(answer.completion.is_none());
+                let projection = exchange_history::project(
+                    &ledger,
+                    conversation,
+                    &page.state.owner,
+                    "Current draft",
+                )?;
+                assert!(!projection
+                    .exchanges
+                    .iter()
+                    .flat_map(|exchange| &exchange.turns)
+                    .any(|turn| turn.id == answer.id));
+            }
+        }
         assert!(!saved
             .iter()
             .any(|r| matches!(r, Record::Turn(t) if t.correction_of.is_some())));
+        reader.set_subject_memory(None);
         let mode = ledger.store().sync_mode_snapshot()?;
         ledger.store().set_sync_mode(
             &mode.token,
             Uuid::new_v4(),
             crate::storage::sync::mode::SyncModeChoice::LocalOnly,
         )?;
-        if let Some(user) = interpreted.filter(|_| navigated && case != FailedPresentation) {
+        if let Some(user) =
+            interpreted.filter(|_| navigated && !matches!(case, FailedPresentation | PairRefused))
+        {
             let current = ledger
                 .store()
                 .value(Namespace::Conversation, user.id)?
@@ -869,8 +1123,47 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             usize::from(accepted),
             "{case:?} replayed"
         );
+        assert_eq!(
+            state.borrow().marked_question.as_ref().unwrap().page.calls,
+            usize::from(navigated)
+        );
     }
     Ok(())
+}
+
+struct RefusedPairMemory {
+    inner: crate::memory::LocalMemory,
+    repeat: bool,
+}
+
+impl crate::memory::Provider for RefusedPairMemory {
+    fn put(&self, _: crate::memory::Mutation) -> Result<Uuid> {
+        anyhow::bail!("unexpected memory mutation")
+    }
+
+    fn forget(&self, _: crate::memory::Forget) -> Result<Uuid> {
+        anyhow::bail!("unexpected memory mutation")
+    }
+
+    fn inspect(&self, _: &crate::memory::Key) -> Result<Vec<crate::storage::Envelope>> {
+        anyhow::bail!("unexpected memory inspection")
+    }
+
+    fn query(&self, query: &crate::memory::Query) -> Result<crate::memory::QueryResult> {
+        crate::memory::Provider::query(&self.inner, query)
+    }
+
+    fn with_current(
+        &self,
+        _: &crate::memory::QueryResult,
+        publish: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        publish()?;
+        if self.repeat {
+            return publish();
+        }
+        anyhow::bail!("modeled memory admission refused publication continuation")
+    }
 }
 
 struct SelectedModel {
