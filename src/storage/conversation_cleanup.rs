@@ -762,6 +762,7 @@ impl Plan {
                 binding,
             },
             admitted_intent: None,
+            marked_question: None,
         });
         let receipt_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
