@@ -1,4 +1,4 @@
-"""Unexecuted offline host-harness candidate; compiled binaries supplied explicitly.
+"""Offline host harness; compiled binaries supplied explicitly.
 No protected credentials or native loop. Fixture provider is loopback port9 only.
 """
 import argparse
@@ -10,6 +10,55 @@ import queue
 import subprocess
 import threading
 import uuid
+
+
+def preserve_stdout(pipe, path, lines, reader_errors):
+    """Own the raw stream until EOF, separately from parsed protocol receipts."""
+    try:
+        pending = b''
+        with path.open('wb') as stream:
+            while True:
+                chunk = pipe.read1(4096)
+                if not chunk:
+                    break
+                stream.write(chunk)
+                stream.flush()
+                pending += chunk
+                while b'\n' in pending:
+                    line, pending = pending.split(b'\n', 1)
+                    lines.put(line + b'\n')
+    except BaseException as error:
+        reader_errors.append(type(error).__name__)
+
+
+def await_closed_receipt(child, reader, lines, reader_errors, output, report):
+    child.wait(timeout=30)
+    # Record the process outcome before attempting to consume its final receipt.
+    report['owned_child_exit'] = child.returncode
+    release = report['old_release'] = {'exit': child.returncode, 'status': 'failed'}
+    reader.join(timeout=10)
+    if reader.is_alive() or reader_errors:
+        release['reason'] = 'stdout-preservation-incomplete'
+        raise RuntimeError('predecessor stdout preservation incomplete')
+    if child.returncode != 0:
+        release['reason'] = 'nonzero-child-exit'
+        raise RuntimeError(f'predecessor exited {child.returncode} before closed receipt; see old-hold.stderr and old-hold.stdout')
+    # EOF was observed and the reader joined, so a missing line cannot arrive later.
+    try:
+        stdout = lines.get_nowait()
+    except queue.Empty as error:
+        release['reason'] = 'missing-closed-receipt'
+        raise RuntimeError('predecessor exited successfully without a closed receipt; see old-hold.stdout') from error
+    (output / 'old-release.stdout').write_bytes(stdout)
+    try:
+        receipt = json.loads(stdout)
+    except (ValueError, UnicodeError) as error:
+        release['reason'] = 'invalid-closed-receipt'
+        raise RuntimeError('invalid predecessor closed receipt; see old-release.stdout') from error
+    if not isinstance(receipt, dict) or receipt.get('action') != 'released' or receipt.get('closed') is not True:
+        release['reason'] = 'invalid-closed-receipt'
+        raise RuntimeError('predecessor did not confirm closed Store ownership')
+    release['status'] = 'closed'
 
 
 def main():
@@ -32,7 +81,7 @@ def main():
     receipt_raw = Path(args.build_receipt).read_bytes()
     receipt = json.loads(receipt_raw)
     assert receipt['old_source'] == report['old_source']
-    assert receipt['old_driver_source_sha256'] == 'e0e1e547740f45cd2cebadbd6d1bcba98426d43633f00212961f7d8e56fb5297'
+    assert receipt['old_driver_source_sha256'] == '3019fc442438995e1196061d78fa7b8a40ca5072ac6e8d6d29f509e68a605590'
     for name, path, expected in [('old_driver', args.old_driver, args.old_driver_sha256),
                                  ('current_binary', args.current_binary, args.current_binary_sha256)]:
         actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -103,23 +152,9 @@ def main():
         assert report["current_version"]
         child = subprocess.Popen([args.old_driver, 'positive-controls-and-hold', str(root), conversation],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=child_log, env=environment, cwd=private)
-        def preserve_stdout():
-            try:
-                pending = b''
-                with (output / 'old-hold.stdout').open('wb') as stream:
-                    while True:
-                        chunk = child.stdout.read1(4096)
-                        if not chunk:
-                            break
-                        stream.write(chunk)
-                        stream.flush()
-                        pending += chunk
-                        while b'\n' in pending:
-                            line, pending = pending.split(b'\n', 1)
-                            lines.put(line + b'\n')
-            except BaseException as error:
-                reader_errors.append(type(error).__name__)
-        reader = threading.Thread(target=preserve_stdout, daemon=True)
+        reader = threading.Thread(target=preserve_stdout,
+                                  args=(child.stdout, output / 'old-hold.stdout', lines, reader_errors),
+                                  daemon=True)
         reader.start()
         line = lines.get(timeout=60)
         (output / 'old-ready.stdout').write_bytes(line)
@@ -135,12 +170,7 @@ def main():
         assert snapshot() == before
         child.stdin.write(b'release\n')
         child.stdin.flush()
-        child.wait(timeout=30)
-        reader.join(timeout=10)
-        assert not reader.is_alive() and not reader_errors
-        stdout = lines.get(timeout=1)
-        (output / 'old-release.stdout').write_bytes(stdout)
-        assert child.returncode == 0 and json.loads(stdout)['closed']
+        await_closed_receipt(child, reader, lines, reader_errors, output, report)
         request['operation'] = str(uuid.uuid4())
         adopted = run('current-after-release', [args.current_binary, '--writer-note'], json.dumps(request).encode())
         assert adopted['status'] == 'failed' and adopted['failure'] == 'provider' and adopted['local_invocations'] == 1
@@ -153,7 +183,7 @@ def main():
         assert refused['refused'] and refused['observed_format'] == 4 and snapshot() == after
         report.update(status='passed', before=before, after=after)
     except BaseException as error:
-        report.update(status='failed', failure_type=type(error).__name__)
+        report.update(status='failed', failure_type=type(error).__name__, failure_message=str(error))
         raise
     finally:
         try:
