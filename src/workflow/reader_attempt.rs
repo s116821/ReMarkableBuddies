@@ -452,7 +452,7 @@ impl Attempt {
             },
             None => None,
         };
-        let binding = resident_answer.as_deref().or(modeled_binding.as_deref());
+        let binding = resident_answer.as_ref().or(modeled_binding.as_deref());
         let conversation = binding
             .map(|association| association.receipt().conversation)
             .unwrap_or_else(Uuid::new_v4);
