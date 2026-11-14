@@ -10,8 +10,8 @@ use crate::{
         notebook::{
             notebook_input_digest,
             selected::{
-                context_and_images, initial_snapshot, read_selected_media, NotebookSelection,
-                NotebookStart, SelectedNotebookCursor,
+                context_and_images, initial_snapshot, read_selected_media, NotebookPublication,
+                NotebookSelection, NotebookStart, SelectedNotebookCursor,
             },
             NotebookStageKind, MAP_PROMPT, REDUCE_PROMPT,
         },
@@ -242,19 +242,30 @@ impl<E: LLMEngine> StageRunner<'_, E> {
         };
         let input_digest = notebook_input_digest(revision, parts)?;
         let token = cursor.token().clone();
+        let stage_started = Instant::now();
+        let deadline =
+            (*started + Duration::from_secs(600)).min(stage_started + Duration::from_secs(95));
         let Some(prepared) = preferences.with_notebook_phase(
             writer,
             Some(&token),
             NotebookPhase::Publication,
             *memory,
-            |store, _| {
+            |store, reads| {
+                let mut check = || {
+                    ensure!(!canceled(), "selected notebook canceled");
+                    preferences.notebook_phase_time(NotebookPhase::Publication, Some(deadline))
+                };
                 cursor.prepare(
                     writer,
                     store,
                     kind,
                     ordinal,
                     input_digest,
-                    &mut report.unobserved_publication,
+                    NotebookPublication {
+                        reads,
+                        check: &mut check,
+                        unobserved: &mut report.unobserved_publication,
+                    },
                 )
             },
         )?
@@ -263,9 +274,7 @@ impl<E: LLMEngine> StageRunner<'_, E> {
             report.unobserved_publication = true;
             return Ok(None);
         };
-        let stage_started = Instant::now();
-        let deadline =
-            (*started + Duration::from_secs(600)).min(stage_started + Duration::from_secs(95));
+
         let mut stop = None;
         let mut invoked = false;
         let mut progress = || -> Result<()> {
@@ -331,7 +340,22 @@ impl<E: LLMEngine> StageRunner<'_, E> {
             Some(&token),
             NotebookPhase::Publication,
             *memory,
-            |store, _| prepared.finish(writer, store, result, &mut report.unobserved_publication),
+            |store, reads| {
+                let mut check = || {
+                    ensure!(!canceled(), "selected notebook canceled");
+                    preferences.notebook_phase_time(NotebookPhase::Publication, Some(deadline))
+                };
+                prepared.finish(
+                    writer,
+                    store,
+                    result,
+                    NotebookPublication {
+                        reads,
+                        check: &mut check,
+                        unobserved: &mut report.unobserved_publication,
+                    },
+                )
+            },
         )?;
         match publication {
             Some((cursor, generated)) => {
@@ -442,6 +466,10 @@ fn run_prepared(
             NotebookPhase::Admission,
             memory,
             |store, reads| {
+                let mut check = || {
+                    ensure!(!canceled(), "selected notebook canceled");
+                    preferences.notebook_phase_time(NotebookPhase::Admission, None)
+                };
                 SelectedNotebookCursor::begin(
                     writer,
                     store,
@@ -451,8 +479,11 @@ fn run_prepared(
                         archive: original.archive,
                         canonical: original.source.canonical_bytes().to_vec(),
                     },
-                    reads,
-                    &mut report.unobserved_publication,
+                    NotebookPublication {
+                        reads,
+                        check: &mut check,
+                        unobserved: &mut report.unobserved_publication,
+                    },
                 )
             },
         )?
@@ -493,7 +524,21 @@ fn run_prepared(
             Some(&token),
             NotebookPhase::Publication,
             memory,
-            |store, _| cursor.finalize(writer, store, &mut report.unobserved_publication),
+            |store, reads| {
+                let mut check = || {
+                    ensure!(!canceled(), "selected notebook canceled");
+                    preferences.notebook_phase_time(NotebookPhase::Publication, None)
+                };
+                cursor.finalize(
+                    writer,
+                    store,
+                    NotebookPublication {
+                        reads,
+                        check: &mut check,
+                        unobserved: &mut report.unobserved_publication,
+                    },
+                )
+            },
         )?;
         report.status = if report.draft.is_some() {
             Status::Generated
@@ -757,6 +802,30 @@ pub(crate) fn run_fixture(
     frozen: Option<ValidatedNotebook>,
     started: Instant,
 ) -> Result<Report> {
+    run_fixture_canceled(
+        writer,
+        preferences,
+        memory,
+        engine,
+        request,
+        frozen,
+        started,
+        &mut || false,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_fixture_canceled(
+    writer: &SelectedAdmission,
+    preferences: &RequestPreferences,
+    memory: Option<&dyn Provider>,
+    engine: &mut impl LLMEngine,
+    request: serde_json::Value,
+    frozen: Option<ValidatedNotebook>,
+    started: Instant,
+    canceled: &mut dyn FnMut() -> bool,
+) -> Result<Report> {
     let input: Input = serde_json::from_value(request)?;
     input.preflight()?;
     let selected = input.selection();
@@ -772,7 +841,7 @@ pub(crate) fn run_fixture(
         },
         engine,
         original,
-        &mut || false,
+        canceled,
     ))
 }
 

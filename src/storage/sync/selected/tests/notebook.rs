@@ -382,6 +382,15 @@ impl NotebookFixture {
         model: &mut Model<'_>,
         fault: Option<Fault>,
     ) -> crate::writer::notebook::runner::Report {
+        self.produce_controlled(model, fault, &mut || false)
+    }
+
+    fn produce_controlled(
+        &self,
+        model: &mut Model<'_>,
+        fault: Option<Fault>,
+        canceled: &mut dyn FnMut() -> bool,
+    ) -> crate::writer::notebook::runner::Report {
         let started = Instant::now();
         let preferences = RequestPreferences::notebook_from_binding(
             self.first.clone(),
@@ -408,7 +417,7 @@ impl NotebookFixture {
         if let Some(fault) = fault {
             self.first.set_fault(fault).unwrap();
         }
-        run_fixture(
+        crate::writer::notebook::selected::run_fixture_canceled(
             &self.writer,
             &preferences,
             memory.as_deref(),
@@ -416,6 +425,7 @@ impl NotebookFixture {
             self.request.clone(),
             Some(self.frozen.clone()),
             started,
+            canceled,
         )
         .unwrap()
     }
@@ -1078,4 +1088,200 @@ fn selected_notebook_interlock_refuses_next_result_after_independent_memory_edit
     assert_eq!((model.calls, report.local_invocations), (2, 2));
     assert!(report.draft.is_none() && !report.unobserved_publication);
     assert_interlocked_maps(&fixture);
+}
+
+fn notebook_marker(fixture: &NotebookFixture) -> PathBuf {
+    fixture
+        .first
+        .generation(fixture.first.inner.lock().unwrap().generation)
+        .join("selections")
+        .join(format!(
+            "{}.json",
+            digest(&serde_json::to_vec(fixture.writer.scope()).unwrap())
+        ))
+}
+
+struct NotebookMarkerObservation {
+    marker: PathBuf,
+    previous: Arc<Mutex<Option<Vec<u8>>>>,
+    _precheck: super::super::preference_consumer::NotebookPhaseInterlockReset,
+}
+
+impl NotebookMarkerObservation {
+    fn new(fixture: &NotebookFixture, transition: usize) -> Self {
+        use super::super::preference_consumer::{notebook_phase_interlock_for_test, NotebookPhase};
+        let marker = notebook_marker(fixture);
+        let previous = Arc::new(Mutex::new(None));
+        let observed = previous.clone();
+        let path = marker.clone();
+        // Begin is the second Admission callback, after original source capture.
+        // Publication callbacks are prepare/result for each stage, then finalize.
+        let (phase, skip) = if transition == 0 {
+            (NotebookPhase::Admission, 1)
+        } else {
+            (NotebookPhase::Publication, transition - 1)
+        };
+        let precheck = notebook_phase_interlock_for_test(phase, skip, move |_, reads| {
+            assert!(reads.usage().metadata_bytes > 0 && !reads.exhausted());
+            *observed.lock().unwrap() = Some(fs::read(&path).unwrap());
+        });
+        Self {
+            marker,
+            previous,
+            _precheck: precheck,
+        }
+    }
+
+    fn assert_unchanged(&self) {
+        let previous = self.previous.lock().unwrap();
+        let previous = previous
+            .as_ref()
+            .expect("original phase prechecks were not reached");
+        assert_eq!(
+            digest(&fs::read(&self.marker).unwrap()),
+            digest(previous),
+            "selection published after late stop"
+        );
+        assert!(!fs::read_dir(self.marker.parent().unwrap())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-")));
+    }
+}
+
+#[test]
+fn selected_notebook_cancellation_at_staged_marker_prevents_all_four_transitions() {
+    for (transition, expected_calls, expected_results) in
+        [(0, 0, 0), (1, 0, 0), (2, 1, 0), (7, 3, 3)]
+    {
+        let fixture = NotebookFixture::new(false);
+        let observation = NotebookMarkerObservation::new(&fixture, transition);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let reached = Arc::new(AtomicBool::new(false));
+        let change = (canceled.clone(), reached.clone());
+        let _interlock =
+            files::interlock_marker_for_test(observation.marker.clone(), transition, move || {
+                let (canceled, reached) = change;
+                reached.store(true, Ordering::Release);
+                canceled.store(true, Ordering::Release);
+            });
+        let mut model = Model::default();
+        let report =
+            fixture.produce_controlled(&mut model, None, &mut || canceled.load(Ordering::Acquire));
+        assert!(
+            reached.load(Ordering::Acquire),
+            "transition {transition} did not reach staged marker"
+        );
+        observation.assert_unchanged();
+        assert_eq!(
+            (
+                model.calls,
+                report.local_invocations,
+                report.confirmed_stage_results
+            ),
+            (expected_calls, expected_calls, expected_results)
+        );
+        assert!(report.draft.is_none() && report.unobserved_publication);
+    }
+}
+
+#[test]
+fn selected_notebook_publication_spends_original_reads_after_phase_prechecks() {
+    use super::super::preference_consumer::{notebook_phase_interlock_for_test, NotebookPhase};
+    for (skip, expected_calls, expected_results) in [(0, 0, 0), (1, 1, 0), (6, 3, 3)] {
+        let fixture = NotebookFixture::new(false);
+        let original = Arc::new(Mutex::new(None));
+        let observed = original.clone();
+        let scope = fixture.writer.scope().clone();
+        let _interlock = notebook_phase_interlock_for_test(
+            NotebookPhase::Publication,
+            skip,
+            move |store, reads| {
+                *observed.lock().unwrap() = Some(
+                    store
+                        .selected_snapshot(&scope, MAX_ITEMS)
+                        .unwrap()
+                        .unwrap()
+                        .token,
+                );
+                assert!(
+                    reads.usage().metadata_bytes > 0,
+                    "phase prechecks must have consumed original reads"
+                );
+                assert!(reads.charge(u64::MAX, 0, 0, 0).is_err());
+                assert!(reads.exhausted());
+            },
+        );
+        let mut model = Model::default();
+        let report = fixture.produce(&mut model);
+        let token = original
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("phase prechecks were not reached");
+        assert_eq!(
+            fixture
+                .first
+                .selected_snapshot(fixture.writer.scope(), MAX_ITEMS)
+                .unwrap()
+                .unwrap()
+                .token,
+            token,
+            "transition {skip} bypassed exhausted original reads"
+        );
+        assert_eq!(
+            (
+                model.calls,
+                report.local_invocations,
+                report.confirmed_stage_results
+            ),
+            (expected_calls, expected_calls, expected_results)
+        );
+        assert!(report.draft.is_none() && report.unobserved_publication);
+    }
+}
+
+#[test]
+fn selected_notebook_original_and_stage_cutoffs_reach_the_staged_marker() {
+    use super::super::preference_consumer::{
+        advance_notebook_clock_for_test, notebook_clock_for_test,
+    };
+    for (transition, offset, expected_calls, expected_results) in [
+        (0, 61, 0, 0),
+        (1, 96, 0, 0),
+        (2, 96, 1, 0),
+        (2, 601, 1, 0),
+        (7, 601, 3, 3),
+    ] {
+        let fixture = NotebookFixture::new(false);
+        let observation = NotebookMarkerObservation::new(&fixture, transition);
+        let _clock = notebook_clock_for_test();
+        let expired = Instant::now() + Duration::from_secs(offset);
+        let reached = Arc::new(AtomicBool::new(false));
+        let reached_at_marker = reached.clone();
+        let _interlock =
+            files::interlock_marker_for_test(observation.marker.clone(), transition, move || {
+                reached_at_marker.store(true, Ordering::Release);
+                advance_notebook_clock_for_test(expired);
+            });
+        let mut model = Model::default();
+        let report = fixture.produce(&mut model);
+        assert!(
+            reached.load(Ordering::Acquire),
+            "transition {transition} did not reach staged marker"
+        );
+        observation.assert_unchanged();
+        assert_eq!(
+            (
+                model.calls,
+                report.local_invocations,
+                report.confirmed_stage_results
+            ),
+            (expected_calls, expected_calls, expected_results)
+        );
+        assert!(report.draft.is_none() && report.unobserved_publication);
+    }
 }

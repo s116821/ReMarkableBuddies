@@ -17,6 +17,79 @@ pub(crate) enum NotebookPhase {
     Publication,
 }
 
+#[cfg(test)]
+thread_local! {
+    static NOTEBOOK_TEST_TIME: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(super) struct NotebookClockReset;
+#[cfg(test)]
+impl Drop for NotebookClockReset {
+    fn drop(&mut self) {
+        NOTEBOOK_TEST_TIME.with(|time| time.set(None));
+    }
+}
+#[cfg(test)]
+pub(super) fn notebook_clock_for_test() -> NotebookClockReset {
+    NOTEBOOK_TEST_TIME.with(|time| assert!(time.get().is_none()));
+    NotebookClockReset
+}
+#[cfg(test)]
+pub(super) fn advance_notebook_clock_for_test(now: Instant) {
+    NOTEBOOK_TEST_TIME.with(|time| time.set(Some(now)));
+}
+
+#[cfg(test)]
+type NotebookPhaseInterlock = (
+    NotebookPhase,
+    usize,
+    Box<dyn FnOnce(&Store, &mut SelectedReadBudget)>,
+);
+#[cfg(test)]
+thread_local! {
+    static NOTEBOOK_PHASE_INTERLOCK: std::cell::RefCell<Option<NotebookPhaseInterlock>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(super) struct NotebookPhaseInterlockReset;
+#[cfg(test)]
+impl Drop for NotebookPhaseInterlockReset {
+    fn drop(&mut self) {
+        NOTEBOOK_PHASE_INTERLOCK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+#[cfg(test)]
+pub(super) fn notebook_phase_interlock_for_test(
+    phase: NotebookPhase,
+    skip: usize,
+    change: impl FnOnce(&Store, &mut SelectedReadBudget) + 'static,
+) -> NotebookPhaseInterlockReset {
+    NOTEBOOK_PHASE_INTERLOCK.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some((phase, skip, Box::new(change)));
+    });
+    NotebookPhaseInterlockReset
+}
+#[cfg(test)]
+fn notebook_phase_interlock(phase: NotebookPhase, store: &Store, reads: &mut SelectedReadBudget) {
+    let change = NOTEBOOK_PHASE_INTERLOCK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let (target, skip, _) = slot.as_mut()?;
+        if std::mem::discriminant(target) != std::mem::discriminant(&phase) {
+            return None;
+        }
+        if *skip > 0 {
+            *skip -= 1;
+            return None;
+        }
+        slot.take().map(|(_, _, change)| change)
+    });
+    if let Some(change) = change {
+        change(store, reads);
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct NotebookSelectionChanged;
 
@@ -255,6 +328,27 @@ impl RequestPreferences {
             NotebookPhase::Handoff | NotebookPhase::Publication => self.deadline,
         };
         ensure!(Instant::now() < deadline, "Writer image phase expired");
+        Ok(())
+    }
+
+    /// Pure time check; the publication guard must not re-enter Store or gates.
+    pub(crate) fn notebook_phase_time(
+        &self,
+        phase: NotebookPhase,
+        stage_deadline: Option<Instant>,
+    ) -> Result<()> {
+        let cutoff = match phase {
+            NotebookPhase::Admission => self.admission_deadline,
+            NotebookPhase::Handoff | NotebookPhase::Publication => self.deadline,
+        };
+        let cutoff = stage_deadline.map_or(cutoff, |stage| cutoff.min(stage));
+        #[cfg(test)]
+        let now = NOTEBOOK_TEST_TIME
+            .with(|time| time.get())
+            .unwrap_or_else(Instant::now);
+        #[cfg(not(test))]
+        let now = Instant::now();
+        ensure!(now < cutoff, "selected notebook publication expired");
         Ok(())
     }
 
@@ -626,7 +720,11 @@ impl RequestPreferences {
         )>,
         operation: impl FnOnce(&Store, &mut SelectedReadBudget) -> Result<T>,
     ) -> Result<T> {
-        self.with_document_phase(writer, expected, phase, memory, None, operation)
+        self.with_document_phase(writer, expected, phase, memory, None, |store, reads| {
+            #[cfg(test)]
+            notebook_phase_interlock(phase, store, reads);
+            operation(store, reads)
+        })
     }
 
     pub(crate) fn with_document_phase<T>(

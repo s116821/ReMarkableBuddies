@@ -7,7 +7,9 @@ use crate::conversation::{
     DocumentOwnership, IntentRecordRef, IntentSelectionEvidence, SelectedAdmission,
     SelectedDomainProjection,
 };
-use crate::storage::selection::{SelectedReadBudget, SelectedSnapshot, SelectionToken};
+use crate::storage::selection::{
+    SelectedReadBudget, SelectedSnapshot, SelectionPublication, SelectionToken,
+};
 
 pub(crate) struct NotebookSelection {
     pub expected: IntentSelectionEvidence,
@@ -20,6 +22,38 @@ pub(crate) struct NotebookStart {
     pub plan: NotebookPlan,
     pub archive: ArchivedNormalizedSource,
     pub canonical: Vec<u8>,
+}
+
+/// The original phase allowance and a pure late cancellation/time check.
+/// Consuming a cursor never creates a replacement budget or renews its deadline.
+pub(crate) struct NotebookPublication<'a> {
+    pub reads: &'a mut SelectedReadBudget,
+    pub check: &'a mut dyn FnMut() -> Result<()>,
+    pub unobserved: &'a mut bool,
+}
+
+impl NotebookPublication<'_> {
+    fn commit(
+        &mut self,
+        store: &Store,
+        expected: &SelectionToken,
+        operation: Uuid,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<SelectionPublication> {
+        *self.unobserved = true;
+        let publication = store.commit_selected_guarded(
+            expected,
+            operation,
+            records,
+            media,
+            self.reads,
+            &[],
+            self.check,
+        )?;
+        *self.unobserved = publication.replayed;
+        Ok(publication)
+    }
 }
 
 pub(crate) struct SelectedNotebookCursor {
@@ -133,15 +167,15 @@ impl SelectedNotebookCursor {
         store: &Store,
         selection: &NotebookSelection,
         start: NotebookStart,
-        reads: &mut SelectedReadBudget,
-        unobserved: &mut bool,
+        mut publication: NotebookPublication<'_>,
     ) -> Result<Option<Self>> {
         let NotebookStart {
             mut plan,
             archive,
             canonical,
         } = start;
-        let (snapshot, projection) = initial_snapshot(admission, store, selection, reads)?;
+        let (snapshot, projection) =
+            initial_snapshot(admission, store, selection, publication.reads)?;
         let source = archive.validate_bytes(&canonical)?;
         plan.validate_source(&archive, &source)?;
         let mut media = BTreeMap::new();
@@ -230,9 +264,8 @@ impl SelectedNotebookCursor {
             plan.request.clone(),
         )?;
         records.extend([root.clone(), user]);
-        *unobserved = true;
-        let publication = store.commit_selected(&snapshot.token, plan.operation, records, media)?;
-        *unobserved = publication.replayed;
+        let publication =
+            publication.commit(store, &snapshot.token, plan.operation, records, media)?;
         Ok((!publication.replayed).then_some(Self {
             token: publication.token,
             root,
@@ -249,7 +282,7 @@ impl SelectedNotebookCursor {
         kind: NotebookStageKind,
         ordinal: usize,
         input_digest: String,
-        unobserved: &mut bool,
+        mut publication: NotebookPublication<'_>,
     ) -> Result<Option<SelectedNotebookStage>> {
         let stage = prepared_stage(
             &self.plan,
@@ -268,15 +301,14 @@ impl SelectedNotebookCursor {
             Record::NotebookStage(Box::new(stage)),
             vec![],
         )?;
-        *unobserved = true;
-        let publication = store.commit_selected(
+        let publication = publication.commit(
+            store,
             &self.token,
             operation,
             vec![envelope.clone()],
             BTreeMap::new(),
         )?;
         self.token = publication.token;
-        *unobserved = publication.replayed;
         Ok((!publication.replayed).then_some(SelectedNotebookStage {
             cursor: self,
             envelope,
@@ -295,7 +327,7 @@ impl SelectedNotebookCursor {
         self,
         admission: &SelectedAdmission,
         store: &Store,
-        unobserved: &mut bool,
+        mut publication: NotebookPublication<'_>,
     ) -> Result<Option<Uuid>> {
         let reducer = self
             .results
@@ -336,10 +368,13 @@ impl SelectedNotebookCursor {
             )
             .as_bytes(),
         );
-        *unobserved = true;
-        let publication =
-            store.commit_selected(&self.token, operation, vec![root, draft], BTreeMap::new())?;
-        *unobserved = publication.replayed;
+        let publication = publication.commit(
+            store,
+            &self.token,
+            operation,
+            vec![root, draft],
+            BTreeMap::new(),
+        )?;
         Ok((!publication.replayed).then_some(id))
     }
 }
@@ -354,7 +389,7 @@ impl SelectedNotebookStage {
         admission: &SelectedAdmission,
         store: &Store,
         result: NotebookResult,
-        unobserved: &mut bool,
+        mut publication: NotebookPublication<'_>,
     ) -> Result<Option<(SelectedNotebookCursor, bool)>> {
         let Self {
             mut cursor,
@@ -371,8 +406,8 @@ impl SelectedNotebookStage {
             Record::NotebookStage(stage),
             vec![],
         )?;
-        *unobserved = true;
-        let publication = store.commit_selected(
+        let publication = publication.commit(
+            store,
             &cursor.token,
             operation,
             vec![envelope.clone()],
@@ -380,7 +415,6 @@ impl SelectedNotebookStage {
         )?;
         cursor.token = publication.token;
         cursor.results.push(envelope);
-        *unobserved = publication.replayed;
         Ok((!publication.replayed).then_some((cursor, generated)))
     }
 }

@@ -334,6 +334,53 @@ fn atomic_failure(path: &Path, failure: AtomicFailure) -> Result<()> {
     }
     Ok(())
 }
+// Exact-path, one-shot marker interlock for production-path tests only.
+#[cfg(test)]
+type MarkerInterlock = (PathBuf, usize, Box<dyn FnOnce()>);
+#[cfg(test)]
+thread_local! {
+    static MARKER_INTERLOCK: std::cell::RefCell<Option<MarkerInterlock>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct MarkerInterlockReset;
+#[cfg(test)]
+impl Drop for MarkerInterlockReset {
+    fn drop(&mut self) {
+        MARKER_INTERLOCK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+#[cfg(test)]
+pub(crate) fn interlock_marker_for_test(
+    path: PathBuf,
+    skip: usize,
+    change: impl FnOnce() + 'static,
+) -> MarkerInterlockReset {
+    MARKER_INTERLOCK.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some((path, skip, Box::new(change)));
+    });
+    MarkerInterlockReset
+}
+#[cfg(test)]
+fn marker_interlock(path: &Path) {
+    let change = MARKER_INTERLOCK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let (target, skip, _) = slot.as_mut()?;
+        if target != path {
+            return None;
+        }
+        if *skip > 0 {
+            *skip -= 1;
+            return None;
+        }
+        slot.take().map(|(_, _, change)| change)
+    });
+    if let Some(change) = change {
+        change();
+    }
+}
 impl Drop for Temporary {
     fn drop(&mut self) {
         drop(self.file.take());
@@ -402,6 +449,8 @@ fn atomic_with_guard(
     drop(temporary.file.take());
     #[cfg(all(test, unix))]
     atomic_failure(path, AtomicFailure::BeforeRename)?;
+    #[cfg(test)]
+    marker_interlock(path);
     before_rename()?;
     fs::rename(&temporary.path, path).context("atomic publication failed")?;
     #[cfg(all(test, unix))]
