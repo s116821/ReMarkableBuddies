@@ -4,7 +4,8 @@ pub(crate) mod images;
 pub mod memory;
 use super::{
     resolution::{self, SourceDirective},
-    ContextBudget, ContextRefusal, Ledger, Mode, Outcome, Record, Role, Turn, TurnRange,
+    ContextBudget, ContextRefusal, ContextView, Ledger, Mode, Outcome, Record, Role, Turn,
+    TurnRange,
 };
 use crate::{
     retrieval::{IndexKey, Provider, Retrieved},
@@ -115,13 +116,26 @@ pub(super) fn recorded_source(json: &str) -> Result<SourceAssociation> {
     Ok(serde_json::from_str::<Frame>(json)?.source)
 }
 
-#[derive(Debug)]
 pub struct FrozenRequestContext {
     frame: Frame,
+    media_view: Option<ContextView>,
     encoded: String,
     tokens: usize,
 }
+impl fmt::Debug for FrozenRequestContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrozenRequestContext")
+            .field("frame", &self.frame)
+            .field("tokens", &self.tokens)
+            .finish_non_exhaustive()
+    }
+}
 impl FrozenRequestContext {
+    pub(crate) fn media_view(&self) -> Result<&ContextView> {
+        self.media_view
+            .as_ref()
+            .ok_or_else(|| ReceivingRefusal::InvalidHistory.into())
+    }
     pub fn request(&self) -> &Turn {
         &self.frame.request
     }
@@ -556,7 +570,7 @@ impl Ledger {
         let records = self
             .inspect(conversation, false)
             .map_err(|_| ReceivingRefusal::InvalidHistory)?;
-        let source = resolution::for_frame(&records, conversation, request_turn, directive)?;
+        let source = resolution::for_frame(&records, conversation, request_turn, directive, false)?;
         self.assemble_request_context(
             conversation,
             request_turn,
@@ -580,7 +594,33 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
     ) -> Result<FrozenRequestContext> {
-        Self::assemble_request_data(
+        self.assemble_ordinary_request_context(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_ordinary_request_context(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        records: Vec<Record>,
+        keep_media: bool,
+    ) -> Result<FrozenRequestContext> {
+        let mut context = Self::assemble_request_data(
             conversation,
             request_turn,
             selection,
@@ -590,6 +630,7 @@ impl Ledger {
             token_count,
             records,
             "ordinary-historical",
+            keep_media,
             |media| {
                 self.store
                     .open_object(&ObjectRef {
@@ -598,7 +639,13 @@ impl Ledger {
                     })
                     .is_ok()
             },
-        )
+        )?;
+        if let Some(view) = context.media_view.as_mut() {
+            // The target uses are frozen with the frame. Resolve only their
+            // exact historical objects, as the ordinary image path does.
+            self.complete_target_view(view)?;
+        }
+        Ok(context)
     }
 
     /// Only the live Attempt can construct this admitted data view. It carries
@@ -624,6 +671,7 @@ impl Ledger {
             token_count,
             admitted.records().to_vec(),
             "selected-historical",
+            false,
             |media| admitted.media_available(media),
         )
     }
@@ -639,6 +687,7 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
         scope: &str,
+        keep_media: bool,
         media_available: impl Fn(&Media) -> bool,
     ) -> Result<FrozenRequestContext> {
         let token_limit = validate_budget(&budget)?;
@@ -716,11 +765,19 @@ impl Ledger {
             scope: scope.into(),
             conversation,
             request,
-            history: view.turns,
+            history: if keep_media {
+                view.turns.clone()
+            } else {
+                std::mem::take(&mut view.turns)
+            },
             selection,
             source: association,
             retrieval: None,
-            missing_media: view.missing_media,
+            missing_media: if keep_media {
+                view.missing_media.clone()
+            } else {
+                std::mem::take(&mut view.missing_media)
+            },
         };
         let base = encoded(&frame, budget.max_encoded_bytes)?;
         let serialized = if let SourceAssociation::Original { expected, .. } = &frame.source {
@@ -761,6 +818,7 @@ impl Ledger {
         );
         Ok(FrozenRequestContext {
             frame,
+            media_view: keep_media.then_some(view),
             encoded: serialized,
             tokens,
         })

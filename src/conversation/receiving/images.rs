@@ -33,6 +33,37 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
     resolve_with(context, |reference| ledger.store().read_object(reference))
 }
 
+pub(crate) fn resolve_followup(
+    ledger: &Ledger,
+    context: &ContextView,
+    request: &crate::conversation::Turn,
+    source: Option<&Record>,
+) -> Result<Images> {
+    let mut view = context.clone();
+    let mut request = request.clone();
+    if let Some(source) = source {
+        let id = super::source_id(source).context("follow-up source identity absent")?;
+        if !request.sources.contains(&id)
+            && !view.turns.iter().any(|turn| turn.sources.contains(&id))
+        {
+            // Keep the inherited attachment even when its origin precedes the
+            // selected history range. The serialized turns remain unchanged.
+            request.sources.push(id);
+            match source {
+                Record::Source(value) => view.sources.push(value.clone()),
+                Record::Capture(value) => view.captures.push((**value).clone()),
+                Record::ResidentCapture(value) => view.resident_captures.push((**value).clone()),
+                Record::DevelopmentCapture(value) => {
+                    view.development_captures.push((**value).clone())
+                }
+                _ => anyhow::bail!("follow-up attachment kind unavailable"),
+            }
+        }
+    }
+    view.turns.push(request);
+    resolve(ledger, &view)
+}
+
 pub(crate) fn resolve_with(
     context: &ContextView,
     mut read: impl FnMut(&ObjectRef) -> Result<Vec<u8>>,

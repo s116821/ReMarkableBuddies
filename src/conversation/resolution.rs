@@ -115,6 +115,7 @@ impl Ledger {
             directive,
             &records,
             anchor.as_ref(),
+            false,
         )
     }
 }
@@ -126,6 +127,7 @@ fn from_records(
     directive: SourceDirective,
     records: &[Record],
     historical: Option<&RequestEvidence>,
+    exact_pdf: bool,
 ) -> Result<RequestSource> {
     use SourceResolutionRefusal as Refusal;
     ensure!(
@@ -188,7 +190,7 @@ fn from_records(
                 SourceAssociation::Original {
                     origin_turn,
                     source_record,
-                    ..
+                    expected: original_key,
                 } => {
                     let source_identity =
                         source_id(&source_record).ok_or(Refusal::InvalidSource)?;
@@ -207,6 +209,15 @@ fn from_records(
                         return Err(Refusal::InvalidSource.into());
                     };
                     ensure!(current_source == source_record, Refusal::ChangedSource);
+                    if exact_pdf {
+                        ensure!(
+                            expected.format == crate::retrieval::SourceFormat::Pdf
+                                && expected.document == original_key.document
+                                && expected.format == original_key.format
+                                && expected.source_sha256 == original_key.source_sha256,
+                            Refusal::ChangedSource
+                        );
+                    }
                     Ok(RequestSource::Original {
                         origin_turn,
                         source_record: source_identity,
@@ -224,10 +235,18 @@ pub(super) fn for_frame(
     conversation: Uuid,
     request_turn: Uuid,
     directive: SourceDirective,
+    exact_pdf: bool,
 ) -> Result<RequestSource> {
     match directive {
         SourceDirective::Explicit(source) => Ok(source),
-        inherited => from_records(conversation, request_turn, inherited, records, None),
+        inherited => from_records(
+            conversation,
+            request_turn,
+            inherited,
+            records,
+            None,
+            exact_pdf,
+        ),
     }
 }
 

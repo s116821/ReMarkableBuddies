@@ -4,10 +4,12 @@ pub(crate) mod handwriting;
 use crate::{
     config::Config,
     conversation::{
+        evidence::FollowupEvidence, receiving::ReceivingBudget, resolution::SourceDirective,
         ContextBudget, ExpectedHeads, Ledger, Mode, Outcome, Role, SourceObservation, Turn,
         TurnRange,
     },
     device::interaction::Interaction,
+    retrieval::{IndexKey, Provider},
     storage::{Namespace, Uuid},
     writer, LLMEngine,
 };
@@ -248,6 +250,7 @@ impl<'a> Dispatch<'a> {
                 conversation: admitted.conversation,
                 root: selection.root,
                 source: admitted.source.clone(),
+                followup: None,
             });
         Ok((report, output))
     }
@@ -405,6 +408,161 @@ impl<'a> Dispatch<'a> {
                     .collect(),
             ),
             source: admitted.source.clone(),
+            followup: None,
+        })
+    }
+
+    /// The trusted owner supplies the independently observed original source
+    /// separately from the current input visit. Installed ingress is separate.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn reader_with_source(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        original: Option<FollowupSource<'_>>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Reader, false), "Reader disabled");
+        ensure!(
+            !request.trim().is_empty() && request.len() <= 4096 && !request.contains('\0'),
+            "invalid Reader request"
+        );
+        let expected = match &source {
+            SourceDirective::Explicit(
+                crate::conversation::receiving::RequestSource::Original { expected, .. },
+            ) => Some(expected),
+            SourceDirective::Explicit(
+                crate::conversation::receiving::RequestSource::NoDocument,
+            ) => None,
+            SourceDirective::Inherit { expected, .. } => expected.as_ref(),
+        };
+        ensure!(
+            original.as_ref().map(|original| &original.key) == expected,
+            "Reader source admission changed"
+        );
+        let source_check = original.as_ref().map(|original| original.check.clone());
+        let check_source = || verify_followup_source(&source_check);
+        let visit = std::cell::RefCell::new(observe);
+        let check_visit = || admitted.check_source(&mut **visit.borrow_mut());
+        check_visit()?;
+        check_source()?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let user = Turn {
+            id: writer::stage(admitted.operation, "reader-user"),
+            conversation: admitted.conversation,
+            exchange: admitted.operation,
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Interpreted,
+            text: Some(request.to_owned()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: timestamp,
+            updated_ms: timestamp,
+            completion: None,
+        };
+        let head =
+            ledger.append_followup_user(admitted.operation, admitted.root.clone(), user.clone())?;
+        let check_retrieval = || {
+            check_visit()?;
+            check_source()
+        };
+        let retrieval = original.as_ref().map(|original| CheckedFollowupProvider {
+            provider: original.provider,
+            check: &check_retrieval,
+        });
+        let prepared = ledger.prepare_declared_evidence(
+            admitted.conversation,
+            user.id,
+            history_range,
+            source,
+            ReceivingBudget {
+                context: ContextBudget {
+                    max_text_bytes: 16 * 1024,
+                    max_turns: 64,
+                    provider_token_limit: Some(96 * 1024),
+                },
+                max_encoded_bytes: 96 * 1024,
+                max_passages: 8,
+                max_passage_bytes: 16 * 1024,
+                neighbors: true,
+            },
+            retrieval.as_ref().map(|provider| provider as &dyn Provider),
+            |text| Ok(text.len()),
+            Some(head),
+        )?;
+        check_visit()?;
+        check_source()?;
+        let (context, mut evidence) = ledger.persist_followup_evidence(
+            writer::stage(admitted.operation, "reader-source-evidence"),
+            timestamp,
+            prepared,
+        )?;
+        let mut attempted = false;
+        let mut submitted = false;
+        let mut check = || {
+            check_visit()?;
+            check_source()?;
+            evidence.with_current(ledger, || Ok(()))
+        };
+        let mut handoff = |submit: &mut dyn FnMut() -> Result<()>| {
+            if std::mem::replace(&mut attempted, true) {
+                submitted = false;
+                anyhow::bail!("Reader answer already attempted");
+            }
+            check_visit()?;
+            check_source()?;
+            evidence.with_current(ledger, submit)?;
+            submitted = true;
+            Ok(())
+        };
+        let answer = crate::conversation::receiving::answer::follow_up_with_source(
+            ledger,
+            engine,
+            &context,
+            &self.config.personalization_snapshot()?,
+            self.memory.as_deref().map(|provider| (provider, timestamp)),
+            &mut check,
+            &mut handoff,
+        )?;
+        ensure!(submitted, "Reader answer bypassed guarded submission");
+        check_visit()?;
+        check_source()?;
+        let draft = Turn {
+            id: writer::stage(admitted.operation, "reader-draft"),
+            role: Role::Assistant,
+            outcome: Outcome::Generated,
+            text: Some(answer),
+            ..user
+        };
+        let revision = evidence.generated(
+            ledger,
+            writer::stage(admitted.operation, "reader-answer"),
+            draft.clone(),
+        )?;
+        Ok(PendingOutput {
+            id: draft.id,
+            revision,
+            mode: Mode::Reader,
+            conversation: draft.conversation,
+            root: evidence.root(),
+            source: admitted.source.clone(),
+            followup: Some(FollowupOutput {
+                evidence,
+                source_check,
+                operation: admitted.operation,
+                attempted: std::cell::Cell::new(false),
+                submitted: std::cell::Cell::new(false),
+            }),
         })
     }
 
@@ -450,6 +608,7 @@ impl<'a> Dispatch<'a> {
                 .root()
                 .revision_id])),
             source: admitted.source.clone(),
+            followup: None,
         });
         Ok((result.report, output))
     }
@@ -476,14 +635,26 @@ impl<'a> Dispatch<'a> {
             "draft ownership changed"
         );
         admitted.check(ledger, observe)?;
-        let mut turn = ledger
-            .inspect(admitted.conversation, false)?
-            .into_iter()
-            .find_map(|record| match record {
-                crate::conversation::Record::Turn(turn) if turn.id == draft.id => Some(turn),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("draft unavailable"))?;
+        if let Some(followup) = &draft.followup {
+            ensure!(
+                followup.submitted.get() && followup.operation == admitted.operation,
+                "Reader output submission is unverified"
+            );
+            verify_followup_source(&followup.source_check)?;
+            followup.evidence.with_current(ledger, || Ok(()))?;
+        }
+        let mut turn = if let Some(followup) = &draft.followup {
+            followup.evidence.draft(draft.id)?
+        } else {
+            ledger
+                .inspect(admitted.conversation, false)?
+                .into_iter()
+                .find_map(|record| match record {
+                    crate::conversation::Record::Turn(turn) if turn.id == draft.id => Some(turn),
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("draft unavailable"))?
+        };
         ensure!(
             turn.mode == draft.mode
                 && turn.role == Role::Assistant
@@ -505,7 +676,15 @@ impl<'a> Dispatch<'a> {
             ledger.expected(Namespace::Conversation, draft.id)? == expected_turn,
             "draft revision changed"
         );
-        if draft.mode == Mode::Writer {
+        if let Some(followup) = &draft.followup {
+            verify_followup_source(&followup.source_check)?;
+            followup.evidence.complete(
+                ledger,
+                writer::stage(admitted.operation, "reader-output"),
+                expected_turn,
+                turn,
+            )?;
+        } else if draft.mode == Mode::Writer {
             // Draft selection for refine/export continues to refer to Generated.
             // Record the verified visible response separately in its exchange.
             turn.id = writer::stage(draft.id, "visible-output");
@@ -530,6 +709,96 @@ pub(crate) struct PendingOutput {
     conversation: Uuid,
     root: ExpectedHeads,
     source: SourceObservation,
+    followup: Option<FollowupOutput>,
+}
+
+type SourceCurrent = Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
+/// Host-only material from an independent PDF observation. `check` must
+/// revalidate that original observation, not just assert a cache key.
+pub(crate) struct FollowupSource<'a> {
+    pub(crate) key: IndexKey,
+    pub(crate) provider: &'a dyn Provider,
+    pub(crate) check: SourceCurrent,
+}
+
+struct FollowupOutput {
+    evidence: FollowupEvidence,
+    source_check: Option<SourceCurrent>,
+    operation: Uuid,
+    attempted: std::cell::Cell<bool>,
+    submitted: std::cell::Cell<bool>,
+}
+
+impl PendingOutput {
+    #[allow(dead_code)]
+    pub(crate) fn admit_followup_output(
+        &self,
+        ledger: &Ledger,
+        admitted: &RequestScope,
+        visit: &mut dyn FnMut() -> Result<SourceObservation>,
+        submit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let followup = self
+            .followup
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("source-aware Reader draft required"))?;
+        ensure!(
+            admitted.conversation == self.conversation
+                && admitted.operation == followup.operation
+                && admitted.root == self.root
+                && admitted.source == self.source,
+            "Reader output ownership changed"
+        );
+        admitted.check_source(visit)?;
+        verify_followup_source(&followup.source_check)?;
+        // This callback only submits the original effect. It cannot reenter
+        // this Store or wait for native completion while the guard is held.
+        followup.evidence.with_current(ledger, || {
+            ensure!(
+                !followup.attempted.replace(true),
+                "Reader output already attempted"
+            );
+            submit()?;
+            followup.submitted.set(true);
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn root(&self) -> &ExpectedHeads {
+        &self.root
+    }
+}
+
+fn verify_followup_source(check: &Option<SourceCurrent>) -> Result<()> {
+    if let Some(check) = check {
+        check()?;
+    }
+    Ok(())
+}
+
+struct CheckedFollowupProvider<'a> {
+    provider: &'a dyn Provider,
+    check: &'a dyn Fn() -> Result<()>,
+}
+
+impl Provider for CheckedFollowupProvider<'_> {
+    fn query(
+        &self,
+        key: &IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+    ) -> Result<crate::retrieval::Retrieved> {
+        (self.check)()?;
+        let result = self
+            .provider
+            .query(key, question, max_passages, max_bytes, neighbors)?;
+        (self.check)()?;
+        Ok(result)
+    }
 }
 
 pub(crate) enum ExportDecision {

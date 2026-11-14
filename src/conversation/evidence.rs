@@ -110,6 +110,82 @@ impl PreparedRequestEvidence {
         &self.context
     }
 }
+
+/// Exact ordinary ledger heads carried through one live source-aware follow-up.
+pub(crate) struct FollowupEvidence {
+    capture: Captured,
+    root: Uuid,
+}
+
+pub(crate) struct FollowupRequestHead {
+    generation: Uuid,
+    root: Uuid,
+    user: Uuid,
+}
+
+impl FollowupEvidence {
+    pub(crate) fn with_current<T>(
+        &self,
+        ledger: &Ledger,
+        consume: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.capture.with_current(&ledger.store, consume)
+    }
+
+    pub(crate) fn root(&self) -> ExpectedHeads {
+        ExpectedHeads(BTreeSet::from([self.root]))
+    }
+
+    pub(crate) fn generated(
+        &mut self,
+        ledger: &Ledger,
+        operation: Uuid,
+        draft: Turn,
+    ) -> Result<ExpectedHeads> {
+        let id = draft.id;
+        let result =
+            ledger.append_followup(operation, self.root(), draft, Some(&mut self.capture))?;
+        self.root = result.historical.applied_root_revision;
+        self.with_current(ledger, || Ok(()))?;
+        let revision = self
+            .capture
+            .records
+            .iter()
+            .find(|(_, reference)| {
+                reference.namespace == Namespace::Conversation && reference.record == id
+            })
+            .context("published Reader draft absent")?
+            .1
+            .revision;
+        Ok(ExpectedHeads(BTreeSet::from([revision])))
+    }
+
+    pub(crate) fn complete(
+        &self,
+        ledger: &Ledger,
+        operation: Uuid,
+        draft: ExpectedHeads,
+        turn: Turn,
+    ) -> Result<()> {
+        ledger.complete_followup(operation, self.root(), draft, turn, &self.capture)?;
+        Ok(())
+    }
+
+    pub(crate) fn draft(&self, id: Uuid) -> Result<Turn> {
+        let (envelope, _) = self
+            .capture
+            .records
+            .iter()
+            .find(|(envelope, _)| {
+                envelope.namespace == Namespace::Conversation && envelope.record_id == id
+            })
+            .context("Reader draft unavailable")?;
+        let Record::Turn(draft) = Ledger::decode(envelope)? else {
+            bail!("Reader draft kind changed");
+        };
+        Ok(draft)
+    }
+}
 #[derive(Debug)]
 pub struct HistoricalRequestEvidence {
     pub record: RequestEvidence,
@@ -131,6 +207,37 @@ pub(super) fn matches(envelope: &Envelope, conversation: Uuid) -> bool {
         || (envelope.namespace == Namespace::Conversation && envelope.record_id == conversation)
 }
 impl Ledger {
+    pub(crate) fn append_followup_user(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        user: Turn,
+    ) -> Result<FollowupRequestHead> {
+        let id = user.id;
+        let (generation, _) = self
+            .store
+            .conditional_snapshot(Namespace::Conversation, user.conversation)?;
+        let saved = self.append_followup(operation, expected, user, None)?;
+        let root = saved.historical.applied_root_revision;
+        let [observed_root, observed_user] = self.store.bounded_head_pair(
+            Namespace::Conversation,
+            saved.historical.conversation,
+            id,
+        )?;
+        let observed_user = observed_user.context("published Reader user absent")?;
+        ensure!(
+            observed_root.is_some_and(|e| e.revision_id == root)
+                && observed_user.parents.is_empty()
+                && saved.historical.records.contains(&id),
+            "published Reader user or root changed"
+        );
+        Ok(FollowupRequestHead {
+            generation,
+            root,
+            user: observed_user.revision_id,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_request_evidence(
         &self,
@@ -143,7 +250,7 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
     ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
-        let (capture, records) = self.capture_request_records(conversation)?;
+        let (capture, records) = self.capture_request_records(conversation, false)?;
         self.prepare_captured_evidence(
             conversation,
             request_turn,
@@ -154,6 +261,7 @@ impl Ledger {
             token_count,
             capture,
             records,
+            false,
         )
     }
     /// Declare and assemble against one capture; publication keeps existing guards.
@@ -168,11 +276,106 @@ impl Ledger {
         retrieval: Option<&dyn crate::retrieval::Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
     ) -> Result<PreparedRequestEvidence> {
+        self.prepare_declared_evidence(
+            conversation,
+            request_turn,
+            selection,
+            directive,
+            budget,
+            retrieval,
+            token_count,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_declared_evidence(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        directive: SourceDirective,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn crate::retrieval::Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        followup: Option<FollowupRequestHead>,
+    ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
         let (capture, records) = self
-            .capture_request_records(conversation)
+            .capture_request_records(conversation, followup.is_some())
             .map_err(|_| SourceResolutionRefusal::HistoryUnavailable)?;
-        let source = super::resolution::for_frame(&records, conversation, request_turn, directive)?;
+        if let Some(head) = &followup {
+            ensure!(
+                capture.generation == head.generation
+                    && capture
+                        .records
+                        .iter()
+                        .any(|(e, _)| e.namespace == Namespace::Conversation
+                            && e.record_id == conversation
+                            && e.revision_id == head.root)
+                    && capture
+                        .records
+                        .iter()
+                        .any(|(e, _)| e.namespace == Namespace::Conversation
+                            && e.record_id == request_turn
+                            && e.revision_id == head.user),
+                "Reader follow-up changed before source preparation"
+            );
+        }
+        let anchor = match (&directive, &followup) {
+            (SourceDirective::Inherit { operation, .. }, Some(_)) => *operation,
+            _ => None,
+        };
+        let source = super::resolution::for_frame(
+            &records,
+            conversation,
+            request_turn,
+            directive,
+            followup.is_some(),
+        )?;
+        if followup.is_some() {
+            match &source {
+                RequestSource::Original {
+                    expected,
+                    source_record,
+                    ..
+                } => {
+                    ensure!(
+                        expected.format == crate::retrieval::SourceFormat::Pdf
+                            && retrieval.is_some(),
+                        "Reader follow-up requires an admitted PDF"
+                    );
+                    if let Some(operation) = anchor {
+                        let prior = records
+                            .iter()
+                            .find_map(|record| match record {
+                                Record::RequestEvidence(evidence)
+                                    if evidence.operation == operation =>
+                                {
+                                    Some(evidence)
+                                }
+                                _ => None,
+                            })
+                            .ok_or(SourceResolutionRefusal::AnchorUnavailable)?;
+                        let pinned = prior
+                            .sources
+                            .iter()
+                            .find(|reference| reference.record == *source_record)
+                            .ok_or(SourceResolutionRefusal::InvalidSource)?;
+                        ensure!(
+                            capture
+                                .records
+                                .iter()
+                                .any(|(_, reference)| reference == pinned),
+                            SourceResolutionRefusal::ChangedSource
+                        );
+                    }
+                }
+                RequestSource::NoDocument => {
+                    ensure!(retrieval.is_none(), "source-less follow-up has a provider")
+                }
+            }
+        }
         self.prepare_captured_evidence(
             conversation,
             request_turn,
@@ -183,9 +386,14 @@ impl Ledger {
             token_count,
             capture,
             records,
+            followup.is_some(),
         )
     }
-    fn capture_request_records(&self, conversation: Uuid) -> Result<(Captured, Vec<Record>)> {
+    fn capture_request_records(
+        &self,
+        conversation: Uuid,
+        frozen_evidence: bool,
+    ) -> Result<(Captured, Vec<Record>)> {
         self.complete_store()?;
         let capture = self.store.capture(conversation, matches)?;
         let envelopes = capture
@@ -194,7 +402,11 @@ impl Ledger {
             .map(|(e, _)| e.clone())
             .collect::<Vec<_>>();
         let records = Self::inspect_snapshot(conversation, false, &envelopes)?;
-        self.validate_evidence_records(&records)?;
+        if frozen_evidence {
+            self.validate_snapshot_evidence(&records, &envelopes)?;
+        } else {
+            self.validate_evidence_records(&records)?;
+        }
         Ok((capture, records))
     }
     #[allow(clippy::too_many_arguments)]
@@ -209,8 +421,9 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         capture: Captured,
         records: Vec<Record>,
+        keep_media: bool,
     ) -> Result<PreparedRequestEvidence> {
-        let context = self.assemble_request_context(
+        let context = self.assemble_ordinary_request_context(
             conversation,
             request_turn,
             selection,
@@ -219,6 +432,7 @@ impl Ledger {
             retrieval,
             token_count,
             records,
+            keep_media,
         )?;
         let mut needed = context
             .history()
@@ -268,6 +482,34 @@ impl Ledger {
         recorded_ms: u64,
         prepared: &PreparedRequestEvidence,
     ) -> Result<WriteResult> {
+        self.publish_request_evidence(operation, recorded_ms, prepared, None)
+    }
+
+    pub(crate) fn persist_followup_evidence(
+        &self,
+        operation: Uuid,
+        recorded_ms: u64,
+        mut prepared: PreparedRequestEvidence,
+    ) -> Result<(FrozenRequestContext, FollowupEvidence)> {
+        let mut published = Vec::new();
+        let written =
+            self.publish_request_evidence(operation, recorded_ms, &prepared, Some(&mut published))?;
+        prepared.capture.advance(published)?;
+        let evidence = FollowupEvidence {
+            capture: prepared.capture,
+            root: written.historical.applied_root_revision,
+        };
+        evidence.with_current(self, || Ok(()))?;
+        Ok((prepared.context, evidence))
+    }
+
+    fn publish_request_evidence(
+        &self,
+        operation: Uuid,
+        recorded_ms: u64,
+        prepared: &PreparedRequestEvidence,
+        live_records: Option<&mut Vec<Envelope>>,
+    ) -> Result<WriteResult> {
         ensure!(!operation.is_nil(), "nil evidence operation");
         let context = &prepared.context;
         let fact = RequestEvidence {
@@ -293,6 +535,10 @@ impl Ledger {
         fact.validate_shape()?;
         let fingerprint = fact.fingerprint()?;
         if let Some(prior) = self.replay_evidence(&fact, &fingerprint)? {
+            ensure!(
+                live_records.is_none(),
+                "Reader follow-up evidence is historical"
+            );
             return Ok(prior);
         }
         let pinned_records = std::iter::once(&fact.root)
@@ -383,11 +629,21 @@ impl Ledger {
                     .context("readback envelope work overflow")?,
             )?;
         }
-        let attempted = self
-            .store
-            .commit_captured(&prepared.capture, vec![evidence, root, receipt]);
+        let records = vec![evidence, root, receipt];
+        let kept = live_records.is_some().then(|| records.clone());
+        let attempted =
+            self.store
+                .commit_captured(&prepared.capture, records, live_records.is_some());
         // Recover the original winner even after an interrupted durable commit or a race.
         if let Some(prior) = self.replay_evidence(&fact, &fingerprint)? {
+            if let Some((published, records)) = live_records.zip(kept) {
+                ensure!(
+                    attempted.is_ok_and(|(_, fresh)| fresh)
+                        && prior.historical.applied_root_revision == records[1].revision_id,
+                    "Reader follow-up evidence publication is uncertain or historical"
+                );
+                *published = records;
+            }
             return Ok(prior);
         }
         attempted?;

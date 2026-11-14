@@ -479,8 +479,22 @@ impl Ledger {
         operation: Uuid,
         fingerprint: String,
         root: Envelope,
+        records: Vec<Envelope>,
+        binding: Option<Uuid>,
+    ) -> Result<(WriteResult, bool)> {
+        self.publish_with_capture(operation, fingerprint, root, records, binding, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_with_capture(
+        &self,
+        operation: Uuid,
+        fingerprint: String,
+        root: Envelope,
         mut records: Vec<Envelope>,
         binding: Option<Uuid>,
+        captured: Option<&crate::storage::captured::Captured>,
+        published: Option<&mut Vec<Envelope>>,
     ) -> Result<(WriteResult, bool)> {
         if self.store.source_target_generation()?.is_some() {
             let users = records
@@ -520,6 +534,7 @@ impl Ledger {
             applied_root_revision: root.revision_id,
             binding,
         };
+        let root_revision = root.revision_id;
         let receipt = self.envelope(
             Namespace::Conversation,
             Self::receipt_id(operation),
@@ -533,14 +548,33 @@ impl Ledger {
         )?;
         records.push(root);
         records.push(receipt);
-        let result = self.store.commit(records, BTreeMap::new());
+        if let Some(captured) = captured {
+            let (_, fresh) = self
+                .store
+                .commit_captured(captured, records.clone(), true)?;
+            ensure!(fresh, "Reader follow-up publication is historical");
+            let result = self
+                .replay(operation, &fingerprint)?
+                .context("publication receipt unavailable")?;
+            ensure!(
+                result.historical.applied_root_revision == root_revision,
+                "Reader follow-up publication receipt changed"
+            );
+            if let Some(published) = published {
+                *published = records;
+            }
+            return Ok((result, true));
+        }
+        let result = self.store.commit_with_disposition(records, BTreeMap::new());
         // A committed-but-lost acknowledgment, or a concurrent identical winner,
         // is recognized before propagating stale-head/injected-error outcomes.
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             // Ledger envelopes have fresh random revision/operation IDs above.
             // Only this call's successful commit is Fresh; an error after a
             // durable commit or a concurrent winner remains historical.
-            return Ok((prior, result.is_ok()));
+            let fresh = result.is_ok_and(|(_, changed)| changed)
+                && prior.historical.applied_root_revision == root_revision;
+            return Ok((prior, fresh));
         }
         result?;
         bail!("committed operation receipt unavailable")
@@ -609,10 +643,61 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+        about_user: Option<Uuid>,
+    ) -> Result<WriteResult> {
+        self.append_with_capture(
+            operation,
+            expected,
+            turn,
+            sources,
+            fingerprint,
+            about_user,
+            None,
+            false,
+        )
+    }
+
+    pub(super) fn append_followup(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        turn: Turn,
+        captured: Option<&mut crate::storage::captured::Captured>,
+    ) -> Result<WriteResult> {
+        ensure!(
+            self.expected(Namespace::Conversation, Self::receipt_id(operation))?
+                .0
+                .is_empty(),
+            "Reader follow-up append is historical"
+        );
+        let sources: Vec<ImageUse> = vec![];
+        let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
+        self.append_with_capture(
+            operation,
+            expected,
+            turn,
+            sources,
+            fingerprint,
+            None,
+            captured,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_with_capture(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
         mut turn: Turn,
         sources: Vec<ImageUse>,
         fingerprint: String,
         about_user: Option<Uuid>,
+        captured: Option<&mut crate::storage::captured::Captured>,
+        fresh_only: bool,
     ) -> Result<WriteResult> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
@@ -629,6 +714,7 @@ impl Ledger {
                 // but before this root read. Recover only its exact receipt;
                 // changed operations and unrelated stale heads still refuse.
                 if let Some(prior) = self.replay(operation, &fingerprint)? {
+                    ensure!(!fresh_only, "Reader follow-up append is historical");
                     return Ok(prior);
                 }
                 return Err(error);
@@ -719,7 +805,24 @@ impl Ledger {
                 turn_text.as_deref().context("target answer text absent")?,
             )?);
         }
-        self.publish(operation, fingerprint, envelope, records, binding)
+        let mut published = Vec::new();
+        let (result, fresh) = self.publish_with_capture(
+            operation,
+            fingerprint,
+            envelope,
+            records,
+            binding,
+            captured.as_deref(),
+            Some(&mut published),
+        )?;
+        ensure!(
+            !fresh_only || fresh,
+            "Reader follow-up append is historical or uncertain"
+        );
+        if let Some(capture) = captured {
+            capture.advance(published)?;
+        }
+        Ok(result)
     }
     /// Prepare explicitly synthetic SDK fixture evidence; never grants native authority.
     pub fn prepare_sdk_fixture(
@@ -1214,6 +1317,39 @@ impl Ledger {
         reason: Option<AttemptReason>,
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
     ) -> Result<WriteResult> {
+        self.advance_with_capture(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            reason,
+            target,
+            None,
+        )
+    }
+
+    pub(super) fn complete_followup(
+        &self,
+        operation: Uuid,
+        root: ExpectedHeads,
+        draft: ExpectedHeads,
+        turn: Turn,
+        captured: &crate::storage::captured::Captured,
+    ) -> Result<WriteResult> {
+        self.advance_with_capture(operation, root, draft, turn, None, None, Some(captured))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_capture(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: Option<AttemptReason>,
+        target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+        captured: Option<&crate::storage::captured::Captured>,
+    ) -> Result<WriteResult> {
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
             Self::fingerprint(&(
@@ -1228,6 +1364,10 @@ impl Ledger {
             Self::fingerprint(&("advance", &turn))?
         };
         if let Some(prior) = self.replay(operation, &fingerprint)? {
+            ensure!(
+                captured.is_none(),
+                "Reader follow-up completion is historical"
+            );
             return Ok(prior);
         }
         Self::validate_turn(&turn)?;
@@ -1357,6 +1497,17 @@ impl Ledger {
                 "target interpretation is historical; no continuation admitted"
             );
             Ok(result)
+        } else if let Some(captured) = captured {
+            self.publish_with_capture(
+                operation,
+                fingerprint,
+                root,
+                records,
+                binding,
+                Some(captured),
+                None,
+            )
+            .map(|(result, _)| result)
         } else {
             self.publish(operation, fingerprint, root, records, binding)
         }
