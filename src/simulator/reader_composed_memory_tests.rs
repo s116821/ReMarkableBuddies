@@ -353,6 +353,301 @@ fn marked_question_receipt_retains_exact_original_projection_and_refuses_replay(
 }
 
 #[test]
+#[ignore = "requires isolated phase inputs from the hosted predecessor action"]
+fn marked_question_predecessor_compatibility() -> Result<()> {
+    use crate::{
+        conversation::marked_question,
+        storage::{
+            conversation_cleanup::{CandidateRefusal, Session},
+            digest, Envelope, ObjectRef, Scope, StorePaths,
+        },
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Prepared {
+        conversation: Uuid,
+        user: Uuid,
+        capture: Uuid,
+        root_revision: Uuid,
+        user_revision: Uuid,
+        overview_sha256: String,
+        manifests: std::collections::BTreeSet<Uuid>,
+    }
+
+    let phase = std::env::var("BUDDY_MARKED_RECEIPT_PHASE")?;
+    ensure!(
+        matches!(phase.as_str(), "prepare" | "publish" | "verify"),
+        "invalid current fixture phase"
+    );
+    let root = std::path::PathBuf::from(
+        std::env::var_os("BUDDY_MARKED_RECEIPT_ROOT").context("fixture root absent")?,
+    );
+    ensure!(
+        root.is_absolute() && root.is_dir(),
+        "isolated fixture root required"
+    );
+    let paths = StorePaths {
+        data: root.join("data"),
+        cache: root.join("cache"),
+        credentials: root.join("credentials"),
+    };
+    if phase == "prepare" {
+        ensure!(
+            root.read_dir()?.next().is_none(),
+            "fixture root must be empty"
+        );
+    } else {
+        ensure!(
+            paths.data.join("CURRENT").is_file(),
+            "prepared fixture generation absent"
+        );
+    }
+    let store = Arc::new(Store::open(paths.clone())?);
+    let ledger = Ledger::new(store.clone());
+    let generation: Uuid = serde_json::from_slice(&std::fs::read(paths.data.join("CURRENT"))?)?;
+    let generation_root = paths.data.join("generations").join(generation.to_string());
+    let format: u32 = serde_json::from_slice(&std::fs::read(generation_root.join("format.json"))?)?;
+    ensure!(
+        format == 1 && store.unavailable_commits()? == 0,
+        "fixture requires complete ordinary format 1"
+    );
+
+    let head = |namespace, id| store.value(namespace, id)?.context("fixture head absent");
+    let manifest_ids = || -> Result<std::collections::BTreeSet<Uuid>> {
+        Ok(store
+            .manifests()?
+            .into_iter()
+            .map(|m| m.transaction_id)
+            .collect())
+    };
+    let projection = || -> Result<SelectedDomainProjection> {
+        let mut envelopes = Vec::new();
+        let mut references = Vec::new();
+        for manifest in store.manifests()? {
+            ensure!(
+                manifest.scope == Scope::LocalTransaction,
+                "unexpected selected fixture history"
+            );
+            for reference in manifest.records {
+                let bytes = store.read_object(&reference)?;
+                envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
+                references.push(reference);
+            }
+        }
+        SelectedDomainProjection::from_pinned_records(&envelopes, &references)
+    };
+    let (conversation, receipt) = if phase == "prepare" {
+        let conversation = Uuid::new_v4();
+        let user = Turn {
+            id: Uuid::new_v4(),
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let prepared = ledger.prepare_sdk_fixture(
+            Uuid::new_v4(),
+            ledger.expected(Namespace::Conversation, conversation)?,
+            user,
+            &sdk_batch_with_overview(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), [768, 1024]),
+        )?;
+        projection()?.inspect(conversation)?;
+        let root = head(Namespace::Conversation, conversation)?;
+        let turn = head(Namespace::Conversation, prepared.turn)?;
+        let overview = prepared
+            .images
+            .first()
+            .context("Prepared overview absent")?;
+        (
+            conversation,
+            serde_json::json!({
+                "phase": phase, "generation": generation, "format": format,
+                "conversation": conversation, "user": prepared.turn, "capture": prepared.capture,
+                "root_revision": root.revision_id, "user_revision": turn.revision_id,
+                "overview_sha256": digest(&overview.bytes), "manifests": manifest_ids()?,
+            }),
+        )
+    } else {
+        let input =
+            std::env::var_os("BUDDY_MARKED_RECEIPT_PREPARED").context("Prepared receipt absent")?;
+        let prepared: Prepared = serde_json::from_slice(&std::fs::read(input)?)?;
+        let conversation = prepared.conversation;
+        let turn_head = head(Namespace::Conversation, prepared.user)?;
+        let Record::Turn(mut turn) = Ledger::decode(&turn_head)? else {
+            anyhow::bail!("expected fixture user turn");
+        };
+        let capture_head = head(Namespace::Source, prepared.capture)?;
+        let Record::Capture(capture) = Ledger::decode(&capture_head)? else {
+            anyhow::bail!("expected fixture SDK capture");
+        };
+        let overview = ledger.stored_sdk_images(prepared.capture)?.images.remove(0);
+        ensure!(
+            digest(&overview.bytes) == prepared.overview_sha256
+                && turn.conversation == conversation
+                && turn.sources == [prepared.capture],
+            "retained capture differs"
+        );
+        let operation = crate::writer::stage(turn.exchange, "reader-interpret-marked-question");
+        let receipt_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("urn:remarkable-buddies:operation:v1:{operation}").as_bytes(),
+        );
+        if phase == "publish" {
+            ensure!(
+                turn.outcome == Outcome::Prepared
+                    && turn_head.revision_id == prepared.user_revision
+                    && head(Namespace::Conversation, conversation)?.revision_id
+                        == prepared.root_revision
+                    && manifest_ids()? == prepared.manifests,
+                "Prepared fixture differs"
+            );
+            let captured = ledger.capture_marked_question(conversation)?;
+            turn.outcome = Outcome::Interpreted;
+            turn.text = Some("G? unc. here".into());
+            turn.updated_ms = 2;
+            let (_, fresh) = ledger.interpret_marked_question(
+                operation,
+                turn,
+                ExpectedHeads([prepared.root_revision].into_iter().collect()),
+                &captured,
+                prepared.capture,
+                &marked_question::modeled_source(&capture.facts),
+                [12, 24, 48, 16],
+                None,
+            )?;
+            drop(fresh);
+        }
+
+        let root_head = head(Namespace::Conversation, conversation)?;
+        let user_head = head(Namespace::Conversation, prepared.user)?;
+        let receipt_head = head(Namespace::Conversation, receipt_id)?;
+        let wanted = [
+            root_head.revision_id,
+            user_head.revision_id,
+            receipt_head.revision_id,
+        ];
+        let Record::Receipt(marked) = Ledger::decode(&receipt_head)? else {
+            anyhow::bail!("expected marked receipt");
+        };
+        let mark = serde_json::to_value(
+            marked
+                .marked_question
+                .context("marked association absent")?,
+        )?;
+        ensure!(
+            marked.acknowledgment.operation == operation
+                && marked.acknowledgment.conversation == conversation
+                && marked.acknowledgment.applied_root_revision == root_head.revision_id
+                && marked.acknowledgment.records == [prepared.user]
+                && mark["interpreted_turn"]["revision"] == serde_json::json!(user_head.revision_id)
+                && mark["capture"]["revision"] == serde_json::json!(capture_head.revision_id)
+                && mark["overview"]["sha256"] == serde_json::json!(prepared.overview_sha256)
+                && mark["region"] == serde_json::json!([12, 24, 48, 16])
+                && receipt_head.domain_schema_version == marked_question::SCHEMA,
+            "marked association differs"
+        );
+        let history = ledger.inspect(conversation, false)?;
+        ensure!(
+            history.iter().any(|r| matches!(r, Record::Turn(t)
+            if t.id == prepared.user && t.outcome == Outcome::Interpreted
+                && t.text.as_deref() == Some("G? unc. here") && t.sources == [prepared.capture])),
+            "current interpretation differs"
+        );
+
+        let manifests = store.manifests()?;
+        let mut additions = manifests
+            .iter()
+            .filter(|m| !prepared.manifests.contains(&m.transaction_id));
+        let manifest = additions.next().context("marked transaction absent")?;
+        ensure!(
+            additions.next().is_none()
+                && manifests.len() == prepared.manifests.len() + 1
+                && manifest.scope == Scope::LocalTransaction
+                && manifest.records.len() == 3
+                && manifest.media.is_empty(),
+            "unexpected marked transaction membership"
+        );
+        let mut members = BTreeMap::<Uuid, ObjectRef>::new();
+        for reference in &manifest.records {
+            let envelope: Envelope = serde_json::from_slice(&store.read_object(reference)?)?;
+            ensure!(
+                wanted.contains(&envelope.revision_id)
+                    && members
+                        .insert(envelope.revision_id, reference.clone())
+                        .is_none(),
+                "unexpected marked member"
+            );
+        }
+        let manifest_sha256 = digest(&std::fs::read(
+            generation_root
+                .join("commits")
+                .join(format!("{}.json", manifest.transaction_id)),
+        )?);
+        if phase == "verify" {
+            let error = projection()?
+                .inspect(conversation)
+                .err()
+                .context("selected view accepted marked receipt")?;
+            ensure!(
+                error.to_string() == "ordinary marked question excluded from selected projection",
+                "unexpected selected refusal: {error:#}"
+            );
+        }
+        (
+            conversation,
+            serde_json::json!({
+                "phase": phase, "generation": generation, "format": format,
+                "conversation": conversation, "user": prepared.user, "capture": prepared.capture,
+                "root_revision": root_head.revision_id, "user_revision": user_head.revision_id,
+                "overview_sha256": prepared.overview_sha256, "operation": operation,
+                "receipt": receipt_id, "receipt_revision": receipt_head.revision_id,
+                "transaction": manifest.transaction_id, "manifest_sha256": manifest_sha256,
+                "members": members, "selected_refused": phase == "verify",
+            }),
+        )
+    };
+    drop(ledger);
+    drop(store);
+    if phase != "publish" {
+        let mut session = Session::open(paths, &BTreeMap::new())?;
+        if phase == "prepare" {
+            ensure!(
+                session.candidate_roots() == Ok(vec![conversation]),
+                "cleanup Prepared discovery differs"
+            );
+        } else {
+            ensure!(
+                session.candidate_roots() == Err(CandidateRefusal::Unsupported),
+                "cleanup candidate discovery accepted marked history"
+            );
+            let snapshot = session.snapshot(conversation)?;
+            let error = crate::conversation::cleanup::eligible(
+                &snapshot,
+                conversation,
+                &mut session.budget,
+            )
+            .err()
+            .context("cleanup target accepted schema 5")?;
+            ensure!(
+                error.to_string() == "selected/future history excluded",
+                "unexpected target cleanup refusal: {error:#}"
+            );
+        }
+    }
+    println!("MARKED_RECEIPT_PHASE {}", receipt);
+    Ok(())
+}
+
+#[test]
 fn ordinary_modeled_sdk_reader_persists_mark_and_abstains_without_any_effect() {
     let fixture = SimulatorLedger::new();
     let ledger = fixture.open().unwrap();

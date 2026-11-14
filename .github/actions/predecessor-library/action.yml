@@ -37,14 +37,14 @@ runs:
     - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
       with:
         toolchain: 1.99.1
-    - name: Verify exact old source and inject the sole reviewed example
+    - name: Verify exact old source and inject the two reviewed examples
       shell: bash
       run: |
         set -eu
         git -C .predecessor-qualification-source rev-parse HEAD > qualification-evidence/old-source.txt
         rustc --version --verbose > qualification-evidence/old-rustc.txt
         cargo --version > qualification-evidence/old-cargo.txt
-        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/source-input-hashes.txt
+        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs scripts/predecessor/old_marked_receipt_probe.rs > qualification-evidence/source-input-hashes.txt
         test "$(git -C .predecessor-qualification-source rev-parse HEAD)" = 68e42968b4c58b6f8ed1102078d78b40fad33ffc
         echo '1520b0913849ef68e0d6f82d76cb7949897392461e570b6b9b2d9e4a4e033528  scripts/predecessor/old_storage_lease_driver.rs' | sha256sum --check
         echo '58b5b3051218dcdffc218c6a035bbb5e04db5d64f38c3359870335587ad419b3  scripts/predecessor/old_library_outer.py' | sha256sum --check
@@ -52,19 +52,44 @@ runs:
         rustc --edition=2021 --test scripts/predecessor/old_storage_lease_driver.rs -o "$RUNNER_TEMP/predecessor-release-unit-tests"
         "$RUNNER_TEMP/predecessor-release-unit-tests" --nocapture > qualification-evidence/old-release-unit-tests.log 2>&1
         test ! -e .predecessor-qualification-source/examples/rem23_old_storage_lease.rs
+        test ! -e .predecessor-qualification-source/examples/rem44_old_marked_receipt.rs
         mkdir -p .predecessor-qualification-source/examples
         cp scripts/predecessor/old_storage_lease_driver.rs .predecessor-qualification-source/examples/rem23_old_storage_lease.rs
+        cp scripts/predecessor/old_marked_receipt_probe.rs .predecessor-qualification-source/examples/rem44_old_marked_receipt.rs
         git -C .predecessor-qualification-source diff --exit-code HEAD
-        test "$(git -C .predecessor-qualification-source ls-files --others --exclude-standard)" = examples/rem23_old_storage_lease.rs
-    - name: Build only the old example, reusing existing host dependencies
+        test "$(git -C .predecessor-qualification-source ls-files --others --exclude-standard)" = "$(printf '%s\n' examples/rem23_old_storage_lease.rs examples/rem44_old_marked_receipt.rs)"
+    - name: Build the old examples, reusing existing host dependencies
       shell: bash
       run: |
         set -eu
-        cargo build --locked --all-features --manifest-path .predecessor-qualification-source/Cargo.toml --example rem23_old_storage_lease --target-dir "$GITHUB_WORKSPACE/target"
+        cargo build --locked --all-features --manifest-path .predecessor-qualification-source/Cargo.toml --example rem23_old_storage_lease --example rem44_old_marked_receipt --target-dir "$GITHUB_WORKSPACE/target"
         git -C .predecessor-qualification-source diff --exit-code HEAD
-        test "$(git -C .predecessor-qualification-source ls-files --others --exclude-standard)" = examples/rem23_old_storage_lease.rs
-        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock target/debug/examples/rem23_old_storage_lease target/debug/reader-buddy scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/input-binary-hashes.txt
-        python -c 'import json,hashlib,subprocess;from pathlib import Path;h=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest();r=json.loads(Path("qualification-evidence/current-producer.json").read_bytes());assert h("target/debug/reader-buddy")==r["current_binary_sha256"],"old build changed the frozen current command";r.update(old_source=subprocess.check_output(["git","-C",".predecessor-qualification-source","rev-parse","HEAD"],text=True).strip(),old_driver_source_sha256=h("scripts/predecessor/old_storage_lease_driver.rs"),old_driver_sha256=h("target/debug/examples/rem23_old_storage_lease"));Path("qualification-evidence/build-receipt.json").write_text(json.dumps(r,indent=2))'
+        test "$(git -C .predecessor-qualification-source ls-files --others --exclude-standard)" = "$(printf '%s\n' examples/rem23_old_storage_lease.rs examples/rem44_old_marked_receipt.rs)"
+        cmp scripts/predecessor/old_storage_lease_driver.rs .predecessor-qualification-source/examples/rem23_old_storage_lease.rs
+        cmp scripts/predecessor/old_marked_receipt_probe.rs .predecessor-qualification-source/examples/rem44_old_marked_receipt.rs
+        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock target/debug/examples/rem23_old_storage_lease target/debug/examples/rem44_old_marked_receipt target/debug/reader-buddy scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs scripts/predecessor/old_marked_receipt_probe.rs > qualification-evidence/input-binary-hashes.txt
+        python -B - <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        import subprocess
+
+        def digest(path):
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+        evidence = Path("qualification-evidence")
+        receipt = json.loads((evidence / "current-producer.json").read_bytes())
+        assert digest("target/debug/reader-buddy") == receipt["current_binary_sha256"], "old build changed the frozen current command"
+        assert digest(receipt["current_library_test"]["executable"]) == receipt["current_library_test_sha256"], "old build changed the frozen current test"
+        receipt.update(
+            old_source=subprocess.check_output(["git", "-C", ".predecessor-qualification-source", "rev-parse", "HEAD"], text=True).strip(),
+            old_driver_source_sha256=digest("scripts/predecessor/old_storage_lease_driver.rs"),
+            old_driver_sha256=digest("target/debug/examples/rem23_old_storage_lease"),
+            old_marked_probe_source_sha256=digest("scripts/predecessor/old_marked_receipt_probe.rs"),
+            old_marked_probe_sha256=digest("target/debug/examples/rem44_old_marked_receipt"),
+        )
+        (evidence / "build-receipt.json").write_text(json.dumps(receipt, indent=2))
+        PY
     - name: Run bounded synthetic sync, lease and admission checks
       shell: bash
       run: |
@@ -72,6 +97,193 @@ runs:
         OLD_SHA="$(python -c 'import json;print(json.load(open("qualification-evidence/build-receipt.json"))["old_driver_sha256"])')"
         CURRENT_SHA="$(python -c 'import json;print(json.load(open("qualification-evidence/build-receipt.json"))["current_binary_sha256"])')"
         python -B scripts/predecessor/old_library_outer.py --old-driver "$GITHUB_WORKSPACE/target/debug/examples/rem23_old_storage_lease" --old-driver-sha256 "$OLD_SHA" --current-binary "$GITHUB_WORKSPACE/target/debug/reader-buddy" --current-binary-sha256 "$CURRENT_SHA" --build-receipt "$GITHUB_WORKSPACE/qualification-evidence/build-receipt.json" --output "$GITHUB_WORKSPACE/qualification-evidence/runtime"
+    - name: Check marked receipt compatibility in the same predecessor build
+      shell: bash
+      run: |
+        set -eu
+        python -B - <<'PY'
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import resource
+        import stat
+        import subprocess
+        import tarfile
+        import uuid
+        from io import BytesIO
+
+        workspace = Path.cwd().resolve()
+        evidence = workspace / "qualification-evidence"
+        report = evidence / "marked-receipt"
+        report.mkdir()
+        receipt = json.loads((evidence / "build-receipt.json").read_bytes())
+        library = Path(receipt["current_library_test"]["executable"])
+        old = workspace / "target/debug/examples/rem44_old_marked_receipt"
+        case = ("simulator::reader_persistence_tests::composed_memory_tests::"
+                "marked_question_predecessor_compatibility")
+        old_source = "68e42968b4c58b6f8ed1102078d78b40fad33ffc"
+        assert receipt["old_source"] == old_source
+        private = Path(os.environ["RUNNER_TEMP"]).resolve() / ("rem44-receipt-" + uuid.uuid4().hex)
+        private.mkdir(mode=0o700)
+        root = private / "store"
+        root.mkdir(mode=0o700)
+        home = private / "home"
+        home.mkdir(mode=0o700)
+        environment = dict(PATH=os.defpath, HOME=str(home), TMPDIR=str(home),
+                           XDG_CONFIG_HOME=str(home), XDG_CACHE_HOME=str(home),
+                           BUDDY_MARKED_RECEIPT_ROOT=str(root))
+        descriptors = {"data/contract-v1.json", "data/capabilities.json"}
+        prepared = report / "prepare.json"
+        published = report / "publish.json"
+
+        def digest(path):
+            with path.open("rb") as stream:
+                return hashlib.file_digest(stream, "sha256").hexdigest()
+
+        def save(path, value):
+            with path.open("x", encoding="utf-8") as output:
+                json.dump(value, output, indent=2, sort_keys=True)
+
+        def walk_error(error):
+            raise error
+
+        def read_fixture_file(directory_fd, name, expected_size):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            with os.fdopen(os.open(name, flags, dir_fd=directory_fd), "rb") as stream:
+                observed = os.fstat(stream.fileno())
+                assert stat.S_ISREG(observed.st_mode) and observed.st_size == expected_size, "fixture file changed"
+                data = stream.read(expected_size + 1)
+                assert len(data) == expected_size, "fixture file changed during read"
+                return data
+
+        def snapshot(label, archive=None):
+            assert root.is_dir() and not root.is_symlink(), "fixture root changed"
+            files = {}
+            total = 0
+            paths = 0
+            for directory, directories, names, fd in os.fwalk(root, onerror=walk_error):
+                for name in directories + names:
+                    path = Path(directory) / name
+                    paths += 1
+                    metadata = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    assert paths <= 256 and not stat.S_ISLNK(metadata.st_mode), "unexpected fixture path"
+                    if archive is None:
+                        assert not name.startswith(".stage-"), "staging debris in fixture"
+                    if name in directories:
+                        continue
+                    assert stat.S_ISREG(metadata.st_mode), "non-regular fixture entry"
+                    size = metadata.st_size
+                    total += size
+                    assert len(files) < 128 and total <= 16 * 1024 * 1024, "fixture inventory bound"
+                    relative = path.relative_to(root)
+                    data = read_fixture_file(fd, name, size)
+                    files[relative.as_posix()] = {"bytes": size, "sha256": hashlib.sha256(data).hexdigest()}
+                    if archive is not None:
+                        entry = tarfile.TarInfo(relative.as_posix())
+                        entry.size = size
+                        entry.mode = 0o600
+                        archive.addfile(entry, BytesIO(data))
+            save(report / (label + "-inventory.json"), files)
+            return files
+
+        def limit_output_file():
+            # All writes stay in this private fixture. Its objects are small.
+            resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))
+
+        def run(label, args, extra=None, libtest=False):
+            stdout = report / (label + ".stdout")
+            stderr = report / (label + ".stderr")
+            with stdout.open("xb") as out, stderr.open("xb") as err:
+                subprocess.run(args, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                               cwd=home, env=environment | (extra or {}), timeout=30,
+                               preexec_fn=limit_output_file, check=True)
+            assert stdout.stat().st_size < 65536 and stderr.stat().st_size < 65536, "fixture output bound"
+            lines = stdout.read_text(encoding="utf-8").splitlines()
+            if libtest:
+                prefix = "MARKED_RECEIPT_PHASE "
+                data = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+                summary = "test result: ok. 1 passed; 0 failed; 0 ignored;"
+                assert sum(line.startswith(summary) for line in lines) == 1, "exact test did not run"
+            else:
+                data = lines
+            assert len(data) == 1, "one phase receipt required"
+            value = json.loads(data[0])
+            assert isinstance(value, dict) and value["format"] == 1
+            save(report / (label + ".json"), value)
+            return value
+
+        def current(phase):
+            assert digest(library) == receipt["current_library_test_sha256"]
+            result = run(phase, [str(library), "--ignored", "--exact", case,
+                                 "--nocapture", "--test-threads=1"],
+                         {"BUDDY_MARKED_RECEIPT_PHASE": phase,
+                          "BUDDY_MARKED_RECEIPT_PREPARED": str(prepared)}, libtest=True)
+            assert result["phase"] == phase
+            return result
+
+        def predecessor(phase, *inputs):
+            assert digest(old) == receipt["old_marked_probe_sha256"]
+            result = run("old-" + phase, [str(old), phase, str(root), *map(str, inputs)])
+            assert result["phase"] == phase and result["closed"] is True
+            return result
+
+        def compare(original, later, added=None):
+            durable = lambda files: {key: value for key, value in files.items() if key not in descriptors}
+            assert durable(later) == durable(original) | (added or {}), "fixture evidence changed"
+
+        try:
+            baseline = current("prepare")
+            initial = snapshot("prepare")
+            old_positive = predecessor("prepared", prepared)
+            compare(initial, snapshot("old-prepared"))
+            assert old_positive["unavailable_commits"] == 0 and old_positive["ledger_refused"] is False
+            identity = ("generation", "format", "conversation", "user", "capture", "overview_sha256")
+            prepared_fields = identity + ("root_revision", "user_revision", "manifests")
+            assert all(old_positive[k] == baseline[k] for k in prepared_fields)
+            marked = current("publish")
+            assert all(marked[k] == baseline[k] for k in identity)
+            assert all(marked[k] != baseline[k] for k in ("root_revision", "user_revision"))
+            after = snapshot("publish")
+            generation = str(uuid.UUID(marked["generation"]))
+            transaction = str(uuid.UUID(marked["transaction"]))
+            prefix = f"data/generations/{generation}/"
+            manifest = prefix + f"commits/{transaction}.json"
+            assert manifest not in initial and after[manifest]["sha256"] == marked["manifest_sha256"]
+            added = {manifest: after[manifest]}
+            revisions = {marked[k] for k in ("root_revision", "user_revision", "receipt_revision")}
+            assert len(revisions) == 3 and set(marked["members"]) == revisions
+            for ref in marked["members"].values():
+                path = prefix + "objects/" + ref["sha256"]
+                assert path not in initial and path not in added and after[path] == ref
+                added[path] = ref
+            compare(initial, after, added)
+            refusal = predecessor("refuse-marked", prepared, published)
+            compare(after, snapshot("old-refuse-marked"))
+            assert all(refusal[k] == baseline[k] for k in prepared_fields)
+            assert refusal["unavailable_commits"] == 1 and refusal["ledger_refused"] is True
+            verified = current("verify")
+            compare(after, snapshot("verify"))
+            assert verified["selected_refused"] is True
+            assert all(verified[k] == value for k, value in marked.items()
+                       if k not in ("phase", "selected_refused"))
+            save(report / "result.json", {"status": "passed", "old_source": old_source,
+                 "current_library_test_sha256": receipt["current_library_test_sha256"],
+                 "old_probe_sha256": receipt["old_marked_probe_sha256"]})
+        except BaseException as error:
+            failed = {"status": "failed", "failure": str(error), "runner_fixture": str(root)}
+            try:
+                with tarfile.open(report / "failed-store.tar.gz", "x:gz") as archive:
+                    snapshot("failure", archive)
+                failed["artifact_fixture"] = "failed-store.tar.gz"
+            except Exception as preserve_error:
+                failed["preservation_failure"] = str(preserve_error)
+            try:
+                save(report / "result.json", failed)
+            except Exception as report_error:
+                print(f"Could not save failure report: {report_error}", flush=True)
+            raise
+        PY
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: always()
       with:

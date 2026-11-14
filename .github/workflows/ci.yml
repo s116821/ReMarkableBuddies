@@ -130,14 +130,13 @@ jobs:
         run: |
           python -B - <<'PY'
           import hashlib
-          import json
           import os
           from pathlib import Path
           import subprocess
           import sys
           import tomllib
           sys.path.insert(0, 'scripts/predecessor')
-          from capture_producer import select_command
+          from capture_producer import select_command, select_library_test
           root = Path.cwd().resolve()
           messages = Path(os.environ['CARGO_MESSAGES']).read_text(encoding='utf-8')
           command = select_command(messages, root)
@@ -145,32 +144,7 @@ jobs:
           declared = set(tomllib.loads((root / 'Cargo.toml').read_text())['features'])
           if not normal.is_absolute() or not normal.is_file() or not declared.issubset(command['features']):
               raise ValueError('complete normal-command artifact is required')
-          libraries = {}
-          finished = []
-          for line in messages.splitlines():
-              try:
-                  value = json.loads(line)
-              except ValueError:
-                  continue
-              if not isinstance(value, dict):
-                  continue
-              if value.get('reason') == 'build-finished':
-                  finished.append(value.get('success'))
-              target = value.get('target', {})
-              if (value.get('reason') != 'compiler-artifact'
-                      or value.get('package_id') != command['package_id']
-                      or target.get('kind') != ['lib']
-                      or value.get('profile', {}).get('test') is not True
-                      or Path(target.get('src_path') or '').resolve() != root / 'src/lib.rs'
-                      or set(value.get('features', [])) != set(command['features'])):
-                  continue
-              path = Path(value.get('executable') or '')
-              if not path.is_absolute() or not path.is_file() or not path.resolve().is_relative_to(root / 'target'):
-                  raise ValueError('invalid current library-test artifact')
-              libraries[str(path.resolve())] = path.resolve()
-          if finished != [True] or len(libraries) != 1:
-              raise ValueError('one complete current library-test artifact is required')
-          library = next(iter(libraries.values()))
+          library = Path(select_library_test(messages, root, command)['executable'])
           names = [
               'researched_pdf_opt_out_skips_transport',
               'researched_pdf_disabled_skips_transport',
