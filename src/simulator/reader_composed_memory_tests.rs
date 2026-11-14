@@ -710,6 +710,8 @@ enum MarkedCase {
     FailedPresentation,
     UncertainPresentation,
     NoMark,
+    PrintedPunctuation,
+    UnrelatedInk,
     OutOfFrame,
     DuplicateBox,
     NoAnswerRoute,
@@ -794,6 +796,8 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         FailedPresentation,
         UncertainPresentation,
         NoMark,
+        PrintedPunctuation,
+        UnrelatedInk,
         OutOfFrame,
         DuplicateBox,
         NoAnswerRoute,
@@ -813,6 +817,7 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
         PairLostDraft,
         PairStaleDraft,
     ] {
+        let no_mark = matches!(case, NoMark | PrintedPunctuation | UnrelatedInk);
         let fixture = SimulatorLedger::new();
         let ledger = if case == PairAbout {
             fixture.open_targets()?
@@ -925,20 +930,45 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             color: Rgba([240, 221, 90, 255]),
         };
         let protected = [note, circle, highlight];
-        let strokes = question_ink
+        let mut strokes = question_ink
             .iter()
             .chain(&protected)
             .cloned()
             .collect::<Vec<_>>();
+        // The same '?' glyph is placed in the raster or editable ink. Its
+        // pixels are outside the fragment and clear of existing protected ink.
+        let punctuation = [
+            (82, 24),
+            (83, 23),
+            (84, 23),
+            (85, 24),
+            (85, 25),
+            (84, 26),
+            (83, 27),
+            (83, 28),
+            (83, 30),
+        ];
+        let print_color = Rgba([70, 70, 70, 255]);
+        let ink_color = Rgba([20, 20, 20, 255]);
+        let paper = Rgba([245, 245, 245, 255]);
+        if case == UnrelatedInk {
+            strokes.push(Stroke {
+                pixels: punctuation.to_vec(),
+                color: ink_color,
+            });
+        }
         let raster = RgbaImage::from_fn(768, 1024, |x, y| {
-            if y == 24 && (12..32).contains(&x) {
-                Rgba([70, 70, 70, 255])
+            if (y == 24 && (12..32).contains(&x))
+                || (case == PrintedPunctuation && punctuation.contains(&(x, y)))
+            {
+                print_color
             } else {
-                Rgba([245, 245, 245, 255])
+                paper
             }
         });
         let before_erase = {
             let store = store.clone();
+            let source = source.clone();
             Some(Box::new(move || {
                 let ledger = Ledger::new(store.clone());
                 let receipt = records(&ledger)
@@ -950,6 +980,83 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                         _ => None,
                     })
                     .expect("marked interpretation committed before erase preparation");
+                if case == Applied {
+                    use crate::conversation::evidence::RecordRef;
+                    use crate::storage::captured::ReadBudget;
+
+                    // This hook runs before modeled acceptance acquires the Store guard.
+                    let ack = &receipt.acknowledgment;
+                    assert_eq!(ack.conversation, conversation);
+                    let [user_id] = ack.records.as_slice() else {
+                        panic!("expected one interpreted user in the acknowledgment");
+                    };
+                    let current = store
+                        .value(Namespace::Conversation, *user_id)
+                        .unwrap()
+                        .unwrap();
+                    let Record::Turn(user) = Ledger::decode(&current).unwrap() else {
+                        panic!("expected interpreted user before erase");
+                    };
+                    assert_eq!(user.role, Role::User);
+                    assert_eq!(user.mode, Mode::Reader);
+                    assert_eq!(user.outcome, Outcome::Interpreted);
+                    assert_eq!(user.text.as_deref(), Some("G? unc. here"));
+                    let operation =
+                        crate::writer::stage(user.exchange, "reader-interpret-marked-question");
+                    assert_eq!(ack.operation, operation);
+                    let root = store
+                        .value(Namespace::Conversation, conversation)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(root.revision_id, ack.applied_root_revision);
+                    let matching_operation = serde_json::json!(operation);
+                    let receipts = store
+                        .snapshot_heads_matching(&[Namespace::Conversation], 8, |e| {
+                            e.payload["record"]["acknowledgment"]["operation"] == matching_operation
+                        })
+                        .unwrap();
+                    let [envelope] = receipts.as_slice() else {
+                        panic!("expected one marked receipt head");
+                    };
+                    assert_eq!(
+                        envelope.domain_schema_version,
+                        crate::conversation::marked_question::SCHEMA
+                    );
+                    let saved_receipt = Record::Receipt(receipt.clone());
+                    assert_eq!(Ledger::decode(envelope).unwrap(), saved_receipt);
+                    // Ledger inspection validates the exact original transaction.
+                    assert!(ledger
+                        .inspect(conversation, false)
+                        .unwrap()
+                        .contains(&saved_receipt));
+
+                    let mark =
+                        serde_json::to_value(receipt.marked_question.as_deref().unwrap()).unwrap();
+                    let interpreted: RecordRef =
+                        serde_json::from_value(mark["interpreted_turn"].clone()).unwrap();
+                    let capture: RecordRef =
+                        serde_json::from_value(mark["capture"].clone()).unwrap();
+                    let mut budget = ReadBudget::default();
+                    assert_eq!(
+                        store.resolve_record(&interpreted, &mut budget).unwrap(),
+                        current
+                    );
+                    assert_eq!(user.sources.as_slice(), &[capture.record]);
+                    let capture_head = store
+                        .value(Namespace::Source, capture.record)
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        store.resolve_record(&capture, &mut budget).unwrap(),
+                        capture_head
+                    );
+                    let batch = ledger.stored_sdk_images(capture.record).unwrap();
+                    assert_eq!(batch.turn, user.id);
+                    assert_eq!(batch.capture, capture.record);
+                    assert_eq!(mark["overview"], serde_json::json!(batch.images[0].media));
+                    assert_eq!(mark["source"], serde_json::json!(source));
+                    assert_eq!(mark["region"], serde_json::json!([12, 24, 48, 16]));
+                }
                 let mode = store.sync_mode_snapshot().unwrap();
                 if case.has_pair() {
                     let saved = records(&ledger);
@@ -1063,7 +1170,12 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             DuplicateBox => "12,24,48,16\nQUESTION_BOX: 12,24,48,16",
             _ => "12,24,48,16",
         };
-        let mark = if case == NoMark { "absent" } else { "present" };
+        let mark = if no_mark { "absent" } else { "present" };
+        let question = if no_mark {
+            "G unc. here"
+        } else {
+            "G? unc. here"
+        };
         let has_answer = case == NoAnswerRoute || case.has_pair();
         const ENRICHED_ANSWER: &str = "G unc. uses SI gravity units.";
         let answer = if has_answer {
@@ -1072,12 +1184,14 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             "NONE"
         };
         provider.replies = VecDeque::from([format!(
-            "QUESTION: G? unc. here\nQUESTION_BOX: {region}\nSELECTION_CENTER: 320,510\nHANDWRITTEN_QUESTION_MARK: {mark}\n---\nANSWER: {answer}"
+            "QUESTION: {question}\nQUESTION_BOX: {region}\nSELECTION_CENTER: 320,510\nHANDWRITTEN_QUESTION_MARK: {mark}\n---\nANSWER: {answer}"
         )]);
         if has_answer {
-            provider
-                .replies
-                .push_back("TRANSCRIPTION: G? unc. here".into());
+            provider.replies.push_back(if case == Pair {
+                "TRANSCRIPTION: G unc. here".into()
+            } else {
+                "TRANSCRIPTION: G? unc. here".into()
+            });
         }
         if case == PairSelectedMemoryVeto {
             provider
@@ -1185,8 +1299,22 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             },
             "{case:?}"
         );
+        if case == Pair {
+            assert_eq!(calls.borrow()[0], calls.borrow()[1]);
+        }
         let overview = image::load_from_memory(&calls.borrow()[0][0])?.to_rgba8();
         assert_eq!(overview.dimensions(), raster.dimensions());
+        if no_mark {
+            let (underlying, observed) = match case {
+                PrintedPunctuation => (print_color, print_color),
+                UnrelatedInk => (paper, ink_color),
+                _ => (paper, paper),
+            };
+            for &(x, y) in &punctuation {
+                assert_eq!(raster.get_pixel(x, y), &underlying, "{case:?}");
+                assert_eq!(overview.get_pixel(x, y), &observed, "{case:?}");
+            }
+        }
         for stroke in &strokes {
             for &(x, y) in &stroke.pixels {
                 assert_eq!(overview.get_pixel(x, y), &stroke.color, "{case:?}");
@@ -1275,11 +1403,44 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             }
             _ => None,
         });
-        let saved_mark = !matches!(
-            case,
-            NoMark | OutOfFrame | DuplicateBox | ChangedPage | ChangedSession
-        );
+        let saved_mark = !no_mark
+            && !matches!(
+                case,
+                OutOfFrame | DuplicateBox | ChangedPage | ChangedSession
+            );
         assert_eq!(interpreted.is_some(), saved_mark, "{case:?}");
+        if no_mark {
+            let user = saved
+                .iter()
+                .find_map(|r| match r {
+                    Record::Turn(t) if t.id != earlier.id && t.role == Role::User => Some(t),
+                    _ => None,
+                })
+                .context("unmarked attempt did not retain its user outcome")?;
+            assert_eq!(user.outcome, Outcome::Failed, "{case:?}");
+            assert!(user.text.is_none(), "{case:?}");
+            assert_eq!(user.sources.len(), 1, "{case:?}");
+            let capture = saved
+                .iter()
+                .find_map(|r| match r {
+                    Record::Capture(capture) if capture.id == user.sources[0] => Some(capture),
+                    _ => None,
+                })
+                .context("unmarked capture absent")?;
+            assert_eq!(capture.turn, user.id, "{case:?}");
+            let media = capture.facts.images[0].media();
+            let bytes = ledger.store().read_object(&crate::storage::ObjectRef {
+                sha256: media.sha256,
+                bytes: media.bytes,
+            })?;
+            assert_eq!(&bytes, &calls.borrow()[0][0], "{case:?}");
+            assert!(
+                saved.iter().any(|r| matches!(r, Record::OutcomeFact(fact)
+                if fact.turn == user.id && fact.outcome == Outcome::Failed
+                    && fact.reason == AttemptReason::NoSelection)),
+                "{case:?}"
+            );
+        }
         if let Some(user) = interpreted {
             assert_eq!(user.text.as_deref(), Some("G? unc. here"));
             assert_eq!(user.sources.len(), 1);
@@ -1498,6 +1659,10 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
             state.borrow().marked_question.as_ref().unwrap().page.calls,
             usize::from(navigated)
         );
+        if no_mark {
+            assert_eq!(calls.borrow().len(), 1, "{case:?}");
+            assert_eq!(records(&ledger), saved, "{case:?} wrote on retry");
+        }
         if case == PairSelectedMemoryVeto {
             assert_eq!(calls.borrow().len(), 3);
             assert_eq!(records(&ledger), saved, "vetoed request wrote on retry");
