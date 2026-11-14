@@ -104,10 +104,10 @@ fn pdf_bytes(second: &str) -> Vec<u8> {
             .encode()
             .unwrap();
             let stream = pdf.add_object(Stream::new(dictionary! {}, content));
-            pdf.add_object(
+            Object::Reference(pdf.add_object(
                 dictionary! {"Type"=>"Page", "Parent"=>root, "Contents"=>stream,
                 "MediaBox"=>vec![0.into(),0.into(),600.into(),800.into()]},
-            )
+            ))
         })
         .collect::<Vec<_>>();
     pdf.objects.insert(
