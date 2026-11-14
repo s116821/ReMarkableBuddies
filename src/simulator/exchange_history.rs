@@ -17,7 +17,7 @@ use std::io::Cursor;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Case {
+pub(super) enum Case {
     Repeat,
     Composer,
     Unrelated,
@@ -49,11 +49,11 @@ pub(super) struct Scenario {
     cases: Vec<Case>,
 }
 
-struct ModeledPage {
-    state: PageState,
-    receipt: Option<PresentationReceipt>,
-    fault: Option<Case>,
-    calls: usize,
+pub(super) struct ModeledPage {
+    pub(super) state: PageState,
+    pub(super) receipt: Option<PresentationReceipt>,
+    pub(super) fault: Option<Case>,
+    pub(super) calls: usize,
 }
 
 impl PageBackend for ModeledPage {

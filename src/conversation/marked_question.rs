@@ -5,7 +5,9 @@ use super::{
 };
 use crate::storage::{
     captured::{Captured, ReadBudget, RecordRef},
-    digest, Envelope, Media, Namespace, ObjectRef, Uuid, MAX_METADATA, MAX_RECORD,
+    digest,
+    sync::mode::OrdinaryModeLease,
+    Envelope, Media, Namespace, ObjectRef, Uuid, MAX_METADATA, MAX_RECORD,
 };
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,74 @@ pub(super) struct PreparedMark {
     source: SourceObservation,
     overview: Media,
     region: [i32; 4],
+    ordinary: OrdinaryModeLease,
+}
+
+pub(crate) struct FreshMarkedQuestion {
+    pub(super) current: Captured,
+    pub(super) operation: Uuid,
+    pub(super) root_revision: Uuid,
+    pub(super) mark: Box<MarkedQuestion>,
+    pub(super) ordinary: OrdinaryModeLease,
+}
+
+impl FreshMarkedQuestion {
+    pub(crate) fn presentation_head(&self) -> (Uuid, Uuid) {
+        (self.root_revision, self.mark.interpreted_turn.revision)
+    }
+
+    pub(crate) fn erase(
+        self,
+        ledger: &Ledger,
+        device: &mut dyn crate::device::backend::DeviceBackend,
+        binding: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<EraseDisposition> {
+        use crate::device::backend::MarkedEraseSubmission;
+        let Self {
+            current,
+            operation,
+            mark,
+            ordinary,
+            ..
+        } = self;
+        let effect = binding
+            .filter(|binding| {
+                binding.source == mark.source
+                    && binding.overview_sha256 == mark.overview.sha256
+                    && binding.dimensions == [768, 1024]
+            })
+            .and_then(|binding| {
+                device.prepare_marked_question_erase(binding, operation, mark.region)
+            });
+        // The mode lease's Drop also locks Store. Keep it outside the callback.
+        let submitted = current.with_current(ledger.store(), || {
+            Ok(effect.map_or(MarkedEraseSubmission::Refused, |effect| effect.submit()))
+        });
+        drop(ordinary);
+        Ok(match submitted? {
+            MarkedEraseSubmission::Refused => EraseDisposition::Refused,
+            MarkedEraseSubmission::Accepted {
+                operation: returned,
+                readback,
+            } if returned == operation => {
+                if readback() {
+                    EraseDisposition::Verified
+                } else {
+                    EraseDisposition::Uncertain
+                }
+            }
+            MarkedEraseSubmission::Accepted { .. } | MarkedEraseSubmission::Uncertain => {
+                EraseDisposition::Uncertain
+            }
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EraseDisposition {
+    Refused,
+    Verified,
+    Uncertain,
 }
 
 fn reference(envelope: &Envelope) -> Result<RecordRef> {
@@ -51,14 +121,20 @@ fn valid_reference(reference: &RecordRef, namespace: Namespace) -> bool {
 }
 
 impl PreparedMark {
-    pub(super) fn bind(self, interpreted: &Envelope) -> Result<MarkedQuestion> {
-        Ok(MarkedQuestion {
-            interpreted_turn: reference(interpreted)?,
-            capture: self.capture,
-            source: self.source,
-            overview: self.overview,
-            region: self.region,
-        })
+    pub(super) fn bind(
+        self,
+        interpreted: &Envelope,
+    ) -> Result<(MarkedQuestion, OrdinaryModeLease)> {
+        Ok((
+            MarkedQuestion {
+                interpreted_turn: reference(interpreted)?,
+                capture: self.capture,
+                source: self.source,
+                overview: self.overview,
+                region: self.region,
+            },
+            self.ordinary,
+        ))
     }
 }
 
@@ -184,11 +260,11 @@ impl Ledger {
         source: &SourceObservation,
         region: [i32; 4],
         target: Option<(&super::target_source::SourceFrame, &target::Candidate)>,
-    ) -> Result<super::WriteResult> {
+    ) -> Result<(super::WriteResult, FreshMarkedQuestion)> {
         self.complete_store()?;
         ensure!(!operation.is_nil(), "marked question operation absent");
         let mode = self.store.sync_mode_snapshot()?;
-        let _ordinary = self.store.ordinary_mode_lease(&mode.token)?;
+        let ordinary = self.store.ordinary_mode_lease(&mode.token)?;
         checked_region(region)?;
         Self::validate_observation(source)?;
         ensure!(
@@ -240,10 +316,11 @@ impl Ledger {
             source: source.clone(),
             overview,
             region,
+            ordinary,
         };
         // Keep the prepared turn's exact capture relation and CAS its revision.
         let expected_turn = ExpectedHeads([original.revision_id].into_iter().collect());
-        self.advance_with_capture(
+        let (result, fresh) = self.advance_with_capture(
             operation,
             expected_root,
             expected_turn,
@@ -252,7 +329,11 @@ impl Ledger {
             target,
             Some(captured),
             Some(mark),
-        )
+        )?;
+        Ok((
+            result,
+            fresh.context("fresh marked question continuation absent")?,
+        ))
     }
 
     pub(super) fn validate_marked_question(
@@ -260,7 +341,7 @@ impl Ledger {
         envelope: &Envelope,
         conversation: Uuid,
         budget: &mut ReadBudget,
-    ) -> Result<()> {
+    ) -> Result<Box<MarkedQuestion>> {
         let Record::Receipt(receipt) = Self::decode(envelope)? else {
             anyhow::bail!("marked question receipt expected");
         };
@@ -329,6 +410,7 @@ impl Ledger {
             "marked question overview differs"
         );
         budget.charge(overview.bytes)?;
-        checked_overview(self, &overview)
+        checked_overview(self, &overview)?;
+        Ok(mark)
     }
 }

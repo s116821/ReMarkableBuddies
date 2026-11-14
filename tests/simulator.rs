@@ -322,13 +322,21 @@ fn run(name: &str) -> Run {
         "{name}: {:?}",
         run.report.assertion_failures
     );
-    for request in run
-        .report
-        .trace
-        .iter()
-        .filter(|event| event.action == "model_request")
-    {
-        assert_eq!(request.detail, "scripted texts=1 images=4");
+    let mut request_in_iteration = 0;
+    for event in &run.report.trace {
+        if event.action == "iteration" {
+            request_in_iteration = 0;
+        } else if event.action == "model_request" {
+            request_in_iteration += 1;
+            // Analysis includes the same-request handwritten-mark observation;
+            // independent transcription still receives its single prompt.
+            let expected = if request_in_iteration == 1 {
+                "scripted texts=2 images=4"
+            } else {
+                "scripted texts=1 images=4"
+            };
+            assert_eq!(event.detail, expected, "{name}");
+        }
     }
     run
 }
@@ -650,6 +658,6 @@ fn source_target_invalid_geometry_remains_explicitly_uncertain() {
         .collect::<Vec<_>>();
     assert_eq!(
         calls,
-        vec!["scripted texts=2 images=4", "scripted texts=1 images=4"]
+        vec!["scripted texts=3 images=4", "scripted texts=1 images=4"]
     );
 }

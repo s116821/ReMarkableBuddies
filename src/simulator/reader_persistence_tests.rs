@@ -401,6 +401,7 @@ struct RecordingModel {
     fail: bool,
     fault_after_second: bool,
     cancel_after_first: Option<Shared>,
+    after_first: Option<Box<dyn FnOnce()>>,
 }
 impl LLMEngine for RecordingModel {
     fn add_text_content(&mut self, _: &str) {}
@@ -445,6 +446,9 @@ impl LLMEngine for RecordingModel {
             if let Some(state) = &self.cancel_after_first {
                 state.borrow_mut().request_lost = true;
             }
+            if let Some(f) = self.after_first.take() {
+                f();
+            }
         }
         self.replies.pop_front().context("model replies exhausted")
     }
@@ -469,7 +473,7 @@ fn setup() -> Shared {
 fn model(store: Arc<Store>, calls: Calls) -> RecordingModel {
     RecordingModel {images:vec![],calls,store,replies:VecDeque::from([
         "QUESTION: Why?\nQUESTION_BOX: 20,20,30,30\nSELECTION_CENTER: 300,400\n---\nANSWER: Because.".into(),
-        "TRANSCRIPTION: Why?".into()]),fail:false,fault_after_second:false,cancel_after_first:None}
+        "TRANSCRIPTION: Why?".into()]),fail:false,fault_after_second:false,cancel_after_first:None,after_first:None}
 }
 #[test]
 fn no_output_disagreement_cancellation_and_device_uncertainty_remain_explicit() {

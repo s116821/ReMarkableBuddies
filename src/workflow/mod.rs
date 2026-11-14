@@ -72,8 +72,14 @@ pub enum AnswerPageType {
     Invalid,
 }
 pub enum AcquiredEvidence {
-    Legacy { images: Vec<Vec<u8>> },
-    Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
+    Legacy {
+        images: Vec<Vec<u8>>,
+    },
+    Sdk {
+        batch: Box<remarkable_open_sdk::capture::CapturedBatch>,
+        marked_source: Option<Box<crate::device::backend::MarkedSourceBinding>>,
+        destination: Option<exchange_history::UserPresentationTarget>,
+    },
     Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
     ResidentHistorical(Box<crate::conversation::ResidentSourceCapture>),
 }
@@ -510,7 +516,7 @@ impl Workflow {
                 Ok(AcquiredEvidence::Development(Box::new(capture)))
             }
             AcquisitionKind::Sdk => {
-                let batch = self.device.capture_sdk()?;
+                let (batch, marked_source) = self.device.capture_sdk_with_marked_source()?;
                 self.check_request_progress()?;
                 let overview = batch
                     .images()
@@ -524,8 +530,74 @@ impl Workflow {
                     png: overview.bytes().to_vec(),
                     details: vec![],
                 };
-                Ok(AcquiredEvidence::Sdk(Box::new(batch)))
+                Ok(AcquiredEvidence::Sdk {
+                    batch: Box::new(batch),
+                    marked_source: marked_source.map(Box::new),
+                    destination: self.device.marked_question_destination(),
+                })
             }
+        }
+    }
+
+    pub(super) fn present_marked_question(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        fresh: crate::conversation::marked_question::FreshMarkedQuestion,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+        target: exchange_history::UserPresentationTarget,
+    ) -> Result<()> {
+        use crate::conversation::{
+            marked_question::EraseDisposition, HistoricalPageAssociationInspection,
+        };
+        use crate::device::backend::NavigationCompletion;
+        use exchange_history::OutcomeStatus;
+
+        let head = fresh.presentation_head();
+        let HistoricalPageAssociationInspection::HistoricalCandidate(binding) =
+            ledger.inspect_page_association(target.conversation, target.document, target.page)?
+        else {
+            anyhow::bail!("marked question presentation binding unavailable");
+        };
+        anyhow::ensure!(
+            self.device.marked_question_destination() == Some(target)
+                && target.conversation == user.conversation
+                && binding.root_revision() == head.0,
+            "marked question presentation destination unavailable"
+        );
+        self.check_request_progress()?;
+        let erase = fresh
+            .erase(ledger, &mut *self.device, source)
+            .map_err(|error| error.context("marked question erase refused before acceptance"))?;
+        info!("Marked question erase: {erase:?}");
+        if erase == EraseDisposition::Uncertain {
+            self.invalidate_captured_viewport();
+            anyhow::bail!("marked question erase is uncertain");
+        }
+
+        self.check_request_progress()?;
+        anyhow::ensure!(
+            self.navigate_to_next_page()? == NavigationCompletion::Settled,
+            "marked question Buddy destination did not settle"
+        );
+        self.check_request_progress()?;
+        let backend = self
+            .device
+            .exchange_page_backend()
+            .ok_or_else(|| anyhow::anyhow!("marked question Buddy page owner unavailable"))?;
+        match exchange_history::present_user(
+            ledger,
+            backend,
+            target,
+            user,
+            head,
+            binding.binding_revision(),
+        )? {
+            OutcomeStatus::Applied => Ok(()),
+            OutcomeStatus::ReconcileRequired => {
+                anyhow::bail!("marked question presentation is uncertain")
+            }
+            _ => anyhow::bail!("marked question presentation refused"),
         }
     }
 

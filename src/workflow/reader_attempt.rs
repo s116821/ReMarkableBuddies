@@ -35,6 +35,8 @@ pub(super) struct Attempt {
     selected: Option<selected::Selected>,
     target_frame: Option<crate::conversation::target_source::SourceFrame>,
     marked_capture: Option<crate::storage::captured::Captured>,
+    pub(super) marked_source: Option<Box<crate::device::backend::MarkedSourceBinding>>,
+    pub(super) marked_destination: Option<super::exchange_history::UserPresentationTarget>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -155,6 +157,8 @@ pub(crate) fn assert_attachment_behavior(
         selected: None,
         target_frame: None,
         marked_capture: None,
+        marked_source: None,
+        marked_destination: None,
     };
     assert!(attempt
         .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
@@ -211,6 +215,8 @@ impl Attempt {
             selected: Some(selected),
             target_frame: None,
             marked_capture: None,
+            marked_source: None,
+            marked_destination: None,
         }
     }
     pub(super) fn check_selected(&self) -> Result<()> {
@@ -425,14 +431,29 @@ impl Attempt {
     }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
         let timestamp = now()?;
+        let destination = match &acquired {
+            AcquiredEvidence::Sdk { destination, .. } => *destination,
+            _ => None,
+        };
         let resident_answer = match &acquired {
             AcquiredEvidence::ResidentHistorical(capture) => {
                 ledger.resident_answer_association(capture)?
             }
             _ => None,
         };
-        let conversation = resident_answer
-            .as_ref()
+        let modeled_binding = match destination {
+            Some(target) => match ledger.inspect_page_association(
+                target.conversation,
+                target.document,
+                target.page,
+            )? {
+                HistoricalPageAssociationInspection::HistoricalCandidate(binding) => Some(binding),
+                HistoricalPageAssociationInspection::Unresolved(_) => None,
+            },
+            None => None,
+        };
+        let binding = resident_answer.as_deref().or(modeled_binding.as_deref());
+        let conversation = binding
             .map(|association| association.receipt().conversation)
             .unwrap_or_else(Uuid::new_v4);
         let user = Turn {
@@ -450,12 +471,13 @@ impl Attempt {
             updated_ms: timestamp,
             completion: None,
         };
-        let expected = if let Some(association) = &resident_answer {
+        let expected = if let Some(association) = binding {
             ExpectedHeads([association.root_revision()].into_iter().collect())
         } else {
             ledger.create(conversation, Uuid::new_v4(), timestamp)?;
             ledger.expected(Namespace::Conversation, conversation)?
         };
+        let mut marked_source = None;
         let (evidence, kind) = match acquired {
             AcquiredEvidence::Legacy { images } => {
                 let images = images
@@ -520,9 +542,14 @@ impl Attempt {
                 )?;
                 (prepared.evidence.id, EvidenceKind::ResidentHistorical)
             }
-            AcquiredEvidence::Sdk(batch) => {
+            AcquiredEvidence::Sdk {
+                batch,
+                marked_source: source,
+                ..
+            } => {
                 let prepared =
                     ledger.prepare_sdk_fixture(Uuid::new_v4(), expected, user.clone(), &batch)?;
+                marked_source = source;
                 (prepared.capture, EvidenceKind::SdkFixture)
             }
         };
@@ -537,6 +564,8 @@ impl Attempt {
             selected: None,
             target_frame: None,
             marked_capture: None,
+            marked_source,
+            marked_destination: destination.filter(|_| modeled_binding.is_some()),
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
         if ledger.store().source_target_generation()?.is_some() {
@@ -693,14 +722,15 @@ impl Attempt {
         text: &str,
         region: [i32; 4],
         candidate: Option<&crate::conversation::target::Candidate>,
-    ) -> Result<()> {
+    ) -> Result<Option<marked_question::FreshMarkedQuestion>> {
         anyhow::ensure!(!self.is_selected(), "marked question is ordinary only");
         // Only the modeled SDK batch currently supplies the exact capture
         // observation. Other routes can retain the question without an
         // association until the installed capture owner supplies these facts.
         let Some(captured) = self.marked_capture.as_ref() else {
             log::debug!("Marked question has no admitted full-frame source association");
-            return self.interpret_source_target(ledger, text, candidate);
+            self.interpret_source_target(ledger, text, candidate)?;
+            return Ok(None);
         };
         let (envelope, _) = captured
             .records
@@ -717,9 +747,19 @@ impl Attempt {
                 || !overview.full_frame_of(&capture.facts.native_parent)
         }) {
             log::debug!("Marked question overview does not match the full-page coordinate frame");
-            return self.interpret_source_target(ledger, text, candidate);
+            self.interpret_source_target(ledger, text, candidate)?;
+            return Ok(None);
         }
         let source = crate::conversation::marked_question::modeled_source(&capture.facts);
+        let overview = &capture.facts.images[0];
+        self.marked_source = self.marked_source.take().filter(|binding| {
+            binding.source == source
+                && binding.overview_sha256 == overview.sha256
+                && binding.dimensions == overview.dimensions
+                && binding.viewport_revision == capture.facts.viewport_revision
+                && binding.overview_to_source.map(f64::to_bits)
+                    == overview.affine_bits.map(|value| value.value())
+        });
         let unresolved = unresolved_target();
         let target = self
             .target_frame
@@ -739,7 +779,7 @@ impl Attempt {
         user.outcome = Outcome::Interpreted;
         user.updated_ms = now()?;
         let operation = crate::writer::stage(user.exchange, "reader-interpret-marked-question");
-        let result = ledger.interpret_marked_question(
+        let (result, fresh) = ledger.interpret_marked_question(
             operation,
             user.clone(),
             root,
@@ -753,7 +793,7 @@ impl Attempt {
             frame.acknowledge(ledger, &result)?;
         }
         self.user = user;
-        Ok(())
+        Ok(Some(fresh))
     }
 
     #[cfg(target_os = "linux")]

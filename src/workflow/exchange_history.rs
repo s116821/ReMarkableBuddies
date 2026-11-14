@@ -56,9 +56,23 @@ pub struct PresentationReceipt {
     pub binding_revision: Uuid,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct UserPresentationTarget {
+    pub conversation: Uuid,
+    pub document: Uuid,
+    pub page: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditAction {
+    Undo,
+    Redo,
+    PresentUser,
+}
+
 pub struct Edit {
     pub operation: Uuid,
-    pub action: Action,
+    pub action: EditAction,
     pub before: PageState,
     pub expected: Content,
 }
@@ -75,9 +89,11 @@ pub enum Effect {
 /// A backend must consume its live presentation receipt and report exact
 /// observations. Stored page or turn IDs alone are insufficient.
 pub trait PageBackend {
+    /// Prior completed-exchange receipt for history admission.
     fn take_presentation(&mut self) -> Option<PresentationReceipt>;
     fn observe(&mut self) -> Result<PageState>;
-    /// Compare the complete before-state at the effect boundary.
+    /// Compare the complete before-state and active owner at the effect boundary.
+    /// Refuse actions the owner does not support before applying any mutation.
     fn apply(&mut self, edit: &Edit) -> Effect;
 }
 
@@ -206,6 +222,93 @@ pub(crate) fn project(
     })
 }
 
+fn verify_edit(
+    backend: &mut dyn PageBackend,
+    edit: &Edit,
+) -> Result<Option<PageState>, OutcomeStatus> {
+    match backend.apply(edit) {
+        Effect::Refused
+            if backend
+                .observe()
+                .is_ok_and(|current| current == edit.before) =>
+        {
+            Ok(None)
+        }
+        Effect::Verified { operation, page }
+            if operation == edit.operation
+                && page.owner == edit.before.owner
+                && page.content == edit.expected
+                && !page.seal.is_empty()
+                && page.seal != edit.before.seal
+                && backend.observe().is_ok_and(|current| current == *page) =>
+        {
+            Ok(Some(*page))
+        }
+        _ => Err(OutcomeStatus::ReconcileRequired),
+    }
+}
+
+pub(super) fn present_user(
+    ledger: &Ledger,
+    backend: &mut dyn PageBackend,
+    target: UserPresentationTarget,
+    user: &Turn,
+    head: (Uuid, Uuid),
+    binding_revision: Uuid,
+) -> Result<OutcomeStatus> {
+    let before = backend.observe()?;
+    ensure!(
+        user.conversation == target.conversation
+            && before.owner.document == target.document
+            && before.owner.page == target.page
+            && !before.owner.session.is_empty()
+            && !before.owner.visit.is_empty()
+            && !before.seal.is_empty(),
+        "user-only presentation owner differs"
+    );
+    let current_projection = || {
+        project(
+            ledger,
+            target.conversation,
+            &before.owner,
+            &before.content.composer,
+        )
+    };
+    let projection = current_projection()?;
+    let (first, earlier) = projection
+        .exchanges
+        .split_first()
+        .context("saved exchange absent")?;
+    let [turn] = first.turns.as_slice() else {
+        anyhow::bail!("saved exchange is not user-only");
+    };
+    ensure!(
+        projection.root == head.0
+            && projection.binding == binding_revision
+            && first.id == user.exchange
+            && turn.id == user.id
+            && turn.revision == head.1
+            && user.text.as_deref() == Some(turn.text.as_str())
+            && earlier == before.content.exchanges.as_slice(),
+        "saved user or earlier presentation changed"
+    );
+    let mut expected = before.content.clone();
+    expected.exchanges.insert(0, first.clone());
+    let edit = Edit {
+        operation: crate::writer::stage(user.exchange, "reader-present-marked-question"),
+        action: EditAction::PresentUser,
+        before: before.clone(),
+        expected,
+    };
+    Ok(match verify_edit(backend, &edit) {
+        Ok(Some(_)) if current_projection().is_ok_and(|view| view == projection) => {
+            OutcomeStatus::Applied
+        }
+        Ok(None) => OutcomeStatus::Refused,
+        _ => OutcomeStatus::ReconcileRequired,
+    })
+}
+
 impl History {
     pub fn handle(
         &mut self,
@@ -324,38 +427,24 @@ impl History {
         }
         let edit = Edit {
             operation: Uuid::new_v4(),
-            action,
+            action: match action {
+                Action::Undo => EditAction::Undo,
+                Action::Redo => EditAction::Redo,
+            },
             before: owned.observed.clone(),
             expected,
         };
-        match backend.apply(&edit) {
-            Effect::Refused => {
-                if backend
-                    .observe()
-                    .is_ok_and(|current| current == edit.before)
-                {
-                    OutcomeStatus::Refused
-                } else {
-                    OutcomeStatus::ReconcileRequired
-                }
-            }
-            Effect::Unknown => OutcomeStatus::ReconcileRequired,
-            Effect::Verified { operation, page } => {
-                if operation != edit.operation
-                    || page.owner != edit.before.owner
-                    || page.content != edit.expected
-                    || page.seal.is_empty()
-                    || page.seal == edit.before.seal
-                    || !backend.observe().is_ok_and(|current| current == *page)
-                    || !current_projection(&page).is_ok_and(|view| view == owned.projection)
-                {
-                    return OutcomeStatus::ReconcileRequired;
-                }
-                owned.observed = *page;
+        match verify_edit(backend, &edit) {
+            Ok(None) => OutcomeStatus::Refused,
+            Ok(Some(page))
+                if current_projection(&page).is_ok_and(|view| view == owned.projection) =>
+            {
+                owned.observed = page;
                 owned.applied = action == Action::Redo;
                 self.owned = Some(owned);
                 OutcomeStatus::Applied
             }
+            _ => OutcomeStatus::ReconcileRequired,
         }
     }
 }

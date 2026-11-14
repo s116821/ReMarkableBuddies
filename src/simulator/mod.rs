@@ -4,6 +4,8 @@ mod device;
 mod exchange_history;
 #[cfg(test)]
 mod handwriting_tests;
+#[cfg(test)]
+mod marked_question;
 mod raster;
 #[cfg(test)]
 mod reader_persistence_tests;

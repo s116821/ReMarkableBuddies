@@ -1353,6 +1353,7 @@ impl Ledger {
             None,
             None,
         )
+        .map(|(result, _)| result)
     }
 
     pub(super) fn complete_followup(
@@ -1373,6 +1374,7 @@ impl Ledger {
             Some(captured),
             None,
         )
+        .map(|(result, _)| result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1386,7 +1388,7 @@ impl Ledger {
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
         captured: Option<&crate::storage::captured::Captured>,
         marked: Option<marked_question::PreparedMark>,
-    ) -> Result<WriteResult> {
+    ) -> Result<(WriteResult, Option<marked_question::FreshMarkedQuestion>)> {
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
             Self::fingerprint(&(
@@ -1412,7 +1414,7 @@ impl Ledger {
                 captured.is_none(),
                 "Reader follow-up completion is historical"
             );
-            return Ok(prior);
+            return Ok((prior, None));
         }
         Self::validate_turn(&turn)?;
         let (_, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
@@ -1534,7 +1536,7 @@ impl Ledger {
                 vec![],
             )?);
         }
-        if let Some(marked_question) = marked_question {
+        if let Some((marked_question, ordinary)) = marked_question {
             let mut published = Vec::new();
             let (result, fresh) = self.publish_with_capture(
                 operation,
@@ -1559,13 +1561,20 @@ impl Ledger {
                         && envelope.record_id == Self::receipt_id(operation)
                 })
                 .context("marked question receipt absent")?;
-            self.validate_marked_question(
+            let mark = self.validate_marked_question(
                 &receipt.0,
                 result.historical.conversation,
                 &mut crate::storage::captured::ReadBudget::default(),
             )?;
             current.with_current(&self.store, || Ok(()))?;
-            Ok(result)
+            let fresh = marked_question::FreshMarkedQuestion {
+                current,
+                operation,
+                root_revision: result.historical.applied_root_revision,
+                mark,
+                ordinary,
+            };
+            Ok((result, Some(fresh)))
         } else if target.is_some() {
             let (result, fresh) =
                 self.publish_observed(operation, fingerprint, root, records, binding)?;
@@ -1573,7 +1582,7 @@ impl Ledger {
                 fresh,
                 "target interpretation is historical; no continuation admitted"
             );
-            Ok(result)
+            Ok((result, None))
         } else if let Some(captured) = captured {
             self.publish_with_capture(
                 operation,
@@ -1585,9 +1594,10 @@ impl Ledger {
                 None,
                 None,
             )
-            .map(|(result, _)| result)
+            .map(|(result, _)| (result, None))
         } else {
             self.publish(operation, fingerprint, root, records, binding)
+                .map(|result| (result, None))
         }
     }
     /// Historical receipt semantics shared by writes and selected inspection.

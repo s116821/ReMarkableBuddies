@@ -542,12 +542,22 @@ impl<M: LLMEngine> Orchestrator<M> {
             None => {
                 if let Some(marked) = marked {
                     self.workflow.check_request_progress()?;
-                    attempt.interpret_marked_question(
+                    let fresh = attempt.interpret_marked_question(
                         &self.ledger,
                         &marked.text,
                         marked.region,
                         marked.target.as_ref(),
                     )?;
+                    if let (Some(fresh), Some(destination)) = (fresh, attempt.marked_destination) {
+                        return self.workflow.present_marked_question(
+                            &self.ledger,
+                            &attempt.user,
+                            fresh,
+                            attempt.marked_source.as_deref(),
+                            destination,
+                        );
+                    }
+                    info!("Marked question retained. User-only presentation unavailable");
                     self.workflow.report_failure(Failure::Selection)?;
                     return Ok(());
                 }
@@ -595,12 +605,16 @@ impl<M: LLMEngine> Orchestrator<M> {
 
                 if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
                     self.workflow.check_request_progress()?;
-                    attempt.interpret_marked_question(
+                    let fresh = attempt.interpret_marked_question(
                         &self.ledger,
                         &result.question,
                         marked.region,
                         result.target.as_ref(),
                     )?;
+                    if fresh.is_some() {
+                        // The SDK route has no qualified answer continuation.
+                        info!("Marked question erase refused: answer presentation unavailable");
+                    }
                 } else {
                     attempt.interpret_source_target(
                         &self.ledger,
