@@ -66,8 +66,14 @@ impl LLMEngine for SelectedModel<'_> {
         self.requests += 1;
         let request = &self.current;
         if self.requests <= 2 {
-            ensure!(request.text.len() == 1);
-            ensure!(!request.text[0].contains("ASSOCIATIVE_MEMORY"));
+            // This fixture enriches an ordinary Reader request with selected
+            // memory. Its analysis includes the same-pass mark observation;
+            // independent transcription still has only its original prompt.
+            ensure!(request.text.len() == if self.requests == 1 { 2 } else { 1 });
+            ensure!(request
+                .text
+                .iter()
+                .all(|text| !text.contains("ASSOCIATIVE_MEMORY")));
             if self.requests == 2 {
                 ensure!(
                     self.images == request.images,
@@ -75,6 +81,9 @@ impl LLMEngine for SelectedModel<'_> {
                 );
                 return Ok(VERIFICATION.into());
             }
+            ensure!(
+                request.text[1].contains("HANDWRITTEN_QUESTION_MARK: present, absent, or unclear")
+            );
             self.images.clone_from(&request.images);
             return Ok(PROPOSAL.into());
         }
