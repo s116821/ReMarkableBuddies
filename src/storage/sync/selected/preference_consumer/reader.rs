@@ -173,6 +173,15 @@ impl ReaderPreferences {
         self.inner.config()
     }
 
+    /// Identity already admitted from the registered selected document.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn admitted_document(&self) -> Result<Uuid> {
+        match self.registration.owner {
+            crate::memory::catalog::Owner::Document { document } => Ok(document),
+            _ => anyhow::bail!("Reader registration owner changed"),
+        }
+    }
+
     #[cfg(any(target_os = "linux", test))]
     pub(crate) fn capture_handwriting(
         &self,

@@ -1,10 +1,10 @@
 //! Explicit one-attempt hosted web acquisition, separate from answering/runtime selection.
 use super::{Citation, EvidenceBasis, Provider, ResearchRequest, ResearchResult, Status};
-use crate::{config::inspection::strict_json, storage::digest};
+use crate::{config::inspection::strict_json, llm::ModelHandoff, storage::digest};
 use anyhow::{bail, ensure, Result};
 use serde_json::{json, Value};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeSet,
     sync::mpsc,
     thread,
@@ -52,6 +52,12 @@ pub struct OpenAIWebResearch<'a> {
     progress: RefCell<&'a mut dyn FnMut(Progress) -> Result<()>>,
     retain_exchange: bool,
     observation: RefCell<Option<ExchangeObservation>>,
+    guarded: Option<GuardedDispatch<'a>>,
+}
+struct GuardedDispatch<'a> {
+    handoff: RefCell<Box<ModelHandoff<'a>>>,
+    deadline: Instant,
+    used: Cell<bool>,
 }
 /// Explicit opt-in observation of adapter admission, never composition success.
 /// Deliberately has no Debug/Serialize implementation for its untrusted payload.
@@ -76,6 +82,20 @@ impl ExchangeObservation {
     }
 }
 impl<'a> OpenAIWebResearch<'a> {
+    /// Request-local selected dispatch. The caller owns all joined admission;
+    /// neither a progress callback nor this adapter can create that authority.
+    pub(crate) fn with_guarded_dispatch(
+        mut self,
+        handoff: &'a mut ModelHandoff<'_>,
+        deadline: Instant,
+    ) -> Self {
+        self.guarded = Some(GuardedDispatch {
+            handoff: RefCell::new(Box::new(move |submit| handoff(submit))),
+            deadline,
+            used: Cell::new(false),
+        });
+        self
+    }
     /// Default is off; this builder performs neither I/O nor persistence.
     pub fn with_exchange_observation(mut self) -> Self {
         self.retain_exchange = true;
@@ -147,6 +167,7 @@ impl<'a> OpenAIWebResearch<'a> {
             progress: RefCell::new(progress),
             retain_exchange: false,
             observation: RefCell::new(None),
+            guarded: None,
         })
     }
 
@@ -216,11 +237,22 @@ impl Drop for OwnedRequest {
 impl Provider for OpenAIWebResearch<'_> {
     fn research(&self, request: &ResearchRequest<'_>) -> Result<ResearchResult> {
         let start = Instant::now();
-        let deadline = start + self.options.timeout;
         let mut progress = self
             .progress
             .try_borrow_mut()
             .map_err(|_| anyhow::anyhow!("web research already active"))?;
+        let deadline = if let Some(guarded) = &self.guarded {
+            ensure!(
+                !guarded.used.replace(true),
+                "web research allowance consumed"
+            );
+            guarded
+                .deadline
+                .min(start + self.options.timeout.min(Duration::from_secs(67)))
+        } else {
+            start + self.options.timeout
+        };
+        ensure!(start < deadline, "web research timeout");
         // A rejected reentrant invocation above must not reset the active attempt.
         self.observation.borrow_mut().take();
         let body = self.body(request)?;
@@ -232,74 +264,106 @@ impl Provider for OpenAIWebResearch<'_> {
         let endpoint = self.endpoint.clone();
         let credential = self.credential.clone();
         let response_limit = self.options.max_response_bytes;
-        let worker = thread::Builder::new()
-            .name("buddy-web-research".into())
-            .spawn(move || {
-                let result = (|| -> Result<Vec<u8>> {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|_| anyhow::anyhow!("web research runtime failed"))?;
-                    runtime.block_on(async {
-                        let fetch = async {
-                            let remaining = deadline.saturating_duration_since(Instant::now());
-                            ensure!(!remaining.is_zero(), "web research timeout");
-                            let client = reqwest::Client::builder()
-                                .hickory_dns(true)
-                                .timeout(remaining)
-                                .redirect(reqwest::redirect::Policy::none())
-                                .retry(reqwest::retry::never())
-                                .build()
-                                .map_err(|_| anyhow::anyhow!("web research transport failed"))?;
-                            let mut response = client
-                                .post(endpoint)
-                                .bearer_auth(credential)
-                                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                                .body(body)
-                                .send()
-                                .await
-                                .map_err(transport_error)?;
+        let mut task = Some(move || {
+            let result = (|| -> Result<Vec<u8>> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| anyhow::anyhow!("web research runtime failed"))?;
+                runtime.block_on(async {
+                    let fetch = async {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        ensure!(!remaining.is_zero(), "web research timeout");
+                        let client = reqwest::Client::builder()
+                            .hickory_dns(true)
+                            .timeout(remaining)
+                            .redirect(reqwest::redirect::Policy::none())
+                            .retry(reqwest::retry::never())
+                            .build()
+                            .map_err(|_| anyhow::anyhow!("web research transport failed"))?;
+                        let mut response = client
+                            .post(endpoint)
+                            .bearer_auth(credential)
+                            .header(reqwest::header::CONTENT_TYPE, "application/json")
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(transport_error)?;
+                        ensure!(
+                            response.status().is_success(),
+                            "web research HTTP status refused ({})",
+                            response.status().as_u16()
+                        );
+                        ensure!(
+                            response
+                                .content_length()
+                                .is_none_or(|n| n <= response_limit as u64),
+                            "web research response exceeds bound"
+                        );
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
                             ensure!(
-                                response.status().is_success(),
-                                "web research HTTP status refused ({})",
-                                response.status().as_u16()
-                            );
-                            ensure!(
-                                response
-                                    .content_length()
-                                    .is_none_or(|n| n <= response_limit as u64),
+                                chunk.len() <= response_limit.saturating_sub(bytes.len()),
                                 "web research response exceeds bound"
                             );
-                            let mut bytes = Vec::new();
-                            while let Some(chunk) =
-                                response.chunk().await.map_err(transport_error)?
-                            {
-                                ensure!(
-                                    chunk.len() <= response_limit.saturating_sub(bytes.len()),
-                                    "web research response exceeds bound"
-                                );
-                                bytes.extend_from_slice(&chunk);
-                            }
-                            Ok(bytes)
-                        };
-                        tokio::pin!(fetch);
-                        tokio::select! { biased;
-                            _ = canceled.changed() => Err(anyhow::anyhow!("web research canceled")),
-                            result = &mut fetch => result,
+                            bytes.extend_from_slice(&chunk);
                         }
-                    })
-                })();
-                let _ = sender.send(result);
-            })
-            .map_err(|_| anyhow::anyhow!("web research worker startup failed"))?;
-        let mut owned = OwnedRequest {
-            cancel,
-            worker: Some(worker),
+                        Ok(bytes)
+                    };
+                    tokio::pin!(fetch);
+                    tokio::select! { biased;
+                        _ = canceled.changed() => Err(anyhow::anyhow!("web research canceled")),
+                        result = &mut fetch => result,
+                    }
+                })
+            })();
+            let _ = sender.send(result);
+        });
+        let mut owned = None;
+        let mut duplicate = false;
+        {
+            let mut attempted = false;
+            let mut submit = || {
+                if attempted {
+                    duplicate = true;
+                    bail!("web research already submitted");
+                }
+                attempted = true;
+                ensure!(Instant::now() < deadline, "web research timeout");
+                let task = task
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("web research already submitted"))?;
+                let worker = thread::Builder::new()
+                    .name("buddy-web-research".into())
+                    .spawn(task)
+                    .map_err(|_| anyhow::anyhow!("web research worker startup failed"))?;
+                owned = Some(OwnedRequest {
+                    cancel: cancel.clone(),
+                    worker: Some(worker),
+                });
+                Ok(())
+            };
+            if let Some(guarded) = &self.guarded {
+                let mut handoff = guarded
+                    .handoff
+                    .try_borrow_mut()
+                    .map_err(|_| anyhow::anyhow!("web research handoff already active"))?;
+                handoff(&mut submit)?;
+            } else {
+                submit()?;
+            }
+        }
+        ensure!(!duplicate, "web research duplicate submission refused");
+        let mut owned = owned.ok_or_else(|| anyhow::anyhow!("web research was not handed off"))?;
+        let poll = if self.guarded.is_some() {
+            crate::workflow::indicator::CADENCE
+        } else {
+            POLL
         };
         let bytes = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             ensure!(!remaining.is_zero(), "web research timeout");
-            match receiver.recv_timeout(POLL.min(remaining)) {
+            match receiver.recv_timeout(poll.min(remaining)) {
                 Ok(result) => break result?,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     bail!("web research worker unavailable")
@@ -332,6 +396,335 @@ fn transport_error(error: reqwest::Error) -> anyhow::Error {
         anyhow::anyhow!("web research timeout")
     } else {
         anyhow::anyhow!("web research transport failed")
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod guarded_tests {
+    use super::*;
+    use crate::{
+        conversation::{
+            receiving::{
+                memory::{CombinedBudget, FrozenSourceMemoryContext, MemoryInput},
+                ReceivingBudget, RequestSource,
+            },
+            ContextBudget, Ledger, Mode, Outcome, Role, Turn,
+        },
+        storage::{Namespace, Store, StorePaths, Uuid},
+    };
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::Arc,
+    };
+
+    // Ordinary real-Store context, not a selected permission fixture. Shared only
+    // with answer.rs's inline dispatch controls; no production entry is exposed.
+    pub(crate) fn prior() -> FrozenSourceMemoryContext {
+        struct Paths(std::path::PathBuf);
+        impl Drop for Paths {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let paths =
+            Paths(std::env::temp_dir().join(format!("buddy-web-handoff-{}", Uuid::new_v4())));
+        let ledger = Ledger::new(Arc::new(
+            Store::open(StorePaths {
+                data: paths.0.join("data"),
+                cache: paths.0.join("cache"),
+                credentials: paths.0.join("credentials"),
+            })
+            .unwrap(),
+        ));
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+        let turn = Turn {
+            id: Uuid::new_v4(),
+            conversation,
+            exchange: Uuid::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Interpreted,
+            text: Some("exact guarded fixture question".into()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        let id = turn.id;
+        ledger
+            .append(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                turn,
+                vec![],
+            )
+            .unwrap();
+        ledger
+            .source_request_context(
+                conversation,
+                id,
+                None,
+                RequestSource::NoDocument,
+                ReceivingBudget {
+                    context: ContextBudget {
+                        max_turns: 8,
+                        max_text_bytes: 65536,
+                        provider_token_limit: Some(131072),
+                    },
+                    max_encoded_bytes: 524288,
+                    max_passages: 4,
+                    max_passage_bytes: 16384,
+                    neighbors: false,
+                },
+                None,
+                |text| Ok(text.len()),
+            )
+            .unwrap()
+            .with_memory(
+                MemoryInput::Disabled,
+                CombinedBudget {
+                    max_encoded_bytes: 524288,
+                    max_tokens: 131072,
+                },
+                |text| Ok(text.len()),
+            )
+            .unwrap()
+    }
+    fn request(context: &FrozenSourceMemoryContext) -> ResearchRequest<'_> {
+        let turn = context.source_context().request();
+        ResearchRequest {
+            identity: super::super::ResearchIdentity {
+                conversation: turn.conversation,
+                request_turn: turn.id,
+                context_sha256: digest(context.encoded_json().as_bytes()),
+                observed_ms: 10,
+            },
+            context,
+            options: super::super::ResearchOptions {
+                now_ms: 10,
+                max_queries: 1,
+                max_sources: 1,
+                max_evidence_bytes: 16384,
+            },
+        }
+    }
+    fn backend<'a>(
+        endpoint: String,
+        progress: &'a mut dyn FnMut(Progress) -> Result<()>,
+    ) -> OpenAIWebResearch<'a> {
+        OpenAIWebResearch::new(
+            "fixture".into(),
+            endpoint,
+            "PRIVATE_FIXTURE".into(),
+            TransportOptions::default(),
+            progress,
+        )
+        .unwrap()
+    }
+    fn read_request(stream: &mut TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            assert!(header.len() < 16384);
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let header = String::from_utf8(header).unwrap();
+        assert!(header.starts_with("POST /v1/responses HTTP/1.1"));
+        let size = header
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        assert!(size <= HARD_BYTES);
+        let mut body = vec![0; size];
+        stream.read_exact(&mut body).unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["tool_choice"], "required");
+        assert_eq!(value["store"], false);
+    }
+    fn listener() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        (listener, endpoint)
+    }
+    fn accept(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "fixture request not observed");
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("fixture accept: {error}"),
+            }
+        }
+    }
+    #[test]
+    fn guarded_refusal_missing_submit_and_expiry_never_open_the_transport() {
+        let context = prior();
+        let request = request(&context);
+        for mode in 0..3 {
+            let (listener, endpoint) = listener();
+            let calls = Cell::new(0);
+            let mut handoff = |_: &mut dyn FnMut() -> Result<()>| {
+                calls.set(calls.get() + 1);
+                if mode == 0 {
+                    bail!("synthetic refusal");
+                }
+                Ok(())
+            };
+            let mut progress = |_| Ok(());
+            let deadline = if mode == 2 {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(2)
+            };
+            let provider =
+                backend(endpoint, &mut progress).with_guarded_dispatch(&mut handoff, deadline);
+            assert!(provider.research(&request).is_err());
+            assert_eq!(calls.get(), usize::from(mode != 2));
+            assert!(provider.research(&request).is_err());
+            assert_eq!(calls.get(), usize::from(mode != 2));
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+    #[test]
+    fn guarded_submit_is_on_the_caller_thread_and_validates_the_real_response() {
+        let context = prior();
+        let request = request(&context);
+        let (listener, endpoint) = listener();
+        thread::scope(|scope| {
+            let peer = scope.spawn(|| {
+                let mut stream = accept(&listener); read_request(&mut stream);
+                let bytes = serde_json::to_vec(&json!({"status":"completed","error":null,"incomplete_details":null,
+                    "output":[{"type":"web_search_call","status":"completed","action":{"type":"search","queries":["fixture"],"sources":[]}},
+                    {"type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{\"sources\":[]}"}]}]})).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                stream.write_all(&bytes).unwrap();
+            });
+            let caller = thread::current().id();
+            let calls = Cell::new(0);
+            let mut handoff = |submit: &mut dyn FnMut() -> Result<()>| {
+                assert_eq!(thread::current().id(), caller);
+                calls.set(calls.get() + 1);
+                submit()
+            };
+            let mut progress = |_| Ok(());
+            let provider = backend(endpoint, &mut progress)
+                .with_guarded_dispatch(&mut handoff, Instant::now() + Duration::from_secs(2));
+            assert_eq!(
+                provider.research(&request).unwrap().status,
+                Status::CompleteEmpty
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(provider.research(&request).is_err());
+            peer.join().unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        });
+    }
+    #[test]
+    fn duplicate_submit_is_latched_even_if_the_owner_ignores_its_error() {
+        let context = prior();
+        let request = request(&context);
+        let (listener, endpoint) = listener();
+        let mut handoff = |submit: &mut dyn FnMut() -> Result<()>| {
+            submit()?;
+            assert!(submit().is_err());
+            Ok(())
+        };
+        let mut progress = |_| Ok(());
+        let provider = backend(endpoint, &mut progress)
+            .with_guarded_dispatch(&mut handoff, Instant::now() + Duration::from_secs(2));
+        assert!(provider
+            .research(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate submission"));
+        // Owned cancellation/join has finished. At most the first connection can
+        // be queued, and no detached retry can arrive after this observation.
+        let mut count = 0;
+        while listener.accept().is_ok() {
+            count += 1;
+            assert!(count <= 1);
+        }
+    }
+    #[test]
+    fn original_deadline_and_waiting_refusal_close_and_join_the_owned_request() {
+        let context = prior();
+        let request = request(&context);
+        for cancel in [false, true] {
+            let (listener, endpoint) = listener();
+            thread::scope(|scope| {
+                let peer = scope.spawn(|| {
+                    let mut stream = accept(&listener);
+                    read_request(&mut stream);
+                    let mut byte = [0];
+                    match stream.read(&mut byte) {
+                        Ok(0) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) => {}
+                        _ => panic!(
+                            "owned cancellation must close the request, not wait for this peer"
+                        ),
+                    }
+                });
+                let waiting = Cell::new(0);
+                let mut progress = |stage| {
+                    if stage == Progress::Waiting {
+                        waiting.set(waiting.get() + 1);
+                        if cancel {
+                            bail!("synthetic canceled owner");
+                        }
+                    }
+                    Ok(())
+                };
+                let mut handoff = |submit: &mut dyn FnMut() -> Result<()>| submit();
+                let deadline = Instant::now()
+                    + if cancel {
+                        Duration::from_secs(2)
+                    } else {
+                        Duration::from_secs(1)
+                    };
+                let provider =
+                    backend(endpoint, &mut progress).with_guarded_dispatch(&mut handoff, deadline);
+                assert!(provider.research(&request).is_err());
+                if cancel {
+                    assert_eq!(waiting.get(), 1);
+                }
+                peer.join().unwrap();
+            });
+        }
     }
 }
 

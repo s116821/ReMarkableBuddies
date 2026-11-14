@@ -90,6 +90,7 @@ pub(crate) fn run(
             )?;
     }
     let mode = startup.mode_token().clone();
+    let researched_setting = startup.config().reader.researched_pdf.clone();
     drop(startup);
 
     loop {
@@ -154,6 +155,10 @@ pub(crate) fn run(
                 *policy.mode_token() == mode,
                 "selected Reader service mode changed"
             );
+            ensure!(
+                policy.config().reader.researched_pdf == researched_setting,
+                "selected Reader research selection changed"
+            );
             Ok((policy, token))
         })();
         let (policy, token) = match policy {
@@ -171,6 +176,18 @@ pub(crate) fn run(
         let result = (|| -> Result<_> {
             let check = |expected| verify_acquisition(&policy, &reader, expected);
             check(&token)?;
+            let research_selection = policy
+                .config()
+                .reader
+                .researched_pdf
+                .as_ref()
+                .map(|setting| {
+                    config::researched_reader::Selection::admit(
+                        policy.config(),
+                        setting.research_model.as_deref(),
+                    )
+                })
+                .transpose()?;
             began = true;
             workflow
                 .resident_source
@@ -180,22 +197,45 @@ pub(crate) fn run(
                     check(&token)
                 })?;
             workflow.begin_iteration()?;
-            let capture = workflow
-                .resident_source
-                .as_mut()
-                .unwrap()
-                .acquire_with_check(workflow.service_health.as_mut().unwrap(), |observed| {
-                    check(&token)?;
-                    if let Some(facts) = observed {
-                        let document = Uuid::from_bytes(*facts.page().document.as_bytes());
-                        ensure!(
-                            crate::memory::catalog::document_key(document)?
-                                == reader.scope().key_sha256,
-                            "resident observation belongs to another selected document"
-                        );
-                    }
-                    Ok(())
-                })?;
+            let observe = |observed: Option<&remarkable_open_sdk::native_adapter::ReaderFacts>| {
+                check(&token)?;
+                if let Some(facts) = observed {
+                    let document = Uuid::from_bytes(*facts.page().document.as_bytes());
+                    ensure!(
+                        crate::memory::catalog::document_key(document)?
+                            == reader.scope().key_sha256,
+                        "resident observation belongs to another selected document"
+                    );
+                }
+                Ok(())
+            };
+            let (capture, mut pdf) = if research_selection.is_some() {
+                let (capture, pdf) = workflow
+                    .resident_source
+                    .as_mut()
+                    .unwrap()
+                    .acquire_original_pdf_with_check(
+                        workflow.service_health.as_mut().unwrap(),
+                        policy.admitted_document()?,
+                        policy.acquisition_deadline(),
+                        policy.deadline(),
+                        observe,
+                        || policy.check_progress(&reader, &token),
+                    )?;
+                (capture, Some(pdf))
+            } else {
+                (
+                    workflow
+                        .resident_source
+                        .as_mut()
+                        .unwrap()
+                        .acquire_with_check(workflow.service_health.as_mut().unwrap(), observe)?,
+                    None,
+                )
+            };
+            if let Some(source) = &mut pdf {
+                source.pin.check(policy.acquisition_deadline())?;
+            }
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)?
                 .as_millis()
@@ -213,6 +253,9 @@ pub(crate) fn run(
                         .as_mut()
                         .unwrap()
                         .acquisition_current(workflow.service_health.as_mut().unwrap())?;
+                    if let Some(source) = &mut pdf {
+                        source.pin.check(policy.acquisition_deadline())?;
+                    }
                     prepared.publish_locked(store, &token, &mut reads)
                 })?
             };
@@ -233,25 +276,78 @@ pub(crate) fn run(
             }
             let personalization = config.personalization_snapshot()?;
             check(&token)?;
-            let effective = config::resolve(config, Overrides::default(), Environment::current())?;
-            let engine = OpenAI::new(
-                effective.model,
-                effective.key.into_string(),
-                effective.base_url,
-            )
-            .with_single_request();
-            Ok((token, acknowledgment, engine, memory, personalization))
+            if let Some(source) = &mut pdf {
+                source.pin.check(policy.acquisition_deadline())?;
+            }
+            let researched = if let Some(selection) = research_selection {
+                let mut reads = policy.reads(ReaderPhase::Acquisition)?;
+                let [catalog, preference] = policy.gates();
+                Some(SelectedAdmission::with_gates(
+                    &[reader.as_ref(), catalog, preference],
+                    |store| {
+                        policy.verify_locked(store, &reader, &token, &mut reads)?;
+                        policy.require_acquisition_time()?;
+                        workflow
+                            .resident_source
+                            .as_mut()
+                            .unwrap()
+                            .acquisition_current(workflow.service_health.as_mut().unwrap())?;
+                        pdf.as_mut()
+                            .context("researched Reader source absent")?
+                            .pin
+                            .check(policy.acquisition_deadline())?;
+                        selection.resolve()
+                    },
+                )?)
+            } else {
+                None
+            };
+            let engine = if let Some(models) = &researched {
+                models.answer_engine()
+            } else {
+                let effective =
+                    config::resolve(config, Overrides::default(), Environment::current())?;
+                OpenAI::new(
+                    effective.model,
+                    effective.key.into_string(),
+                    effective.base_url,
+                )
+                .with_single_request()
+            };
+            Ok((
+                token,
+                acknowledgment,
+                engine,
+                memory,
+                personalization,
+                pdf,
+                researched,
+            ))
         })();
 
         let result = match result {
-            Ok((token, acknowledgment, engine, memory, personalization)) => {
+            Ok((token, acknowledgment, engine, memory, personalization, pdf, researched)) => {
                 let mut receiver =
                     orchestrator::Orchestrator::new(workflow, engine, Ledger::new(store.clone()));
                 if let Some(memory) = memory {
                     receiver.set_selected_subject_memory(memory);
                 }
                 receiver.set_personalization(personalization);
-                let result = receiver.receive_resident_prepared(token, acknowledgment, policy);
+                let result = match (pdf, researched) {
+                    (Some(pdf), Some(models)) => receiver.receive_researched_resident(
+                        token,
+                        acknowledgment,
+                        policy,
+                        pdf,
+                        models,
+                    ),
+                    (None, None) => {
+                        receiver.receive_resident_prepared(token, acknowledgment, policy)
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "researched Reader request ownership unavailable"
+                    )),
+                };
                 workflow = receiver.into_workflow();
                 result
             }

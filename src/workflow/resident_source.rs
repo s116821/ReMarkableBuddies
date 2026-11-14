@@ -20,7 +20,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use remarkable_open_sdk::{
-    native_adapter::{Reply, RuntimeIdentity},
+    native_adapter::{ReaderFacts, Reply, RuntimeIdentity},
     OperationId, Uuid,
 };
 use std::{
@@ -509,11 +509,132 @@ impl ResidentSourceOwner {
     pub(super) fn acquire_with_check(
         &mut self,
         health: &mut ServiceHealth,
-        mut check: impl FnMut(Option<&remarkable_open_sdk::native_adapter::ReaderFacts>) -> Result<()>,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
     ) -> Result<ResidentSourceCapture> {
+        self.acquire_with_source(health, None, check, |_, _, _| Ok(()))
+            .map(|(capture, ())| capture)
+    }
+
+    /// Acquire the original PDF under the existing released-input owner. The
+    /// caller supplies short selected boundaries and a separate progress check.
+    /// Neither callback may retain a gate across source I/O or worker waits.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(super) fn acquire_original_pdf_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        admitted_document: crate::storage::Uuid,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<(ResidentSourceCapture, original_pdf::CapturedOriginalPdf)> {
+        let deadline = self.original_pdf_deadline(acquisition_deadline, request_deadline)?;
+        self.acquire_original_pdf_using(
+            health,
+            deadline,
+            request_deadline,
+            check,
+            |facts, pulse| {
+                original_pdf::ObservedOriginalPdf::observe(
+                    facts,
+                    admitted_document,
+                    deadline,
+                    pulse,
+                )
+            },
+            &mut progress,
+            original_pdf::ObservedOriginalPdf::captured_by_owner,
+        )
+    }
+
+    fn original_pdf_deadline(
+        &self,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+    ) -> Result<Instant> {
+        ensure!(
+            !self.reconnect
+                && self.captured_source.is_none()
+                && self.gesture == Some(ResidentGesture::Reader)
+                && acquisition_deadline <= request_deadline,
+            "Original PDF capture is unavailable for this release"
+        );
+        let owner_deadline = self
+            .deadline
+            .context("Resident source requires a released gesture")?;
+        Ok(owner_deadline.min(acquisition_deadline))
+    }
+
+    fn original_pdf_progress(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        admitted_progress(deadline, || {
+            self.progress(health)?;
+            progress()
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_original_pdf_using<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observe: impl FnOnce(
+            &ReaderFacts,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<original_pdf::ObservedOriginalPdf>,
+        progress: &mut dyn FnMut() -> Result<()>,
+        complete: impl FnOnce(
+            original_pdf::ObservedOriginalPdf,
+            &ReaderFacts,
+            Instant,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
+        let result =
+            self.acquire_with_source(health, Some(deadline), check, |owner, health, facts| {
+                let mut pulse = || owner.original_pdf_progress(health, deadline, progress);
+                observe(facts, &mut pulse)
+            });
+        if result.is_err() && !self.reconnect {
+            // Refuse any retry against this release, even if local PDF
+            // admission failed before the capture request reached the SDK.
+            if let Some(session) = self.session.as_mut() {
+                session.finish();
+            }
+            self.reconnect = true;
+        }
+        let (capture, pdf) = result?;
+        let verified = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        let mut pulse = || self.original_pdf_progress(health, deadline, progress);
+        Ok((
+            capture,
+            complete(pdf, &verified, request_deadline, &mut pulse)?,
+        ))
+    }
+
+    fn acquire_with_source<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        mut check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observed_source: impl FnOnce(&mut Self, &mut ServiceHealth, &ReaderFacts) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
         self.acquisition_current(health)?;
+        let prepare_source = deadline.is_some();
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
         check(None)?;
-        let deadline = self.deadline.unwrap();
+        let deadline = deadline.unwrap_or_else(|| self.deadline.unwrap());
         let observation = operation();
         let capture = operation();
         let session = self.session.as_mut().context("Resident Session absent")?;
@@ -533,7 +654,11 @@ impl ResidentSourceOwner {
                     feature = "development-resident-bootstrap",
                     feature = "development-input-diagnostics"
                 ))]
-                if let Some(directory) = &self.development_diagnostics {
+                if let Some(directory) = self
+                    .development_diagnostics
+                    .as_ref()
+                    .filter(|_| !prepare_source)
+                {
                     // Explicit installed development profile only. A visual sample
                     // permits fixture setup inspection, never page authority.
                     let visual = session.request(
@@ -570,7 +695,13 @@ impl ResidentSourceOwner {
             }
         };
         check(Some(&facts))?;
+        let source = observed_source(self, health, &facts)?;
+        if prepare_source {
+            check(Some(&facts))?;
+        }
         before(deadline)?;
+        let session = self.session.as_mut().context("Resident Session absent")?;
+        let input = self.input.as_mut().unwrap();
         let reply = session.request(
             health,
             input,
@@ -591,7 +722,7 @@ impl ResidentSourceOwner {
         // Retain only information actually supplied/validated by this route.
         match ResidentSourceCapture::from_session(&runtime, observation, capture, facts, historical)
         {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok((value, source)),
             Err(error) => {
                 self.fatal = true;
                 Err(error)
@@ -1388,6 +1519,105 @@ pub(crate) mod tests {
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    #[test]
+    fn resident_owner_brackets_original_pdf_source_and_refuses_same_release_retry() {
+        use std::{fs, os::unix::fs::DirBuilderExt};
+
+        for refusal in [None, Some("before"), Some("after")] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let document = ConversationId::from_u128(81);
+            let page = ConversationId::from_u128(82);
+            let root = base.join("original-pdf");
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let pdf_path = root.join(format!("{document}.pdf"));
+            if refusal != Some("before") {
+                fs::write(&pdf_path, b"synthetic original source").unwrap();
+            }
+            fs::write(
+                root.join(format!("{document}.content")),
+                serde_json::to_vec(&serde_json::json!({
+                    "fileType": "pdf",
+                    "cPages": {"original": {"value": 2}, "pages": [
+                        {"id": page, "idx": {"value": "a"}, "redir": {"value": 1}}
+                    ]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.factory = Box::new(OwnedFactory {
+                source: Some((document, page)),
+                events: events.clone(),
+                mode: "reconnect-source-handoff",
+                delay: Duration::ZERO,
+            });
+            let started = Instant::now();
+            owner.begin(released(started), health).unwrap();
+            let requested = started + Duration::from_secs(20);
+            let deadline = owner.original_pdf_deadline(requested, requested).unwrap();
+            assert_eq!(deadline, requested);
+            let checks = RefCell::new(Vec::new());
+            let result = owner.acquire_original_pdf_using(
+                health,
+                deadline,
+                requested,
+                |facts| {
+                    checks.borrow_mut().push(facts.is_some());
+                    Ok(())
+                },
+                |facts, pulse| {
+                    assert_eq!(&*events.borrow(), &["activate", "spawn", "observe"]);
+                    original_pdf::ObservedOriginalPdf::observe_at(
+                        &root,
+                        (unsafe { libc::geteuid() }, None),
+                        true,
+                        facts,
+                        document,
+                        deadline,
+                        pulse,
+                    )
+                },
+                &mut || Ok(()),
+                |pdf, verified, _, pulse| {
+                    assert_eq!(
+                        &*events.borrow(),
+                        &["activate", "spawn", "observe", "capture"]
+                    );
+                    if refusal == Some("after") {
+                        fs::write(&pdf_path, b"changed after capture")?;
+                    }
+                    pdf.verify_fixture_capture(verified, pulse)
+                },
+            );
+            let expected_checks: &[bool] = if refusal == Some("before") {
+                &[false, true]
+            } else {
+                &[false, true, true]
+            };
+            assert_eq!(checks.borrow().as_slice(), expected_checks);
+            if refusal.is_some() {
+                assert!(result.is_err());
+            } else {
+                let (capture, original_page) = result.unwrap();
+                assert_eq!(capture.document(), document);
+                assert_eq!(capture.page(), page);
+                assert_eq!(original_page, 2);
+            }
+            assert!(owner.original_pdf_deadline(requested, requested).is_err());
+            owner.finish(health).unwrap();
+            let expected_events: &[&str] = if refusal == Some("before") {
+                &["activate", "spawn", "observe"]
+            } else {
+                &["activate", "spawn", "observe", "capture"]
+            };
+            assert_eq!(events.borrow().as_slice(), expected_events);
+            drop((workflow, store));
+            fs::remove_dir_all(base).unwrap();
+        }
     }
 
     /// Actual installed receiver body with a declared protocol peer, live input

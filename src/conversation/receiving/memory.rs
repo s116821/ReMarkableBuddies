@@ -95,7 +95,7 @@ impl MemoryReport {
 #[derive(Serialize)]
 struct CombinedFrame<'a> {
     schema: u32,
-    scope: &'static str,
+    scope: &'a str,
     request_context: &'a Frame,
     memory: Option<&'a MemoryReport>,
 }
@@ -128,8 +128,16 @@ pub(crate) fn validate_result(
     profile: Uuid,
     query: &memory::Query,
 ) -> Result<()> {
-    use memory::Status;
     ensure!(!result.selected(), CompositionRefusal::SelectedMemory);
+    validate_result_data(result, profile, query)
+}
+
+fn validate_result_data(
+    result: &memory::QueryResult,
+    profile: Uuid,
+    query: &memory::Query,
+) -> Result<()> {
+    use memory::Status;
     ensure!(
         result.status != Status::Unavailable && !result.diagnostics.snapshot_unavailable,
         CompositionRefusal::MemoryUnavailable
@@ -189,6 +197,83 @@ pub(crate) fn validate_result(
 }
 
 impl FrozenRequestContext {
+    /// One previously queried selected memory view, retained by its Attempt
+    /// through actual dispatch and publication. This function never queries.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_selected_memory(
+        self,
+        admitted: &crate::workflow::ResearchContext,
+        input: Option<(Uuid, &memory::Query, &memory::QueryResult)>,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenSourceMemoryContext> {
+        ensure!(
+            self.frame.scope == "selected-historical"
+                && self.frame.conversation == admitted.conversation()
+                && self.frame.request.id == admitted.request_turn()
+                && matches!(&self.frame.source, SourceAssociation::Original { expected, .. }
+                    if expected == admitted.index_key()),
+            CompositionRefusal::IncompatibleRequest
+        );
+        let report = if let Some((profile, query, result)) = input {
+            ensure!(
+                !profile.is_nil() && result.selected(),
+                CompositionRefusal::InvalidMemory
+            );
+            query
+                .validate()
+                .map_err(|_| CompositionRefusal::InvalidMemoryOptions)?;
+            ensure!(
+                self.request().text.as_deref() == Some(query.text.as_str())
+                    && query.document == Some(admitted.index_key().document),
+                CompositionRefusal::IncompatibleRequest
+            );
+            validate_result_data(result, profile, query)?;
+            MemoryReport {
+                profile: Some(profile),
+                query: Some(query.clone()),
+                status: result.status,
+                diagnostics: result.diagnostics.clone(),
+                context: Some(result.context.clone()),
+            }
+        } else {
+            MemoryReport {
+                profile: None,
+                query: None,
+                status: memory::Status::Disabled,
+                diagnostics: memory::Diagnostics::default(),
+                context: None,
+            }
+        };
+        ensure!(
+            (512..=FRAME_BYTES).contains(&budget.max_encoded_bytes) && budget.max_tokens > 0,
+            CompositionRefusal::InvalidBudget
+        );
+        let frame = CombinedFrame {
+            schema: 1,
+            scope: &self.frame.scope,
+            request_context: &self.frame,
+            memory: Some(&report),
+        };
+        let encoded = encoded(&frame, budget.max_encoded_bytes)
+            .map_err(|_| CompositionRefusal::EncodedLimit)?;
+        let tokens = token_count(&encoded).map_err(|_| CompositionRefusal::CounterUnavailable)?;
+        ensure!(tokens > 0, CompositionRefusal::CounterUnavailable);
+        ensure!(
+            tokens <= budget.max_tokens,
+            CompositionRefusal::TokenLimit {
+                tokens,
+                limit: budget.max_tokens
+            }
+        );
+        Ok(FrozenSourceMemoryContext {
+            source: self,
+            memory: report,
+            encoded,
+            tokens,
+        })
+    }
+
     /// Consumes captured data only. No Ledger read, source query, write or dispatch.
     pub fn with_memory(
         self,

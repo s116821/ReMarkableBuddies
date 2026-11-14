@@ -105,12 +105,16 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
         || ["paths", "memory", "reader", "sync", "personalization"]
             .iter()
             .any(|key| raw.get(key).is_some_and(|v| !v.is_object()))
-        || ["/memory/selection", "/reader/selection"]
-            .into_iter()
-            .any(|path| {
-                raw.pointer(path)
-                    .is_some_and(|v| !v.is_null() && !v.is_object())
-            })
+        || [
+            "/memory/selection",
+            "/reader/selection",
+            "/reader/researched_pdf",
+        ]
+        .into_iter()
+        .any(|path| {
+            raw.pointer(path)
+                .is_some_and(|v| !v.is_null() && !v.is_object())
+        })
     {
         return Err(Status::InvalidInput);
     }

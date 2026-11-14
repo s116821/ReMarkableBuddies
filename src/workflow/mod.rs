@@ -12,6 +12,11 @@ pub mod orchestrator;
 ))]
 pub(crate) use resident_source::tests::assert_selected_policy_boundaries;
 mod reader_attempt;
+#[cfg(target_os = "linux")]
+pub(crate) use reader_attempt::ResearchContext;
+// The researched receiver joins parsed readings to its own selected admission.
+#[allow(dead_code)]
+mod reader_intent;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
 pub mod resident_output;

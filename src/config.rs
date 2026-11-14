@@ -10,6 +10,9 @@ pub mod portable;
 pub mod product;
 pub mod product_settings;
 pub mod research_settings;
+// The selected researched receiver is assembled separately from ordinary resolve.
+#[allow(dead_code)]
+pub(crate) mod researched_reader;
 pub mod schema;
 mod source_snapshot;
 use crate::conversation::receiving::memory::research::ResearchPolicy;

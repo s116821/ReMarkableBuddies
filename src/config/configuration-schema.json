@@ -237,7 +237,34 @@
     "reader": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [{
+        "if": {
+          "required": ["researched_pdf"],
+          "properties": { "researched_pdf": { "type": "object" } }
+        },
+        "then": {
+          "required": ["selection"],
+          "properties": { "selection": { "$ref": "#/$defs/readerSelection" } }
+        }
+      }],
       "properties": {
+        "researched_pdf": {
+          "description": "Local opt-in for selected original-PDF researched Reader requests. Requires selection. An absent search model does not authorize web research.",
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "research_model": {
+                  "type": ["string", "null"],
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
         "selection": {
           "anyOf": [
             {

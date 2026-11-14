@@ -23,12 +23,64 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Configuration {
     pub selection: Option<SelectionScope>,
+    /// Local opt-in only; never part of portable shared settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub researched_pdf: Option<ResearchedPdf>,
 }
 impl Configuration {
     pub fn validate(&self) -> Result<()> {
         if let Some(scope) = &self.selection {
             scope.validate()?;
         }
+        if let Some(researched) = &self.researched_pdf {
+            ensure!(
+                self.selection.is_some(),
+                "researched Reader needs a selected document"
+            );
+            researched.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ResearchedPdf {
+    pub research_model: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ResearchedPdf {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // A derived struct alone also accepts positional JSON arrays. This
+        // explicit local opt-in must be an object, with duplicate fields refused.
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        if !raw.get().trim_start().starts_with('{') {
+            return Err(serde::de::Error::custom("researched_pdf must be an object"));
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            research_model: Option<String>,
+        }
+        let fields: Fields = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            research_model: fields.research_model,
+        })
+    }
+}
+
+impl ResearchedPdf {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.research_model.as_deref().is_none_or(|model| {
+                !model.is_empty()
+                    && model.len() <= 256
+                    && model == model.trim()
+                    && !model.chars().any(char::is_control)
+            }),
+            "researched Reader search declaration is invalid"
+        );
         Ok(())
     }
 }

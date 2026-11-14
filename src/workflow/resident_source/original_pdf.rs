@@ -362,7 +362,7 @@ impl ObservedOriginalPdf {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn observe_at(
+    pub(super) fn observe_at(
         root: &Path,
         owner: (u32, Option<u32>),
         allow_fixture_temp: bool,
@@ -451,6 +451,34 @@ impl ObservedOriginalPdf {
         )
     }
 
+    /// The resident owner has already checked both HistoricalCapture samples,
+    /// the Observe/Capture operation identities and the runtime correspondence
+    /// through ResidentSourceCapture::from_session.
+    pub(in crate::workflow::resident_source) fn captured_by_owner(
+        self,
+        verified: &ReaderFacts,
+        request_deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<CapturedOriginalPdf> {
+        self.recheck_verified(verified, progress)?.start_index(
+            Path::new(INSTALLED_EXECUTABLE),
+            request_deadline,
+            progress,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn verify_fixture_capture(
+        self,
+        verified: &ReaderFacts,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<u32> {
+        Ok(self
+            .recheck_verified(verified, progress)?
+            .pin
+            .original_page())
+    }
+
     fn captured_with_executable(
         self,
         capture: &HistoricalCapture,
@@ -463,13 +491,25 @@ impl ObservedOriginalPdf {
     }
 
     fn recheck_capture(
-        mut self,
+        self,
         before: &ReaderFacts,
         after: &ReaderFacts,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Self> {
         ensure!(
-            before == &self.observed && after == &self.observed,
+            before == after,
+            "Original PDF capture correspondence changed"
+        );
+        self.recheck_verified(before, progress)
+    }
+
+    fn recheck_verified(
+        mut self,
+        verified: &ReaderFacts,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        ensure!(
+            verified == &self.observed,
             "Original PDF capture correspondence changed"
         );
         let mut progress = SourceProgress::new(self.acquisition_deadline, progress);

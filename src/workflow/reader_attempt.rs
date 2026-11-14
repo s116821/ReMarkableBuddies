@@ -7,6 +7,14 @@ use crate::{
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 mod selected;
+#[cfg(target_os = "linux")]
+use crate::conversation::receiving::memory::research::{ResearchDirective, ResearchPolicy};
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub(crate) use selected::ResearchContext;
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub(super) use selected::ResearchStage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvidenceKind {
@@ -33,6 +41,16 @@ fn now() -> Result<u64> {
         .as_millis()
         .try_into()
         .context("timestamp overflow")
+}
+
+fn unresolved_target() -> crate::conversation::target::Candidate {
+    crate::conversation::target::Candidate {
+        subject: "Selected source could not be localized".into(),
+        geometry: None,
+        understanding: crate::conversation::target::Understanding::Uncertain {
+            reason: "missing or invalid explicit target geometry".into(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +230,114 @@ impl Attempt {
         let (selected, user) =
             selected::Selected::new_resident(ledger, workflow, token, acknowledgment, policy)?;
         Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn prepare_researched_resident(
+        ledger: &Ledger,
+        workflow: &super::Workflow,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+        pdf: super::resident_source::original_pdf::CapturedOriginalPdf,
+    ) -> Result<Self> {
+        let capture = acknowledgment.capture.record_id;
+        let (selected, user) = selected::Selected::new_researched_resident(
+            ledger,
+            workflow,
+            token,
+            acknowledgment,
+            policy,
+            pdf,
+        )?;
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn researched(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(selected::Selected::researched)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn admit_research_intent(
+        &self,
+        agreement: super::reader_intent::Agreement,
+    ) -> Result<()> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .admit_research_intent(agreement)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_decision(&self) -> Result<(ResearchPolicy, ResearchDirective)> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_decision()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_index_key(&self) -> Result<crate::retrieval::IndexKey> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_index_key()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_context(&self) -> Result<ResearchContext> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_context()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn query_research_source(
+        &self,
+        expected: &crate::retrieval::IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::retrieval::Retrieved> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .query_research_source(
+                expected,
+                question,
+                max_passages,
+                max_bytes,
+                neighbors,
+                progress,
+            )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn run_researched_stage<T>(
+        &self,
+        stage: ResearchStage,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+        current: &mut dyn FnMut() -> Result<()>,
+        run: impl FnOnce(&mut crate::llm::ModelHandoff<'_>, std::time::Instant) -> Result<T>,
+    ) -> Result<T> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .run_researched_stage(stage, memory, current, run)
     }
 
     pub(super) fn selected_resident(&self) -> bool {
@@ -525,13 +651,7 @@ impl Attempt {
         text: &str,
         candidate: Option<&crate::conversation::target::Candidate>,
     ) -> Result<()> {
-        let unresolved = crate::conversation::target::Candidate {
-            subject: "Selected source could not be localized".into(),
-            geometry: None,
-            understanding: crate::conversation::target::Understanding::Uncertain {
-                reason: "missing or invalid explicit target geometry".into(),
-            },
-        };
+        let unresolved = unresolved_target();
         let candidate = candidate.unwrap_or(&unresolved);
         if let Some(selected) = self.selected.as_mut().filter(|s| s.source_target_enabled()) {
             self.user = selected.write_target(text, candidate)?.written;
@@ -554,6 +674,30 @@ impl Attempt {
         )?;
         frame.acknowledge(ledger, &result)?;
         self.user = user;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn interpret_researched_source_target(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        candidate: Option<&crate::conversation::target::Candidate>,
+        current: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let selected = self
+            .selected
+            .as_mut()
+            .context("selected Reader attempt absent")?;
+        selected.require_store(ledger)?;
+        let unresolved = unresolved_target();
+        let candidate = selected
+            .source_target_enabled()
+            .then(|| candidate.unwrap_or(&unresolved));
+        self.user = selected
+            .write_researched(text, false, None, candidate, current)?
+            .written;
         Ok(())
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
@@ -636,6 +780,25 @@ impl Attempt {
             )?;
         }
         self.assistant = Some(self.load_turn(ledger, turn.id)?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn generated_researched_with_memory(
+        &mut self,
+        ledger: &Ledger,
+        text: String,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+        current: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let selected = self
+            .selected
+            .as_mut()
+            .context("selected Reader attempt absent")?;
+        selected.require_store(ledger)?;
+        let acknowledgment = selected.write_researched(&text, true, memory, None, current)?;
+        self.assistant = Some(acknowledgment.written);
         Ok(())
     }
     pub fn outcome(
