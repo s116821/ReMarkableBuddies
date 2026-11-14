@@ -166,7 +166,9 @@ fn partial_media_is_truthful_and_complete_archive_inspection_requires_no_config_
     let report = export(store.clone(), &destination);
     assert_eq!(report.status, Status::Ok);
     assert!(report.incomplete);
-    assert!(!report.data.as_ref().unwrap().inspection.complete_media);
+    assert!(
+        matches!(report.data.as_ref(), Some(Data::Archive { inspection }) if !inspection.complete_media)
+    );
     drop(report);
     drop(store);
     let bytes = serde_json::to_vec(&serde_json::json!({"path":destination})).unwrap();
@@ -178,7 +180,9 @@ fn partial_media_is_truthful_and_complete_archive_inspection_requires_no_config_
     );
     assert_eq!(report.status, Status::Ok);
     assert!(report.incomplete);
-    assert!(!report.data.unwrap().inspection.configuration_included);
+    assert!(
+        matches!(report.data, Some(Data::Archive { inspection }) if !inspection.configuration_included)
+    );
 }
 
 #[test]
@@ -344,4 +348,320 @@ fn notebook_archive_marker_fault_preserves_unpublished_and_possibly_published_ro
         assert!(path.join("objects").is_dir());
         assert_eq!(inspect_notebook(&path).status, status);
     }
+}
+
+fn isolated_package(partial: bool) -> (Fixture, PathBuf, String, serde_json::Value) {
+    use std::collections::BTreeMap;
+    use storage::{
+        Coverage, Envelope, Kind, Manifest, Media, Namespace, ObjectRef, Omission, Scope,
+    };
+    let fixture = Fixture::new();
+    let store = Arc::new(Store::open(fixture.paths()).unwrap());
+    let media = if partial {
+        b"PRIVATE_OMITTED_CONTENT".as_slice()
+    } else {
+        b"".as_slice()
+    };
+    let media_sha = storage::digest(media);
+    let record = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::Conversation,
+        domain_schema_version: 1,
+        record_id: Uuid::new_v4(),
+        revision_id: Uuid::new_v4(),
+        parents: Default::default(),
+        operation_id: Uuid::new_v4(),
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: serde_json::json!({"text":"PRIVATE_CONVERSATION_CONTENT"}),
+        media_descriptors: vec![Media {
+            sha256: media_sha.clone(),
+            bytes: media.len() as u64,
+            media_type: "application/octet-stream".into(),
+        }],
+    };
+    if partial {
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let hash = storage::digest(&bytes);
+        store
+            .import(
+                Manifest {
+                    format: 1,
+                    transaction_id: Uuid::new_v4(),
+                    scope: Scope::LocalTransaction,
+                    records: vec![ObjectRef {
+                        sha256: hash.clone(),
+                        bytes: bytes.len() as u64,
+                    }],
+                    record_namespaces: BTreeMap::from([(hash.clone(), Namespace::Conversation)]),
+                    media: vec![],
+                    media_coverage: vec![Coverage::Omitted {
+                        sha256: media_sha,
+                        reason: Omission::SizeDeferred,
+                    }],
+                },
+                BTreeMap::from([(hash, bytes)]),
+            )
+            .unwrap();
+    } else {
+        store
+            .commit(vec![record], BTreeMap::from([(media_sha, media.to_vec())]))
+            .unwrap();
+    }
+    store
+        .set_sync_mode(
+            &store.sync_mode_snapshot().unwrap().token,
+            Uuid::new_v4(),
+            SyncModeChoice::IsolatedBackup {
+                binding_sha256: storage::digest(b"fixture binding"),
+            },
+        )
+        .unwrap();
+    let lease = store
+        .sync_mode_lease(&store.sync_mode_snapshot().unwrap().token)
+        .unwrap();
+    let config = fixture.root.join("config.json");
+    fs::write(
+        &config,
+        serde_json::to_vec(&serde_json::json!({"paths":fixture.paths(),
+        "personalization":{"enabled":true,"text":"PRIVATE_PORTABLE_TEXT"},
+        "model":"PRIVATE_MODEL", "model_credential":"PRIVATE_CREDENTIAL"}))
+        .unwrap(),
+    )
+    .unwrap();
+    let package = fixture.root.join("isolated-package");
+    let mut marker = None;
+    let inspection = store
+        .export_isolated_package(&lease, &package, &config, &mut marker)
+        .unwrap()
+        .unwrap();
+    let marker = marker.unwrap();
+    assert_eq!(inspection.marker_sha256, marker);
+    assert_eq!(inspection.data.complete_media, !partial);
+    let expected = serde_json::to_value(inspection).unwrap();
+    drop(lease);
+    drop(store);
+    (fixture, package, marker, expected)
+}
+
+fn command_json(
+    operation: Operation,
+    mut input: &[u8],
+    missing_config: PathBuf,
+) -> serde_json::Value {
+    let report = run(operation, Path::new("-"), Some(missing_config), &mut input);
+    let mut bytes = Vec::new();
+    report.write_to(&mut bytes).unwrap();
+    assert!(bytes.len() <= MAX_OUTPUT && bytes.ends_with(b"\n"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("PRIVATE_"));
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn isolated_command_inspects_actual_export_with_exact_redacted_output_and_zero_byte_object() {
+    let (fixture, package, marker, expected) = isolated_package(false);
+    let before = fixture.inventory();
+    assert_eq!(
+        fs::metadata(package.join("data/objects").join(storage::digest(b"")))
+            .unwrap()
+            .len(),
+        0
+    );
+    let input =
+        serde_json::to_vec(&serde_json::json!({"path":package,"marker_sha256":marker})).unwrap();
+    let result = command_json(
+        Operation::InspectIsolated,
+        &input,
+        fixture.root.join("missing-config"),
+    );
+    assert_eq!(
+        result,
+        serde_json::json!({"report_version":1,"operation":"inspect-isolated","status":"ok",
+        "incomplete":false,"activation_performed":false,"data":{"isolated_package":expected}})
+    );
+    assert!(!serde_json::to_string(&result)
+        .unwrap()
+        .contains(fixture.root.to_str().unwrap()));
+    assert_eq!(fixture.inventory(), before);
+}
+
+#[test]
+fn isolated_command_preserves_declared_media_omission_without_claiming_completeness() {
+    let (fixture, package, marker, expected) = isolated_package(true);
+    let result = command_json(
+        Operation::InspectIsolated,
+        &serde_json::to_vec(&serde_json::json!({"path":package,"marker_sha256":marker})).unwrap(),
+        fixture.root.join("missing-config"),
+    );
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["incomplete"], true);
+    assert_eq!(
+        result["data"],
+        serde_json::json!({"isolated_package":expected})
+    );
+}
+
+#[test]
+fn isolated_command_refuses_corruption_extra_members_and_wrong_original_marker() {
+    let (fixture, package, marker, _) = isolated_package(false);
+    let check = |marker: &str| {
+        command_json(
+            Operation::InspectIsolated,
+            &serde_json::to_vec(&serde_json::json!({"path":package,"marker_sha256":marker}))
+                .unwrap(),
+            fixture.root.join("missing-config"),
+        )
+    };
+    let before = fixture.inventory();
+    let refused = |result: serde_json::Value| {
+        assert_eq!(result["status"], "unsupported");
+        assert_eq!(result["data"], serde_json::Value::Null);
+        assert_eq!(result["activation_performed"], false);
+    };
+    refused(check(&storage::digest(b"wrong original marker")));
+    for path in [
+        package.join("PRIVATE_EXTRA"),
+        package.join("data/PRIVATE_EXTRA"),
+        package.join("data/objects/PRIVATE_EXTRA"),
+    ] {
+        fs::write(&path, b"PRIVATE_EXTRA").unwrap();
+        refused(check(&marker));
+        assert_eq!(fs::read(&path).unwrap(), b"PRIVATE_EXTRA");
+        fs::remove_file(path).unwrap();
+    }
+    let content = package.join("data/objects").join(storage::digest(b""));
+    fs::write(&content, b"PRIVATE_CORRUPT_OBJECT").unwrap();
+    refused(check(&marker));
+    assert_eq!(fs::read(&content).unwrap(), b"PRIVATE_CORRUPT_OBJECT");
+    fs::write(&content, b"").unwrap();
+    let marker_path = package.join("isolated-backup.json");
+    let original = fs::read(&marker_path).unwrap();
+    let mut unsupported: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    unsupported["isolated_backup_version"] = serde_json::json!(2);
+    let unsupported = serde_json::to_vec(&unsupported).unwrap();
+    fs::write(&marker_path, &unsupported).unwrap();
+    refused(check(&storage::digest(&unsupported)));
+    fs::write(&marker_path, &original).unwrap();
+    assert_eq!(check(&marker)["status"], "ok");
+    assert_eq!(fixture.inventory(), before);
+}
+
+#[test]
+fn isolated_command_enforces_closed_bounded_input_and_old_operation_shapes() {
+    use clap::ValueEnum;
+    let (fixture, package, marker, _) = isolated_package(false);
+    let config = fixture.root.join("missing-config");
+    let json = |input: serde_json::Value| {
+        command_json(
+            Operation::InspectIsolated,
+            &serde_json::to_vec(&input).unwrap(),
+            config.clone(),
+        )
+    };
+    for input in [
+        serde_json::json!(null),
+        serde_json::json!({"path":package}),
+        serde_json::json!({"marker_sha256":marker}),
+        serde_json::json!({"path":package,"marker_sha256":"NOT_A_DIGEST"}),
+        serde_json::json!({"path":"relative","marker_sha256":marker}),
+        serde_json::json!({"path":package,"marker_sha256":marker,"grant":"PRIVATE_GRANT"}),
+    ] {
+        assert_eq!(json(input)["status"], "invalid-input");
+    }
+    let path = serde_json::to_string(&package).unwrap();
+    let duplicate = format!(
+        "{{\"path\":{path},\"marker_sha256\":\"{marker}\",\"marker_sha256\":\"{marker}\"}}"
+    );
+    assert_eq!(
+        command_json(
+            Operation::InspectIsolated,
+            duplicate.as_bytes(),
+            config.clone()
+        )["status"],
+        "invalid-input"
+    );
+    for raw in [
+        vec![b' '; MAX_INPUT + 1],
+        vec![0xff],
+        b"\xef\xbb\xbf{}".to_vec(),
+    ] {
+        assert_eq!(
+            command_json(Operation::InspectIsolated, &raw, config.clone())["status"],
+            "invalid-input"
+        );
+    }
+    let input = fixture.root.join("oversized-input.json");
+    fs::write(&input, vec![b' '; MAX_INPUT + 1]).unwrap();
+    assert_eq!(
+        run(
+            Operation::InspectIsolated,
+            &input,
+            Some(config.clone()),
+            &mut std::io::empty()
+        )
+        .status,
+        Status::InvalidInput
+    );
+    assert_eq!(
+        Operation::from_str("inspect-isolated", false).unwrap(),
+        Operation::InspectIsolated
+    );
+    for (operation, name) in [
+        (Operation::Inspect, "inspect"),
+        (Operation::ExportSelected, "export-selected"),
+        (Operation::InspectNotebook, "inspect-notebook"),
+        (Operation::ExportNotebook, "export-notebook"),
+    ] {
+        assert_eq!(Operation::from_str(name, false).unwrap(), operation);
+        assert_eq!(serde_json::to_value(operation).unwrap(), name);
+        assert_eq!(
+            run(
+                operation,
+                Path::new("-"),
+                Some(config.clone()),
+                &mut &*serde_json::to_vec(
+                    &serde_json::json!({"path":package,"marker_sha256":marker})
+                )
+                .unwrap()
+            )
+            .status,
+            Status::InvalidInput
+        );
+    }
+    let legacy = command_json(
+        Operation::Inspect,
+        &serde_json::to_vec(&serde_json::json!({"path":package.join("data")})).unwrap(),
+        config,
+    );
+    assert_eq!(legacy["status"], "ok");
+    assert_eq!(
+        legacy["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["inspection"]
+    );
+}
+
+#[test]
+fn isolated_command_refuses_nonregular_or_absent_marker_without_creating_state() {
+    let fixture = Fixture::new();
+    let package = fixture.root.join("not-a-package");
+    fs::create_dir(&package).unwrap();
+    let bytes = serde_json::to_vec(
+        &serde_json::json!({"path":package,"marker_sha256":storage::digest(b"marker")}),
+    )
+    .unwrap();
+    let check = || {
+        command_json(
+            Operation::InspectIsolated,
+            &bytes,
+            fixture.root.join("missing-config"),
+        )
+    };
+    assert_eq!(check()["status"], "unavailable");
+    fs::create_dir(package.join("isolated-backup.json")).unwrap();
+    assert_eq!(check()["status"], "unsupported");
+    assert!(fixture.inventory().is_empty());
 }
