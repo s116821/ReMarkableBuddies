@@ -181,6 +181,88 @@ fn strict_stdin_existing_only_and_sealed_qualification_precede_credentials_or_ru
 }
 
 #[test]
+fn active_store_lock_refuses_shared_preference_cli_without_mutation() {
+    fn snapshot(root: &std::path::Path) -> BTreeMap<PathBuf, Option<(usize, String)>> {
+        let mut result = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    result.insert(relative, None);
+                    pending.push(path);
+                } else {
+                    assert!(kind.is_file(), "unexpected fixture entry: {relative:?}");
+                    let bytes = fs::read(path).unwrap();
+                    result.insert(relative, Some((bytes.len(), storage::digest(&bytes))));
+                }
+            }
+        }
+        result
+    }
+
+    let fixture = Fixture::new();
+    // Keep this real Store owner alive across every child; a decoded guard is
+    // not qualification or permission to bypass its exclusive filesystem lock.
+    let (store, group, binding) = fixture.shared();
+    let operation = Uuid::new_v4();
+    let guard = Condition {
+        group,
+        mode_epoch: store.sync_mode_snapshot().unwrap().epoch.unwrap(),
+        binding_sha256: binding,
+        store_generation: serde_json::from_slice(
+            &fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        )
+        .unwrap(),
+        local_config_sha256: storage::digest(&fs::read(fixture.0.join("config.json")).unwrap()),
+        selection: SelectionCondition::Absent {},
+    };
+    guard.validate().unwrap();
+    let patch = json!({"portable_configuration_version":1,"settings":{"personalization":{"text":"PRIVATE BUSY PATCH"}}});
+    let patch_sha256 = Artifact::from_value(patch.clone()).unwrap().sha256();
+    let before = snapshot(&fixture.0);
+    for (selector, input) in [
+        (
+            "inspect",
+            json!({"shared_preferences_version":1,"reveal_text":true}),
+        ),
+        (
+            "edit",
+            json!({"shared_preferences_version":1,"operation":operation,"guard":guard,"patch":patch}),
+        ),
+        (
+            "status",
+            json!({"shared_preferences_version":1,"operation":operation,"guard":guard,"patch_sha256":patch_sha256}),
+        ),
+    ] {
+        // Existing run() checks the real executable's ten-second child bound,
+        // single bounded JSON line, empty stderr and private-sentinel exclusion.
+        let report = fixture.run(selector, &serde_json::to_vec(&input).unwrap());
+        let mut expected = json!({
+            "report_version":1,"operation":selector,"status":"busy",
+            "disposition":"not-dispatched","runtime_activation":"unverified"
+        });
+        if selector != "inspect" {
+            expected["original_operation"] = input["operation"].clone();
+            expected["guard"] = input["guard"].clone();
+            expected["patch_sha256"] = json!(patch_sha256);
+        }
+        assert_eq!(report, expected, "busy {selector} correspondence");
+        assert!(report.get("view").is_none());
+        assert!(report.get("patch").is_none());
+        assert_eq!(
+            snapshot(&fixture.0),
+            before,
+            "busy {selector} mutated fixture"
+        );
+    }
+    drop(store);
+}
+
+#[test]
 fn original_status_is_an_actual_offline_cli_after_mode_and_local_config_change() {
     let fixture = Fixture::new();
     let (store, group, binding) = fixture.shared();
