@@ -193,12 +193,12 @@ impl MarkedQuestion {
     }
 }
 
-pub(super) fn prepare_effect(
+pub(super) fn prepare_effect<'a>(
     shared: Shared,
     binding: &MarkedSourceBinding,
     operation: Uuid,
     region: [i32; 4],
-) -> Option<PreparedMarkedErase<'static>> {
+) -> Option<PreparedMarkedErase<'a>> {
     let before_erase = shared
         .borrow_mut()
         .marked_question
