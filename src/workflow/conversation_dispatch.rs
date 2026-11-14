@@ -1,4 +1,5 @@
 // Typed native image/intent ingress remains an explicit integration gap.
+mod followup_research;
 #[allow(dead_code)]
 pub(crate) mod handwriting;
 use crate::{
@@ -14,6 +15,7 @@ use crate::{
     writer, LLMEngine,
 };
 use anyhow::{ensure, Result};
+pub(crate) use followup_research::FollowupResearch;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,7 +415,8 @@ impl<'a> Dispatch<'a> {
     }
 
     /// The trusted owner supplies the independently observed original source
-    /// separately from the current input visit. Installed ingress is separate.
+    /// separately from the input visit and a deadline-aware, single-request
+    /// answering engine. The observer must refuse revoked input or configuration.
     #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn reader_with_source(
         &mut self,
@@ -424,6 +427,7 @@ impl<'a> Dispatch<'a> {
         admitted: &RequestScope,
         source: SourceDirective,
         original: Option<FollowupSource<'_>>,
+        research: FollowupResearch<'_>,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
     ) -> Result<PendingOutput> {
         self.require_ledger(ledger)?;
@@ -432,6 +436,8 @@ impl<'a> Dispatch<'a> {
             !request.trim().is_empty() && request.len() <= 4096 && !request.contains('\0'),
             "invalid Reader request"
         );
+        research.check(admitted, request)?;
+        let policy = self.config.research_policy_snapshot()?.policy();
         let expected = match &source {
             SourceDirective::Explicit(
                 crate::conversation::receiving::RequestSource::Original { expected, .. },
@@ -451,6 +457,7 @@ impl<'a> Dispatch<'a> {
         let check_visit = || admitted.check_source(&mut **visit.borrow_mut());
         check_visit()?;
         check_source()?;
+        research.check(admitted, request)?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -474,7 +481,8 @@ impl<'a> Dispatch<'a> {
             ledger.append_followup_user(admitted.operation, admitted.root.clone(), user.clone())?;
         let check_retrieval = || {
             check_visit()?;
-            check_source()
+            check_source()?;
+            research.check(admitted, request)
         };
         let retrieval = original.as_ref().map(|original| CheckedFollowupProvider {
             provider: original.provider,
@@ -502,41 +510,40 @@ impl<'a> Dispatch<'a> {
         )?;
         check_visit()?;
         check_source()?;
+        research.check(admitted, request)?;
         let (context, mut evidence) = ledger.persist_followup_evidence(
             writer::stage(admitted.operation, "reader-source-evidence"),
             timestamp,
             prepared,
         )?;
-        let mut attempted = false;
-        let mut submitted = false;
-        let mut check = || {
+        let check = || {
             check_visit()?;
             check_source()?;
+            research.check(admitted, request)?;
             evidence.with_current(ledger, || Ok(()))
         };
-        let mut handoff = |submit: &mut dyn FnMut() -> Result<()>| {
-            if std::mem::replace(&mut attempted, true) {
-                submitted = false;
-                anyhow::bail!("Reader answer already attempted");
-            }
+        let submit = |submit: &mut dyn FnMut() -> Result<()>| {
             check_visit()?;
             check_source()?;
-            evidence.with_current(ledger, submit)?;
-            submitted = true;
-            Ok(())
+            research.check(admitted, request)?;
+            evidence.with_current(ledger, || {
+                research.check(admitted, request)?;
+                submit()
+            })
         };
-        let answer = crate::conversation::receiving::answer::follow_up_with_source(
+        let answer = followup_research::answer(
             ledger,
             engine,
-            &context,
-            &self.config.personalization_snapshot()?,
-            self.memory.as_deref().map(|provider| (provider, timestamp)),
-            &mut check,
-            &mut handoff,
+            context,
+            self.config,
+            self.memory.as_deref(),
+            timestamp,
+            policy,
+            &research,
+            &check,
+            submit,
         )?;
-        ensure!(submitted, "Reader answer bypassed guarded submission");
-        check_visit()?;
-        check_source()?;
+        check()?;
         let draft = Turn {
             id: writer::stage(admitted.operation, "reader-draft"),
             role: Role::Assistant,

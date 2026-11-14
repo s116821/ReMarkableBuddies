@@ -69,13 +69,7 @@ impl LLMEngine for OpenAI {
     }
 
     fn add_image_content(&mut self, base64_image: &str) {
-        self.add_content(json!({
-            "type": "image_url",
-            "image_url": {
-                "url": format!("data:image/png;base64,{}", base64_image),
-                "detail": "high"
-            }
-        }));
+        self.add_content(image_part(base64_image));
     }
 
     fn clear_content(&mut self) {
@@ -107,6 +101,16 @@ impl LLMEngine for OpenAI {
     ) -> Result<String> {
         self.execute_guarded(progress, handoff, Some(deadline))
     }
+}
+
+pub(crate) fn image_part(base64_image: &str) -> JsonValue {
+    json!({
+        "type": "image_url",
+        "image_url": {
+            "url": format!("data:image/png;base64,{}", base64_image),
+            "detail": "high"
+        }
+    })
 }
 
 impl OpenAI {

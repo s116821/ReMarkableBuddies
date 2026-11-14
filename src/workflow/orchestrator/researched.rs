@@ -1,7 +1,7 @@
 //! One admitted selected original-PDF request; ordinary Reader stays unchanged.
 use super::*;
 use crate::conversation::receiving::{
-    answer::{self, AnswerDraft, AnswerOptions, Citation},
+    answer::{self, AnswerOptions},
     memory::{
         research::{
             self,
@@ -313,7 +313,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 },
             )?
         };
-        result.answer = render_references(&draft)?;
+        result.answer = answer::render_references(&draft)?;
         ensure!(
             Self::compose_result(&result).len() <= 32 * 1024,
             "researched Reader answer exceeds bound"
@@ -383,79 +383,6 @@ impl<M: LLMEngine> Orchestrator<M> {
             },
         )
     }
-}
-
-fn render_references(draft: &AnswerDraft) -> Result<String> {
-    let mut references: Vec<_> = draft
-        .citations()
-        .iter()
-        .map(|citation| {
-            let (id, label) = match citation {
-                Citation::Source {
-                    id,
-                    source,
-                    page,
-                    section,
-                    ..
-                } => (
-                    id,
-                    format!(
-                        "Document {}, {}",
-                        source.document,
-                        page.map(|p| format!("page {p}"))
-                            .or_else(|| section.clone())
-                            .context("source location absent")?
-                    ),
-                ),
-                Citation::Memory {
-                    id,
-                    record,
-                    revision,
-                    ..
-                } => (
-                    id,
-                    format!("Memory {record}, revision {revision} (author asserted)"),
-                ),
-                Citation::Research {
-                    id,
-                    title,
-                    url,
-                    basis,
-                    ..
-                } => {
-                    let parsed = reqwest::Url::parse(url)?;
-                    ensure!(
-                        parsed.scheme() == "https" && !title.chars().any(char::is_control),
-                        "research reference cannot be rendered"
-                    );
-                    let provenance = match basis {
-                        research::EvidenceBasis::Synthetic => "synthetic test evidence",
-                        research::EvidenceBasis::ProviderAsserted => {
-                            "provider reported, unverified"
-                        }
-                    };
-                    (id, format!("{title} - {url} ({provenance})"))
-                }
-            };
-            let marker = format!("[{id}]");
-            let offset = draft
-                .text()
-                .find(&marker)
-                .context("citation marker absent")?;
-            Ok((offset, format!("{marker} {label}")))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    references.sort_by_key(|(offset, _)| *offset);
-    let mut text = draft.text().to_owned();
-    if !references.is_empty() {
-        text.push_str("\n\nReferences:\n");
-        for (_, reference) in references {
-            text.push_str(&reference);
-            text.push('\n');
-            ensure!(text.len() <= 30 * 1024, "answer references exceed bound");
-        }
-    }
-    Ok(text)
 }
 
 #[cfg(all(test, feature = "development-resident-bootstrap"))]

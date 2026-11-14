@@ -11,6 +11,34 @@ const ANSWER_ORIGIN: &str = "https://api.openai.com";
 const SEARCH_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 const SEARCH_MODEL: &str = "gpt-5.6-terra";
 
+/// The host names the already qualified search model independently of the
+/// question and answer engine. No credential is read until Required needs it.
+pub(crate) struct OrdinarySearch<'a> {
+    pub(crate) model: &'a str,
+    #[cfg(test)]
+    pub(crate) fixture_endpoint: &'a str,
+}
+
+impl OrdinarySearch<'_> {
+    pub(crate) fn resolve(&self, config: &Config) -> Result<Resolved> {
+        ensure!(
+            self.model == SEARCH_MODEL,
+            "researched Reader search profile is unavailable"
+        );
+        Selection::admit(config, Some(self.model))?.resolve()
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn endpoint<'a>(&self, fixed: &'a str) -> &'a str {
+        fixed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn endpoint(&self, _fixed: &str) -> &str {
+        self.fixture_endpoint
+    }
+}
+
 /// Contains no secret and accepts no environment or command-line overrides.
 pub(crate) struct Selection {
     model: String,

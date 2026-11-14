@@ -1,6 +1,7 @@
 //! Transient ordinary historical data composition, without model/effect admission.
 pub mod research;
 use super::{encoded, Frame, FrozenRequestContext, SourceAssociation, FRAME_BYTES};
+use crate::memory::Provider as _;
 use crate::{memory, storage::Uuid};
 use anyhow::{ensure, Result};
 use serde::Serialize;
@@ -281,6 +282,43 @@ impl FrozenRequestContext {
         budget: CombinedBudget,
         token_count: impl Fn(&str) -> Result<usize>,
     ) -> Result<FrozenSourceMemoryContext> {
+        self.with_memory_inner(input, budget, token_count, false)
+    }
+
+    pub(crate) fn with_followup_memory(
+        self,
+        memory: Option<(&memory::LocalMemory, Uuid)>,
+        store: &crate::storage::Store,
+        now_ms: u64,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenSourceMemoryContext> {
+        let input = if let Some((provider, profile)) = memory {
+            provider.admit_ordinary_writer(store)?;
+            let defaults = memory::Query::new(String::new(), now_ms);
+            MemoryInput::Query {
+                provider,
+                profile,
+                options: MemoryOptions {
+                    now_ms,
+                    current_claims: defaults.current_claims,
+                    max_matches: defaults.max_matches,
+                    max_context_bytes: defaults.max_context_bytes,
+                },
+            }
+        } else {
+            MemoryInput::Disabled
+        };
+        self.with_memory_inner(input, budget, token_count, true)
+    }
+
+    fn with_memory_inner(
+        self,
+        input: MemoryInput<'_>,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+        refuse_empty_partial: bool,
+    ) -> Result<FrozenSourceMemoryContext> {
         ensure!(
             (512..=FRAME_BYTES).contains(&budget.max_encoded_bytes) && budget.max_tokens > 0,
             CompositionRefusal::InvalidBudget
@@ -330,6 +368,12 @@ impl FrozenRequestContext {
                 .query(&query)
                 .map_err(|_| CompositionRefusal::MemoryUnavailable)?;
             validate_result(&result, profile, &query)?;
+            ensure!(
+                !refuse_empty_partial
+                    || result.status != memory::Status::Partial
+                    || !result.context.facts.is_empty(),
+                CompositionRefusal::MemoryUnavailable
+            );
             MemoryReport {
                 profile: Some(profile),
                 query: Some(query),

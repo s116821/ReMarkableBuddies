@@ -164,13 +164,94 @@ mod tests {
     use super::*;
     use crate::{
         conversation::{
-            receiving::{ReceivingBudget, RequestSource, SourceAssociation},
+            receiving::{
+                memory::research::{ResearchDirective, ResearchPolicy},
+                ReceivingBudget, RequestSource, SourceAssociation,
+            },
             resolution::SourceDirective,
         },
         retrieval::{Index, IndexKey, Provider, Retrieved, SourceFormat, SourceUnit},
-        workflow::conversation_dispatch::FollowupSource,
+        workflow::conversation_dispatch::{FollowupResearch, FollowupSource},
     };
-    use std::{cell::Cell, sync::Arc};
+    use std::{
+        cell::Cell,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    fn use_saved_policy<'a>(scope: &'a RequestScope, question: &str) -> FollowupResearch<'a> {
+        FollowupResearch::new(
+            scope,
+            question,
+            ResearchDirective::UsePolicy,
+            None,
+            Instant::now() + Duration::from_secs(15),
+        )
+    }
+
+    fn followup_payload(parts: &[String]) -> Result<Value> {
+        let researched: Value = serde_json::from_str(&parts[1])?;
+        Ok(researched["context"]["request_context"].clone())
+    }
+
+    fn research_response(listener: &std::net::TcpListener, succeed: bool) -> Result<Value> {
+        use std::io::{Read, Write};
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    ensure!(Instant::now() < deadline, "missing loopback search");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            ensure!(headers.len() < 16 * 1024, "loopback header bound");
+            let mut byte = [0];
+            stream.read_exact(&mut byte)?;
+            headers.push(byte[0]);
+        }
+        let headers = std::str::from_utf8(&headers)?;
+        ensure!(headers.starts_with("POST /v1/responses HTTP/1.1"));
+        let size: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then_some(value.trim())
+            })
+            .expect("loopback Content-Length")
+            .parse()?;
+        ensure!(size <= 1024 * 1024, "loopback request bound");
+        let mut bytes = vec![0; size];
+        stream.read_exact(&mut bytes)?;
+        let request = serde_json::from_slice(&bytes)?;
+        if !succeed {
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+            return Ok(request);
+        }
+        let url = "https://example.org/pressure";
+        let selection = json!({"sources":[{"url":url,"title":"Pressure reference","excerpt":"Pressure changes under load."}]});
+        let body = json!({
+            "status":"completed",
+            "output":[
+                {"type":"web_search_call", "status":"completed", "action":{
+                    "type":"search","queries":["pressure compensation"],"sources":[{"type":"url","url":url}]
+                }},
+                {"type":"message","role":"assistant","status":"completed","content":[
+                    {"type":"output_text","text":selection.to_string()}
+                ]}
+            ]
+        }).to_string();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body)?;
+        Ok(request)
+    }
 
     struct FollowupIndex<'a> {
         original: Index,
@@ -200,10 +281,14 @@ mod tests {
     struct FollowupModel {
         model: Model,
         submits: usize,
+        structured_reply: bool,
         before_submission: Option<Box<dyn FnOnce() -> Result<()>>>,
     }
 
     impl LLMEngine for FollowupModel {
+        fn guarded_timeout(&self) -> Option<Duration> {
+            Some(Duration::from_millis(5))
+        }
         fn clear_content(&mut self) {
             self.model.clear_content();
         }
@@ -230,7 +315,11 @@ mod tests {
                 Ok(())
             })?;
             progress()?;
-            self.model.execute()
+            let reply = self.model.execute()?;
+            if self.structured_reply {
+                return Ok(reply);
+            }
+            Ok(json!({"status": "answered", "text": reply, "citations": []}).to_string())
         }
     }
 
@@ -282,6 +371,458 @@ mod tests {
             },
             BTreeMap::from([(sha256, bytes)]),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_reader_followup_research_uses_the_owned_frozen_context() -> Result<()> {
+        use crate::{config::researched_reader::OrdinarySearch, memory};
+        use memory::Provider as _;
+        use std::net::TcpListener;
+
+        const QUESTION: &str = "Pressure compensation?";
+        const OFFLINE: &str = "Pressure compensation? Do not use the internet.";
+        const SEARCH: &str = "gpt-5.6-terra";
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open()?;
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let original = fixture_source(Uuid::new_v4());
+        let buddy = fixture_source(Uuid::new_v4());
+        let (capture, images) = seed(
+            &ledger,
+            conversation,
+            &original,
+            include_bytes!("../../../docs/validation/images/selected-memory/source-page.png")
+                .to_vec(),
+        )?;
+        let index = FollowupIndex {
+            original: pdf_index(
+                original.document,
+                b"researched modeled PDF",
+                "pdf-fixture-v1",
+            )?,
+            calls: Cell::new(0),
+            after_query: None,
+        };
+        let key = index.original.key().clone();
+        let choice = RequestSource::Original {
+            origin_turn: capture.turn,
+            source_record: capture.id,
+            expected: key.clone(),
+        };
+        let original_operation = Uuid::new_v4();
+        let evidence = ledger.prepare_request_evidence(
+            conversation,
+            capture.turn,
+            None,
+            choice,
+            ReceivingBudget {
+                context: crate::conversation::ContextBudget {
+                    max_text_bytes: 16 * 1024,
+                    max_turns: 64,
+                    provider_token_limit: Some(96 * 1024),
+                },
+                max_encoded_bytes: 96 * 1024,
+                max_passages: 8,
+                max_passage_bytes: 16 * 1024,
+                neighbors: false,
+            },
+            Some(&index.original),
+            |text| Ok(text.len()),
+        )?;
+        let original_request = evidence.context().request().clone();
+        ledger.persist_request_evidence(original_operation, 1, &evidence)?;
+
+        let mut config = Config {
+            paths: ledger.store().paths.clone(),
+            model_credential: Some("fixture_key".into()),
+            ..Config::default()
+        };
+        let profile = Uuid::new_v4();
+        config.memory.enabled = true;
+        config.memory.profile = Some(profile);
+        let credentials = &config.paths.credentials;
+        std::fs::create_dir_all(credentials)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(credentials, std::fs::Permissions::from_mode(0o700))?;
+        }
+        crate::storage::files::atomic(&credentials.join("fixture_key"), b"fixture-secret")?;
+        let mut dispatch = Dispatch::local(&config, &ledger)?;
+        let local_memory = dispatch.local_memory().unwrap();
+        let fact = Uuid::new_v4();
+        local_memory.put(memory::Mutation {
+            operation: Uuid::new_v4(),
+            expected: Default::default(),
+            fact: memory::Fact {
+                key: memory::Key {
+                    profile,
+                    scope: memory::Scope::Document {
+                        document: original.document,
+                    },
+                    fact,
+                },
+                claim: "pressure compensation".into(),
+                value: "Historical pressure offset".into(),
+                subject: "pressure compensation".into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Modeled Reader research".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 9000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })?;
+
+        let run = |dispatch: &mut Dispatch<'_>,
+                   model: &mut FollowupModel,
+                   admitted: &RequestScope,
+                   question: &str,
+                   research: FollowupResearch<'_>,
+                   check: Arc<dyn Fn() -> Result<()> + Send + Sync>| {
+            dispatch.reader_with_source(
+                &ledger,
+                model,
+                question,
+                None,
+                admitted,
+                SourceDirective::Inherit {
+                    request_turn: capture.turn,
+                    operation: Some(original_operation),
+                    expected: Some(key.clone()),
+                },
+                Some(FollowupSource {
+                    key: key.clone(),
+                    provider: &index,
+                    check,
+                }),
+                research,
+                &mut || Ok(buddy.clone()),
+            )
+        };
+        let mut model = FollowupModel {
+            structured_reply: true,
+            ..Default::default()
+        };
+        model.model.replies.push_back(json!({
+            "status":"answered","text":"Pressure evidence [S1] [M1] [R1].","citations":["S1","M1","R1"]
+        }).to_string());
+        let mut answered = None;
+        for (case, search_ok, should_answer, drift) in [
+            ("required success", true, true, false),
+            ("failed search", false, false, false),
+            ("source drift at answer handoff", true, false, true),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            listener.set_nonblocking(true)?;
+            let endpoint = format!("http://{}/v1/responses", listener.local_addr()?);
+            let admitted = scope(&ledger, conversation, &buddy)?;
+            let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            if drift {
+                let valid = valid.clone();
+                model.before_submission = Some(Box::new(move || {
+                    valid.store(false, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }));
+            }
+            let research = FollowupResearch::new(
+                &admitted,
+                QUESTION,
+                ResearchDirective::UsePolicy,
+                Some(OrdinarySearch {
+                    model: SEARCH,
+                    fixture_endpoint: &endpoint,
+                }),
+                Instant::now() + Duration::from_secs(15),
+            );
+            let (result, web_request) = std::thread::scope(|thread| {
+                let witness = &listener;
+                let peer = thread.spawn(move || research_response(witness, search_ok));
+                let result = run(
+                    &mut dispatch,
+                    &mut model,
+                    &admitted,
+                    QUESTION,
+                    research,
+                    Arc::new(move || {
+                        ensure!(
+                            valid.load(std::sync::atomic::Ordering::SeqCst),
+                            "modeled source drift"
+                        );
+                        Ok(())
+                    }),
+                );
+                (result, peer.join().expect("loopback search peer panicked"))
+            });
+            let web_request = web_request?;
+            ensure!(
+                web_request["model"] == SEARCH
+                    && web_request["tool_choice"] == "required"
+                    && web_request["store"] == false
+            );
+            let content = &web_request["input"][0]["content"];
+            assert_eq!(content.as_array().unwrap().len(), 1);
+            assert_eq!(content[0]["type"], "input_text");
+            let search_frame: Value = serde_json::from_str(content[0]["text"].as_str().unwrap())?;
+            assert_eq!(
+                result.is_ok(),
+                should_answer,
+                "{case}: {:?}",
+                result.as_ref().err()
+            );
+            if drift {
+                assert_eq!(result.err().unwrap().to_string(), "modeled source drift");
+            }
+            if should_answer {
+                answered = Some((admitted.operation, search_frame));
+            }
+            assert_eq!(
+                ledger
+                    .store()
+                    .value(
+                        Namespace::Conversation,
+                        writer::stage(admitted.operation, "reader-draft")
+                    )?
+                    .is_some(),
+                should_answer,
+                "{case}"
+            );
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let queries = index.calls.get();
+            let memory_queries = local_memory.query_count();
+            let submissions = model.submits;
+            let repeat = FollowupResearch::new(
+                &admitted,
+                QUESTION,
+                ResearchDirective::UsePolicy,
+                Some(OrdinarySearch {
+                    model: SEARCH,
+                    fixture_endpoint: &endpoint,
+                }),
+                Instant::now() + Duration::from_secs(15),
+            );
+            assert!(
+                run(
+                    &mut dispatch,
+                    &mut model,
+                    &admitted,
+                    QUESTION,
+                    repeat,
+                    Arc::new(|| Ok(())),
+                )
+                .is_err(),
+                "{case} replay"
+            );
+            assert_eq!(index.calls.get(), queries);
+            assert_eq!(local_memory.query_count(), memory_queries);
+            assert_eq!(model.submits, submissions);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+        assert_eq!(model.submits, 1);
+        assert_eq!(index.calls.get(), 3);
+        assert_eq!(local_memory.query_count(), 3);
+        let (answered, search_frame) = answered.unwrap();
+        let (parts, attached) = &model.model.seen[0];
+        let frame: Value = serde_json::from_str(&parts[1])?;
+        assert_eq!(frame["context"], search_frame);
+        assert_eq!(
+            frame["context"]["request_context"]["request"]["text"],
+            QUESTION
+        );
+        assert_eq!(
+            frame["context"]["request_context"]["history"],
+            json!([original_request])
+        );
+        assert_eq!(
+            frame["context"]["request_context"]["source"]["source_record"]["record"]["id"],
+            json!(capture.id)
+        );
+        assert_eq!(
+            frame["context"]["memory"]["query"]["document"],
+            json!(original.document)
+        );
+        assert!(parts[1].contains("Historical pressure offset"));
+        assert_eq!(frame["research"]["basis"], "provider-asserted");
+        let associations: Value = serde_json::from_str(parts.last().unwrap())?;
+        assert_eq!(
+            associations["historical_images"].as_array().unwrap().len(),
+            images.len()
+        );
+        assert_eq!(
+            *attached,
+            images
+                .iter()
+                .map(|image| STANDARD.encode(image))
+                .collect::<Vec<_>>()
+        );
+        let draft = ledger
+            .store()
+            .value(
+                Namespace::Conversation,
+                writer::stage(answered, "reader-draft"),
+            )?
+            .unwrap();
+        let Record::Turn(turn) = Ledger::decode(&draft)? else {
+            anyhow::bail!("fixture Reader draft kind");
+        };
+        assert_eq!(turn.outcome, Outcome::Generated);
+        let text = turn.text.unwrap();
+        assert!(text.contains(&format!("[S1] Document {}, page 3", original.document)));
+        assert!(text.contains("[M1] Memory ") && text.contains("(author asserted)"));
+        assert!(text.contains("[R1] Pressure reference - https://example.org/pressure (provider reported, unverified)"));
+
+        drop(dispatch);
+        drop(local_memory);
+        config.model_credential = None;
+        let mut disabled = config.clone();
+        disabled.research_policy = Some(Some(ResearchPolicy::Disabled));
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr()?);
+        let mismatched = scope(&ledger, conversation, &buddy)?;
+        let mut dispatch = Dispatch::local(&config, &ledger)?;
+        let intent = FollowupResearch::new(
+            &mismatched,
+            OFFLINE,
+            ResearchDirective::NoInternet,
+            None,
+            Instant::now() + Duration::from_secs(15),
+        );
+        let error = run(
+            &mut dispatch,
+            &mut model,
+            &mismatched,
+            QUESTION,
+            intent,
+            Arc::new(|| Ok(())),
+        )
+        .err()
+        .expect("mismatched intent");
+        assert_eq!(
+            error.to_string(),
+            "Reader research intent does not match the current question"
+        );
+        let user = writer::stage(mismatched.operation, "reader-user");
+        assert!(ledger
+            .store()
+            .value(Namespace::Conversation, user)?
+            .is_none());
+        assert_eq!(index.calls.get(), 3);
+        assert_eq!(model.submits, 1);
+        for (case, settings, directive, question, search, expected) in [
+            (
+                "no internet",
+                &config,
+                ResearchDirective::NoInternet,
+                OFFLINE,
+                None,
+                Some("request-no-internet"),
+            ),
+            (
+                "saved disabled",
+                &disabled,
+                ResearchDirective::UsePolicy,
+                QUESTION,
+                Some(SEARCH),
+                Some("configured-disabled"),
+            ),
+            (
+                "missing required",
+                &config,
+                ResearchDirective::UsePolicy,
+                QUESTION,
+                None,
+                None,
+            ),
+            (
+                "unqualified required",
+                &config,
+                ResearchDirective::UsePolicy,
+                QUESTION,
+                Some("unqualified"),
+                None,
+            ),
+            (
+                "invalid citation",
+                &disabled,
+                ResearchDirective::UsePolicy,
+                QUESTION,
+                None,
+                None,
+            ),
+        ] {
+            let mut dispatch = Dispatch::local(settings, &ledger)?;
+            let admitted = scope(&ledger, conversation, &buddy)?;
+            let research = FollowupResearch::new(
+                &admitted,
+                question,
+                directive,
+                search.map(|model| OrdinarySearch {
+                    model,
+                    fixture_endpoint: &endpoint,
+                }),
+                Instant::now() + Duration::from_secs(15),
+            );
+            let submits = model.submits;
+            let adapter = expected.is_some() || case == "invalid citation";
+            if adapter {
+                let (text, citations) = if case == "invalid citation" {
+                    ("Invented [R1]", vec!["R1"])
+                } else {
+                    ("Offline answer", vec![])
+                };
+                model.model.replies.push_back(
+                    json!({"status":"answered","text":text,"citations":citations}).to_string(),
+                );
+            }
+            let result = run(
+                &mut dispatch,
+                &mut model,
+                &admitted,
+                question,
+                research,
+                Arc::new(|| Ok(())),
+            );
+            assert_eq!(result.is_ok(), expected.is_some(), "{case}");
+            assert_eq!(model.submits, submits + usize::from(adapter), "{case}");
+            assert_eq!(
+                ledger
+                    .store()
+                    .value(
+                        Namespace::Conversation,
+                        writer::stage(admitted.operation, "reader-draft")
+                    )?
+                    .is_some(),
+                expected.is_some(),
+                "{case}"
+            );
+            if let Some(expected) = expected {
+                let frame: Value = serde_json::from_str(&model.model.seen.last().unwrap().0[1])?;
+                assert_eq!(frame["research"]["disabled_reason"], expected);
+                assert_eq!(
+                    frame["context"]["request_context"]["request"]["text"],
+                    question
+                );
+            }
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "{case}"
+            );
+        }
         Ok(())
     }
 
@@ -374,7 +915,10 @@ mod tests {
         assert_ne!(&key, original_index.key());
         assert_eq!(key.source_sha256, original_index.key().source_sha256);
 
-        let config = Config::default();
+        let config = Config {
+            research_policy: Some(Some(ResearchPolicy::Disabled)),
+            ..Config::default()
+        };
         let mut dispatch = Dispatch::local(&config, &ledger)?;
         let mut model = FollowupModel::default();
         model
@@ -409,18 +953,21 @@ mod tests {
                 provider: &index,
                 check: check.clone(),
             }),
+            use_saved_policy(&admitted, question),
             &mut || Ok(buddy.clone()),
         )?;
         assert_ne!(buddy.document, original.document);
         assert_eq!(index.calls.get(), 1);
         assert_eq!(model.submits, 1);
         let (parts, attached) = &model.model.seen[0];
-        let payload: Value =
-            serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
-        assert_eq!(payload["request"], question);
+        let payload = followup_payload(parts)?;
+        assert_eq!(payload["request"]["text"], question);
         assert_eq!(payload["history"], json!([old_request]));
         assert_eq!(payload["source"]["origin_turn"], json!(capture.turn));
-        assert_eq!(payload["source"]["source_record"], json!(capture.id));
+        assert_eq!(
+            payload["source"]["source_record"]["record"]["id"],
+            json!(capture.id)
+        );
         assert_eq!(payload["source"]["expected"], json!(key));
         let passages = payload["retrieval"]["passages"].as_array().unwrap();
         assert_eq!(passages.len(), 1);
@@ -479,6 +1026,7 @@ mod tests {
                 provider: &changed,
                 check: check.clone(),
             }),
+            use_saved_policy(&changed_scope, question),
             &mut || Ok(buddy.clone()),
         );
         assert_eq!(
@@ -512,6 +1060,7 @@ mod tests {
                 provider: &index,
                 check,
             }),
+            use_saved_policy(&stale_scope, question),
             &mut || Ok(buddy.clone()),
         );
         assert_eq!(
@@ -579,7 +1128,10 @@ mod tests {
         );
         ledger.persist_request_evidence(old_operation, 1, &evidence)?;
 
-        let mut config = Config::default();
+        let mut config = Config {
+            research_policy: Some(Some(ResearchPolicy::Disabled)),
+            ..Config::default()
+        };
         config.memory.enabled = true;
         let profile = Uuid::new_v4();
         config.memory.profile = Some(profile);
@@ -694,16 +1246,19 @@ mod tests {
                     provider: &same,
                     check: Arc::new(|| Ok(())),
                 }),
+                use_saved_policy(&admitted, question),
                 &mut || Ok(buddy.clone()),
             )?;
             let (parts, attached) = model.model.seen.last().unwrap();
-            let payload: Value =
-                serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
-            assert_eq!(payload["request"], question);
+            let payload = followup_payload(parts)?;
+            assert_eq!(payload["request"]["text"], question);
             assert_eq!(payload["history"], json!(expected_history));
             assert_eq!(payload["selection"], json!(range));
             assert_eq!(payload["source"]["origin_turn"], json!(capture.turn));
-            assert_eq!(payload["source"]["source_record"], json!(capture.id));
+            assert_eq!(
+                payload["source"]["source_record"]["record"]["id"],
+                json!(capture.id)
+            );
             if range.is_some() {
                 assert!(!expected_history.iter().any(|turn| turn.id == capture.turn));
                 assert_eq!(payload["history"][0]["text"], "Trajectory calibration?");
@@ -822,6 +1377,7 @@ mod tests {
                     provider: &changed,
                     check: Arc::new(|| Ok(()))
                 }),
+                use_saved_policy(&admitted, "Pressure again?"),
                 &mut || Ok(buddy.clone())
             )
             .is_err());
@@ -842,13 +1398,13 @@ mod tests {
                 &admitted,
                 source_less,
                 None,
+                use_saved_policy(&admitted, question),
                 &mut || Ok(buddy.clone()),
             )?;
             let (parts, _) = model.model.seen.last().unwrap();
-            let payload: Value =
-                serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
+            let payload = followup_payload(parts)?;
             let no_document = serde_json::to_value(SourceAssociation::NoDocument)?;
-            assert_eq!(payload["request"], question);
+            assert_eq!(payload["request"]["text"], question);
             assert_eq!(payload["source"], no_document);
             assert!(payload["retrieval"].is_null());
             assert!(parts
@@ -909,11 +1465,11 @@ mod tests {
                 provider: &index,
                 check: Arc::new(|| Ok(())),
             }),
+            use_saved_policy(&admitted, "Pressure compensation?"),
             &mut || Ok(buddy.clone()),
         )?;
         let (parts, _) = model.model.seen.last().unwrap();
-        let payload: Value =
-            serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
+        let payload = followup_payload(parts)?;
         assert_eq!(
             payload["source"]["expected"]["document"],
             json!(replacement.document)
@@ -952,16 +1508,19 @@ mod tests {
                     Ok(())
                 }),
             }),
+            use_saved_policy(&admitted, "Zygomorphic?"),
             &mut || Ok(buddy.clone()),
         )?;
         assert_eq!(same.calls.get(), query_count + 1);
         assert_eq!(model.submits, 6);
         let (parts, _) = model.model.seen.last().unwrap();
-        let payload: Value =
-            serde_json::from_str(parts.iter().find(|part| part.starts_with('{')).unwrap())?;
+        let payload = followup_payload(parts)?;
         assert_eq!(payload["source"]["kind"], "original");
         assert_eq!(payload["source"]["origin_turn"], json!(capture.turn));
-        assert_eq!(payload["source"]["source_record"], json!(capture.id));
+        assert_eq!(
+            payload["source"]["source_record"]["record"]["id"],
+            json!(capture.id)
+        );
         assert_eq!(payload["retrieval"]["source"], json!(key));
         assert_eq!(payload["retrieval"]["passages"], json!([]));
         assert_eq!(payload["retrieval"]["budget_limited"], false);
@@ -1034,6 +1593,7 @@ mod tests {
                     provider: &same,
                     check: Arc::new(|| Ok(()))
                 }),
+                use_saved_policy(&admitted, "Pressure again?"),
                 &mut || Ok(buddy.clone())
             )
             .is_err());
@@ -1066,6 +1626,7 @@ mod tests {
                         provider: &uncertain,
                         check: Arc::new(|| Ok(()))
                     }),
+                    use_saved_policy(&admitted, "Pressure compensation?"),
                     &mut || Ok(buddy.clone())
                 )
                 .is_err());
@@ -1116,6 +1677,7 @@ mod tests {
                         Ok(())
                     }),
                 }),
+                use_saved_policy(&admitted, "Pressure compensation?"),
                 &mut || Ok(buddy.clone())
             )
             .is_err());
@@ -1154,6 +1716,7 @@ mod tests {
                         Ok(())
                     }),
                 }),
+                use_saved_policy(&admitted, "Pressure compensation?"),
                 &mut || Ok(buddy.clone()),
             )
             .is_err());
@@ -1214,6 +1777,7 @@ mod tests {
                     provider: &stale,
                     check: Arc::new(|| Ok(()))
                 }),
+                use_saved_policy(&admitted, "Pressure compensation?"),
                 &mut || Ok(buddy.clone()),
             )
             .is_err());
@@ -1253,6 +1817,7 @@ mod tests {
                 provider: &same,
                 check: Arc::new(|| Ok(())),
             }),
+            use_saved_policy(&admitted, "Pressure compensation?"),
             &mut || Ok(buddy.clone()),
         );
         assert_eq!(
@@ -1299,6 +1864,7 @@ mod tests {
                     provider: &same,
                     check: Arc::new(|| Ok(()))
                 }),
+                use_saved_policy(&admitted, "Pressure compensation?"),
                 &mut || Ok(buddy.clone()),
             )
             .is_err());
