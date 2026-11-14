@@ -31,6 +31,7 @@ pub enum Namespace {
     SubjectMemory,
     Handwriting,
     UnassociatedFeedback,
+    PortableConfiguration,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,6 +98,19 @@ impl Envelope {
                             Some("notebook-plan" | "notebook-stage")
                         ),
                         _ => false,
+                    })
+                || (self.domain_schema_version == 4
+                    && self.kind == Kind::Value
+                    && match self.namespace {
+                        Namespace::Source => matches!(
+                            self.payload["record_kind"].as_str(),
+                            Some("source-target" | "region-source")
+                        ),
+                        Namespace::Conversation => matches!(
+                            self.payload["record_kind"].as_str(),
+                            Some("target-use" | "target-state")
+                        ),
+                        _ => false,
                     }),
             "unsupported domain schema version for namespace"
         );
@@ -119,6 +133,14 @@ impl Envelope {
             self.media_descriptors.len() <= MAX_ITEMS,
             "too many media descriptors"
         );
+        if self.namespace == Namespace::PortableConfiguration {
+            ensure!(
+                self.domain_schema_version == 1
+                    && self.kind == Kind::Value
+                    && self.media_descriptors.is_empty(),
+                "unsupported portable configuration envelope"
+            );
+        }
         let mut seen = BTreeSet::new();
         for media in &self.media_descriptors {
             media.validate()?;

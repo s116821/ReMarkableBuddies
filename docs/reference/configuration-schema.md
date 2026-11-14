@@ -13,12 +13,12 @@ not a new runtime configuration or storage version. Runtime `config_schema_versi
 remains1. Legacy storage contracts 1/2/3 and their capabilities remain unchanged.
 No separate installed schema file, running query service or schema engine is needed.
 
-The root object has fourteen supported properties: config_schema_version, model,
+The root object has fifteen supported properties: config_schema_version, model,
 base_url, trigger_corner, log_level, debug_dump, model_credential, paths, sync,
-memory, reader, personalization, research_policy and product_settings. Unknown properties
+memory, reader, personalization, research_policy, product_settings and handwriting. Unknown properties
 refuse. Whole objects may be omitted where Config supplies defaults; a present
 paths object still requires data, cache and credentials. Ordinary optional values
-and research/product parents accept null, while paths/sync/memory/reader/personalization
+and research/product parents accept null, while paths/sync/memory/reader/personalization/handwriting
 parents do not. Product settings accept null/empty/version-only/partial parents,
 with true/true/mem effective defaults and non-null declared leaves. Defaults are
 annotations only: consumers must not insert them as new saved choices.
@@ -52,3 +52,23 @@ It validates the meta-schema, checks expected structural outcomes and proves tha
 defaults do not mutate inputs. Rust separately checks original corpus bytes through
 the typed saved inspector, including deliberately different parser/semantic results.
 The development checker is not a runtime dependency or an installer.
+
+
+The optional handwriting object defaults to `{"enabled":false,"profile":null}`.
+Enabled use requires a canonical nonnil active profile. Ordinary local runtime and
+the admitted shared Reader path support it. Legacy sync refuses it. A selected
+Reader uses the explicitly declared profile after shared Store and Reader admission.
+Disabled/unset keeps existing recognition
+payloads. Runtime selection prefers current user-confirmed revisions by asserted
+confirmation/update time, checking at most16 candidates for at most3 examples.
+Caller clock skew is a limitation, not freshness authority. The setting is captured
+at startup; saved inspection reports only enabled/profile presence and never proves
+live activation. Existing portable-settings allowlists exclude this active profile.
+
+Enabled recognition sends the selected original PNGs and original/corrected text
+to the configured recognition provider alongside the target.
+
+Reader uses one captured example context in its existing analysis and independent
+verification. Writer's typed retained-source receiving adapter normalizes before
+note generation; native image ingress and explicit confirmation-intent attachment
+remain unfinished. Ordinary Refine/cancel/erasure never creates a correction.

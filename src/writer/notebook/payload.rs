@@ -36,7 +36,7 @@ pub struct NotebookMapOutput {
 pub struct FrozenNotebookPayloads {
     pub(crate) plan: NotebookPlan,
     maps: Vec<Vec<String>>,
-    memory: Option<crate::memory::receiving::OrdinarySnapshot>,
+    memory: Option<String>,
     base: Value,
     preference: Option<String>,
     pub(super) reducer_images: crate::conversation::receiving::images::Images,
@@ -68,6 +68,25 @@ impl FrozenNotebookPayloads {
         context: PayloadContext<'_>,
         reducer_images: crate::conversation::receiving::images::Images,
         memory: Option<crate::memory::receiving::OrdinarySnapshot>,
+    ) -> Result<Self> {
+        Self::new_with_memory_part(
+            source,
+            archive,
+            context,
+            reducer_images,
+            memory
+                .as_ref()
+                .and_then(|snapshot| snapshot.part())
+                .map(str::to_owned),
+        )
+    }
+
+    pub(super) fn new_with_memory_part(
+        source: &ValidatedNotebook,
+        archive: &ArchivedNormalizedSource,
+        context: PayloadContext<'_>,
+        reducer_images: crate::conversation::receiving::images::Images,
+        memory: Option<String>,
     ) -> Result<Self> {
         archive.validate_bytes(source.canonical_bytes())?;
         ensure!(
@@ -223,7 +242,7 @@ impl FrozenNotebookPayloads {
                 .collect::<Vec<_>>());
         }
         let mut parts = Self::parts(REDUCE_INSTRUCTION, self.preference.as_deref(), &payload)?;
-        if let Some(part) = self.memory.as_ref().and_then(|snapshot| snapshot.part()) {
+        if let Some(part) = self.memory.as_deref() {
             parts.push(part.to_owned());
         }
         Ok(parts)

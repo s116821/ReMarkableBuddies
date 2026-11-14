@@ -4,7 +4,19 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::assert_selected_policy_boundaries;
 mod reader_attempt;
+#[cfg(target_os = "linux")]
+pub(crate) use reader_attempt::ResearchContext;
+// The researched receiver joins parsed readings to its own selected admission.
+#[allow(dead_code)]
+mod reader_intent;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
 pub mod resident_output;
@@ -14,11 +26,24 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+#[doc(hidden)]
+pub use resident_source::original_pdf::development_original_pdf;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::fresh_receiver_fixture;
+
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod selected_buddy;
+#[cfg(target_os = "linux")]
+pub(crate) mod selected_resident_reader;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
 #[cfg(test)]
@@ -98,6 +123,15 @@ impl Workflow {
             Box::new(selected_backend::RefusingBackend::new()),
         );
         Self::with_selected(facade, debug_dump)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_owned_reader_fixture(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+    ) -> Self {
+        let mut workflow = Self::selected_runtime(admission, false);
+        workflow.device = Box::new(selected_backend::RefusingBackend::with_owned_fixture());
+        workflow
     }
     pub fn new(
         no_draw: bool,
@@ -234,7 +268,7 @@ impl Workflow {
                 .as_mut()
                 .context("resident health owner absent")?;
             let corner = self.device.configure_installed_resident_output(pin)?;
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }
@@ -257,7 +291,7 @@ impl Workflow {
             .context("development output requires the supervised health owner")?;
         owner.require_development_output(plan)?;
         if let Some(corner) = self.device.configure_development_resident_output(plan)? {
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }

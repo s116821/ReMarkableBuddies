@@ -1,8 +1,8 @@
 //! Canonical in-process selected admission. This is not native qualification.
-use super::{IntentRecordRef, Ledger, Receipt, Record, SelectedDomainProjection};
+use super::{ContextPurpose, IntentRecordRef, Ledger, Receipt, Record, SelectedDomainProjection};
 use crate::storage::selection::{
-    SelectedSnapshot, SelectionChange, SelectionMutation, SelectionPublication, SelectionScope,
-    SelectionToken, SelectionTransaction,
+    SelectedReadBudget, SelectedSnapshot, SelectionChange, SelectionMutation, SelectionPublication,
+    SelectionScope, SelectionToken, SelectionTransaction,
 };
 use crate::storage::{Envelope, Namespace, Store, Uuid, MAX_ITEMS};
 use anyhow::{ensure, Context, Result};
@@ -98,8 +98,45 @@ impl SelectedAdmission {
         budget: &super::ContextBudget,
         token_count: impl Fn(&[super::Turn]) -> Result<usize>,
     ) -> Result<super::ContextView> {
+        self.context_view(
+            accepted,
+            conversation,
+            selection,
+            budget,
+            token_count,
+            ContextPurpose::Model,
+        )
+    }
+
+    /// Historical read-only Writer presentation, independent of model context.
+    pub fn presentation_context(
+        &self,
+        accepted: &SelectionToken,
+        conversation: Uuid,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+    ) -> Result<super::ContextView> {
+        self.context_view(
+            accepted,
+            conversation,
+            None,
+            budget,
+            token_count,
+            ContextPurpose::Presentation,
+        )
+    }
+
+    fn context_view(
+        &self,
+        accepted: &SelectionToken,
+        conversation: Uuid,
+        selection: Option<super::TurnRange>,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+        purpose: ContextPurpose,
+    ) -> Result<super::ContextView> {
         Ledger::context_token_limit(selection, budget)?;
-        let (records, media) = self.with_current(accepted, |snapshot| {
+        let (records, media, targets) = self.with_current(accepted, |snapshot| {
             let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
             let records = projection.inspect(conversation)?;
             // The selected inventory alone supplies availability; retained media
@@ -111,12 +148,66 @@ impl SelectedAdmission {
                 .iter()
                 .map(|reference| (reference.sha256.clone(), reference.clone()))
                 .collect();
-            Ok((records, media))
+            let uses = records
+                .iter()
+                .filter_map(|r| match r {
+                    Record::TargetUse(used) => Some((**used).clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let targets = projection.target_views(&uses)?;
+            Ok((records, media, targets))
         })?;
-        Ledger::context_from_records(records, selection, budget, token_count, |item| {
-            media
-                .get(&item.sha256)
-                .is_some_and(|reference| reference.bytes == item.bytes)
+        let mut context = Ledger::context_records_for(
+            records,
+            selection,
+            budget,
+            Some(&token_count),
+            |item| {
+                media
+                    .get(&item.sha256)
+                    .is_some_and(|reference| reference.bytes == item.bytes)
+            },
+            purpose,
+        )?;
+        let requested = context
+            .target_uses
+            .iter()
+            .filter_map(|used| used.target.as_ref().map(|r| r.revision))
+            .collect::<std::collections::BTreeSet<_>>();
+        context.targets = targets
+            .into_iter()
+            .filter(|target| requested.contains(&target.reference.revision))
+            .collect();
+        for target in &context.targets {
+            for item in target.media()? {
+                if !media
+                    .get(&item.sha256)
+                    .is_some_and(|reference| reference.bytes == item.bytes)
+                    && !context.missing_media.contains(&item)
+                {
+                    context.missing_media.push(item);
+                }
+            }
+        }
+        Ok(context)
+    }
+
+    pub(crate) fn writer_context_locked(
+        snapshot: &SelectedSnapshot,
+        conversation: Uuid,
+        budget: &super::ContextBudget,
+        token_count: impl Fn(&[super::Turn]) -> Result<usize>,
+    ) -> Result<super::ContextView> {
+        Ledger::context_token_limit(None, budget)?;
+        let records = SelectedDomainProjection::from_snapshot(snapshot)?.inspect(conversation)?;
+        Ledger::context_from_records(records, None, budget, token_count, |item| {
+            snapshot
+                .transaction
+                .selected
+                .media
+                .iter()
+                .any(|reference| reference.sha256 == item.sha256 && reference.bytes == item.bytes)
         })
     }
     /// Return exact historical capture bytes from one current selected closure.
@@ -127,99 +218,132 @@ impl SelectedAdmission {
         capture_id: Uuid,
     ) -> Result<super::SelectedCaptureImages> {
         self.with_current(accepted, |snapshot| {
-            let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
-            let (_, Some(evidence)) = projection
-                .head(Namespace::Source, capture_id)
-                .context("selected capture absent")?
-            else {
-                anyhow::bail!("selected capture unavailable")
-            };
-            let (conversation, turn_id) = match evidence {
-                Record::Capture(c) => (c.conversation, c.turn),
-                Record::LegacyCapture(c) => (c.conversation, c.turn),
-                Record::DevelopmentCapture(c) => (c.conversation, c.turn),
-                Record::ResidentCapture(c) => (c.conversation, c.turn),
-                _ => anyhow::bail!("not selected capture evidence"),
-            };
-            let records = projection.inspect(conversation)?;
-            let turn = records
-                .iter()
-                .find_map(|r| match r {
-                    Record::Turn(t) if t.id == turn_id => Some(t),
-                    _ => None,
-                })
-                .context("selected capture turn absent")?;
-            ensure!(
-                turn.sources.contains(&capture_id),
-                "selected capture link mismatch"
-            );
-            // Combined snapshot handles include retained media; enforce selected
-            // inclusion before taking a handle, then consume that pinned handle.
-            let mut load = |media: &crate::storage::Media| -> Result<Vec<u8>> {
-                let reference = snapshot
-                    .transaction
-                    .selected
-                    .media
-                    .iter()
-                    .find(|r| r.sha256 == media.sha256 && r.bytes == media.bytes)
-                    .context("selected capture media omitted or unavailable")?;
-                let source = snapshot
-                    .media
-                    .get(&reference.sha256)
-                    .context("selected capture media handle absent")?;
-                // File handles are immutable snapshot pins. Clone their file
-                // descriptor to read without looking up CURRENT or object paths.
-                let bytes = match source {
-                    crate::storage::files::Source::Memory(bytes) => (*bytes).clone(),
-                    crate::storage::files::Source::File { file, .. } => {
-                        use std::io::{Read, Seek, SeekFrom};
-                        let mut pinned = file.try_clone()?;
-                        pinned.seek(SeekFrom::Start(0))?;
-                        let mut bytes = Vec::new();
-                        pinned.take(reference.bytes + 1).read_to_end(&mut bytes)?;
-                        bytes
-                    }
-                };
-                ensure!(
-                    bytes.len() as u64 == reference.bytes
-                        && crate::storage::digest(&bytes) == reference.sha256,
-                    "selected capture media integrity mismatch"
-                );
-                Ok(bytes)
-            };
-            match evidence {
-                Record::Capture(c) => {
-                    ensure!(
-                        turn.role == super::Role::User
-                            && matches!(
-                                turn.outcome,
-                                super::Outcome::Prepared | super::Outcome::Interpreted
-                            ),
-                        "capture request is unavailable or terminal"
-                    );
-                    Ok(super::SelectedCaptureImages::Sdk(
-                        Ledger::sdk_images_from_evidence((**c).clone(), &mut load)?,
-                    ))
-                }
-                Record::LegacyCapture(c) => Ok(super::SelectedCaptureImages::Legacy(
-                    Ledger::legacy_images_from_evidence(c.clone(), &mut load)?,
-                )),
-                Record::DevelopmentCapture(c) => {
-                    Ok(super::SelectedCaptureImages::Development(Box::new(
-                        Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
-                    )))
-                }
-                Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
-                    Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
-                ))),
-                _ => unreachable!(),
-            }
+            Self::capture_images_from_snapshot(snapshot, capture_id, None)
         })
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn capture_images_locked(
+        store: &Store,
+        accepted: &SelectionToken,
+        capture_id: Uuid,
+        reads: &mut crate::storage::selection::SelectedReadBudget,
+    ) -> Result<super::SelectedCaptureImages> {
+        let snapshot = store
+            .selected_snapshot_with_budget(accepted.scope(), MAX_ITEMS, reads)?
+            .context("selected Reader capture unavailable")?
+            .snapshot;
+        ensure!(
+            snapshot.token == *accepted,
+            "selected Reader capture changed"
+        );
+        Self::capture_images_from_snapshot(&snapshot, capture_id, Some(reads))
+    }
+
+    fn capture_images_from_snapshot(
+        snapshot: &crate::storage::selection::SelectedSnapshot,
+        capture_id: Uuid,
+        mut reads: Option<&mut crate::storage::selection::SelectedReadBudget>,
+    ) -> Result<super::SelectedCaptureImages> {
+        let projection = SelectedDomainProjection::from_snapshot(snapshot)?;
+        let (_, Some(evidence)) = projection
+            .head(Namespace::Source, capture_id)
+            .context("selected capture absent")?
+        else {
+            anyhow::bail!("selected capture unavailable")
+        };
+        let (conversation, turn_id) = match evidence {
+            Record::Capture(c) => (c.conversation, c.turn),
+            Record::LegacyCapture(c) => (c.conversation, c.turn),
+            Record::DevelopmentCapture(c) => (c.conversation, c.turn),
+            Record::ResidentCapture(c) => (c.conversation, c.turn),
+            _ => anyhow::bail!("not selected capture evidence"),
+        };
+        let records = projection.inspect(conversation)?;
+        let turn = records
+            .iter()
+            .find_map(|r| match r {
+                Record::Turn(t) if t.id == turn_id => Some(t),
+                _ => None,
+            })
+            .context("selected capture turn absent")?;
+        ensure!(
+            turn.sources.contains(&capture_id),
+            "selected capture link mismatch"
+        );
+        // Combined snapshot handles include retained media; enforce selected
+        // inclusion before taking a handle, then consume that pinned handle.
+        let mut load = |media: &crate::storage::Media| -> Result<Vec<u8>> {
+            if let Some(reads) = reads.as_deref_mut() {
+                reads.charge(0, 1, 0, media.bytes)?;
+            }
+            let reference = snapshot
+                .transaction
+                .selected
+                .media
+                .iter()
+                .find(|r| r.sha256 == media.sha256 && r.bytes == media.bytes)
+                .context("selected capture media omitted or unavailable")?;
+            let source = snapshot
+                .media
+                .get(&reference.sha256)
+                .context("selected capture media handle absent")?;
+            // File handles are immutable snapshot pins. Clone their file
+            // descriptor to read without looking up CURRENT or object paths.
+            let bytes = match source {
+                crate::storage::files::Source::Memory(bytes) => (*bytes).clone(),
+                crate::storage::files::Source::File { file, .. } => {
+                    use std::io::{Read, Seek, SeekFrom};
+                    let mut pinned = file.try_clone()?;
+                    pinned.seek(SeekFrom::Start(0))?;
+                    let mut bytes = Vec::new();
+                    pinned.take(reference.bytes + 1).read_to_end(&mut bytes)?;
+                    bytes
+                }
+            };
+            ensure!(
+                bytes.len() as u64 == reference.bytes
+                    && crate::storage::digest(&bytes) == reference.sha256,
+                "selected capture media integrity mismatch"
+            );
+            Ok(bytes)
+        };
+        match evidence {
+            Record::Capture(c) => {
+                ensure!(
+                    turn.role == super::Role::User
+                        && matches!(
+                            turn.outcome,
+                            super::Outcome::Prepared | super::Outcome::Interpreted
+                        ),
+                    "capture request is unavailable or terminal"
+                );
+                Ok(super::SelectedCaptureImages::Sdk(
+                    Ledger::sdk_images_from_evidence((**c).clone(), &mut load)?,
+                ))
+            }
+            Record::LegacyCapture(c) => Ok(super::SelectedCaptureImages::Legacy(
+                Ledger::legacy_images_from_evidence(c.clone(), &mut load)?,
+            )),
+            Record::DevelopmentCapture(c) => {
+                Ok(super::SelectedCaptureImages::Development(Box::new(
+                    Ledger::development_images_from_evidence((**c).clone(), &mut load)?,
+                )))
+            }
+            Record::ResidentCapture(c) => Ok(super::SelectedCaptureImages::Resident(Box::new(
+                Ledger::resident_images_from_evidence((**c).clone(), &mut load)?,
+            ))),
+            _ => unreachable!(),
+        }
     }
     /// Recover the original publication before allocating new preparation IDs.
     /// Replacement membership and lost acknowledgments never refresh authority.
     pub fn recover_original_intent(&self, operation: Uuid) -> Result<Option<HistoricalIntent>> {
-        self.mutate(|store| recover_original(store, &self.scope, operation))
+        // Original receipt custody is readable after departure/replacement.
+        // It returns no live token, readiness witness or dispatch permission.
+        Self::with_gates(&[self], |store| {
+            recover_original(store, &self.scope, operation)
+        })
     }
     pub fn new(store: Arc<Store>, scope: SelectionScope) -> Result<Self> {
         scope.validate()?;
@@ -262,31 +386,82 @@ impl SelectedAdmission {
         accepted: &SelectionToken,
         operation: impl FnOnce(&Store, &SelectedSnapshot) -> Result<T>,
     ) -> Result<T> {
-        let _admission = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
         ensure!(
             accepted.scope() == &self.scope,
             "foreign selected admission scope"
         );
-        let snapshot = self
-            .store
-            .selected_snapshot(&self.scope, MAX_ITEMS)?
-            .context("selected admission absent")?;
-        ensure!(
-            &snapshot.token == accepted,
-            "selected admission replaced or stale"
-        );
-        operation(&self.store, &snapshot)
+        self.with_ready_gates(|store| {
+            let snapshot = store
+                .selected_snapshot(&self.scope, MAX_ITEMS)?
+                .context("selected admission absent")?;
+            ensure!(
+                &snapshot.token == accepted,
+                "selected admission replaced or stale"
+            );
+            operation(store, &snapshot)
+        })
     }
     /// Publication/activation must use the same gate as synchronous handoff.
     pub(super) fn mutate<T>(&self, operation: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
-        let _admission = self
-            .gate
-            .lock()
-            .map_err(|_| anyhow::anyhow!("domain admission unavailable"))?;
-        operation(&self.store)
+        self.with_ready_gates(operation)
+    }
+    pub(super) fn with_ready_gates<T>(
+        &self,
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        Self::with_ready_gate_set(&[self], operation)
+    }
+    pub(crate) fn with_ready_gate_set<T>(
+        admissions: &[&Self],
+        operation: impl FnOnce(&Store) -> Result<T>,
+    ) -> Result<T> {
+        let first = admissions.first().context("empty ready admission set")?;
+        // Mode lifetime precedes the entire ordered domain gate set. Discovery
+        // reads supply only pins; exact mixed registration is checked inside.
+        let _modes = admissions
+            .iter()
+            .map(|a| a.reader_mode_lease())
+            .collect::<Result<Vec<_>>>()?;
+        let mut discoveries = Vec::new();
+        let mut catalogs = Vec::new();
+        for admission in admissions {
+            ensure!(admission.same_store(first), "foreign ready Store");
+            let mixed = match first.store.selected_snapshot(&admission.scope, MAX_ITEMS)? {
+                Some(snapshot) => crate::memory::selected::mixed_identity(&first.store, &snapshot)?
+                    .map(|identities| (snapshot.token, identities)),
+                None => None,
+            };
+            if let Some((_, identities)) = &mixed {
+                for identity in identities {
+                    catalogs.push(Self::new(first.store.clone(), identity.scope()?)?);
+                }
+            }
+            discoveries.push(mixed);
+        }
+        let mut combined = admissions.to_vec();
+        combined.extend(catalogs.iter());
+        Self::with_gates(&combined, |store| {
+            for (admission, discovered) in admissions.iter().zip(&discoveries) {
+                let snapshot = store.selected_snapshot(&admission.scope, MAX_ITEMS)?;
+                let current = match &snapshot {
+                    Some(snapshot) => crate::memory::selected::mixed_identity(store, snapshot)?
+                        .map(|identities| (snapshot.token.clone(), identities)),
+                    None => None,
+                };
+                ensure!(
+                    &current == discovered,
+                    "mixed readiness changed during discovery"
+                );
+                if let Some((_, identities)) = &current {
+                    crate::memory::selected::require_mixed_ready(
+                        store,
+                        snapshot.as_ref().context("mixed selection disappeared")?,
+                        identities,
+                    )?;
+                }
+            }
+            operation(store)
+        })
     }
     pub(crate) fn scope(&self) -> &SelectionScope {
         &self.scope
@@ -296,7 +471,11 @@ impl SelectedAdmission {
         change: SelectionChange,
         objects: BTreeMap<String, Vec<u8>>,
     ) -> Result<SelectionPublication> {
-        self.mutate(|store| store.initialize_selected(&self.scope, change, objects))
+        // Explicit genesis can be staged before its exact local registration.
+        // Product reads/sends remain fenced by with_ready_gates above.
+        Self::with_gates(&[self], |store| {
+            store.initialize_selected(&self.scope, change, objects)
+        })
     }
     pub fn activate(
         &self,
@@ -317,7 +496,17 @@ pub(super) fn recover_original(
     scope: &SelectionScope,
     operation: Uuid,
 ) -> Result<Option<HistoricalIntent>> {
-    let Some(transaction) = store.selected_receipt(scope, operation)? else {
+    recover_original_with_reads(store, scope, operation, None)
+}
+
+pub(super) fn recover_original_with_reads(
+    store: &Store,
+    scope: &SelectionScope,
+    operation: Uuid,
+    mut reads: Option<&mut SelectedReadBudget>,
+) -> Result<Option<HistoricalIntent>> {
+    let Some(transaction) = store.selected_receipt_inner(scope, operation, reads.as_deref_mut())?
+    else {
         return Ok(None);
     };
     ensure!(
@@ -327,12 +516,15 @@ pub(super) fn recover_original(
     let mut envelopes = Vec::new();
     let mut original_objects = BTreeMap::new();
     for reference in &transaction.selected.records {
-        let bytes = store.read_object(reference)?;
+        let bytes = store.read_selected_proof_record(reference, reads.as_deref_mut())?;
         envelopes.push(serde_json::from_slice::<Envelope>(&bytes)?);
         original_objects.insert(reference.sha256.clone(), bytes);
     }
-    let projection =
-        SelectedDomainProjection::from_pinned_records(&envelopes, &transaction.selected.records)?;
+    let projection = SelectedDomainProjection::from_mixed_records(
+        &envelopes,
+        &transaction.selected.records,
+        scope,
+    )?;
     let (envelope, Some(Record::Receipt(receipt))) = projection
         .head(Namespace::Conversation, Ledger::receipt_id(operation))
         .context("original intent receipt missing")?
@@ -358,7 +550,7 @@ pub(super) fn recover_original(
         "original intent selection differs from publication"
     );
     let predecessor = store
-        .selected_predecessor(scope, operation)?
+        .selected_predecessor_inner(scope, operation, reads)?
         .context("original intent predecessor absent")?;
     ensure!(
         intent.selection.aggregate_generation == predecessor.aggregate_generation

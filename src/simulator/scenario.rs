@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
     pub name: String,
+    #[serde(default)]
+    pub source_targets: bool,
     #[serde(default = "reader")]
     pub mode: String,
     #[serde(default)]

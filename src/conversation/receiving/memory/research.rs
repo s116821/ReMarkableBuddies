@@ -174,7 +174,7 @@ impl ResearchReport {
 #[derive(Serialize)]
 struct ResearchFrame<'a> {
     schema: u32,
-    scope: &'static str,
+    scope: &'a str,
     context: CombinedFrame<'a>,
     research: Option<&'a ResearchReport>,
 }
@@ -294,10 +294,10 @@ impl FrozenSourceMemoryContext {
         }
         let mut frame = ResearchFrame {
             schema: 1,
-            scope: "ordinary-historical",
+            scope: &self.source.frame.scope,
             context: CombinedFrame {
                 schema: 1,
-                scope: "ordinary-historical",
+                scope: &self.source.frame.scope,
                 request_context: &self.source.frame,
                 memory: Some(&self.memory),
             },

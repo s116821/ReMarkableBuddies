@@ -60,34 +60,41 @@ pub enum NotebookStagePublication {
 }
 impl NotebookRunCursor {
     pub fn map_outputs(&self) -> Result<Vec<crate::writer::notebook::NotebookMapOutput>> {
-        ensure!(
-            self.results.len() == self.plan.chunks.len(),
-            "notebook map coverage incomplete"
-        );
-        self.results
-            .iter()
-            .enumerate()
-            .map(|(ordinal, envelope)| {
-                let Record::NotebookStage(stage) = Ledger::decode(envelope)? else {
-                    bail!("notebook map result absent")
-                };
-                ensure!(
-                    stage.ordinal == ordinal
-                        && stage.kind == NotebookStageKind::Map
-                        && stage.outcome == Some(NotebookStageOutcome::Generated),
-                    "notebook map result unavailable"
-                );
-                Ok(crate::writer::notebook::NotebookMapOutput {
-                    stage_id: stage.id,
-                    result_revision: encoded_revision(envelope)?,
-                    output_digest: stage
-                        .observed_output_digest
-                        .context("notebook map digest absent")?,
-                    text: stage.output.context("notebook map text absent")?,
-                })
-            })
-            .collect()
+        map_outputs(&self.plan, &self.results)
     }
+}
+
+pub(super) fn map_outputs(
+    plan: &NotebookPlan,
+    results: &[Envelope],
+) -> Result<Vec<crate::writer::notebook::NotebookMapOutput>> {
+    ensure!(
+        results.len() == plan.chunks.len(),
+        "notebook map coverage incomplete"
+    );
+    results
+        .iter()
+        .enumerate()
+        .map(|(ordinal, envelope)| {
+            let Record::NotebookStage(stage) = Ledger::decode(envelope)? else {
+                bail!("notebook map result absent")
+            };
+            ensure!(
+                stage.ordinal == ordinal
+                    && stage.kind == NotebookStageKind::Map
+                    && stage.outcome == Some(NotebookStageOutcome::Generated),
+                "notebook map result unavailable"
+            );
+            Ok(crate::writer::notebook::NotebookMapOutput {
+                stage_id: stage.id,
+                result_revision: encoded_revision(envelope)?,
+                output_digest: stage
+                    .observed_output_digest
+                    .context("notebook map digest absent")?,
+                text: stage.output.context("notebook map text absent")?,
+            })
+        })
+        .collect()
 }
 impl NotebookPreparedStage {
     pub fn input_digest(&self) -> Result<String> {
@@ -105,7 +112,7 @@ pub struct NotebookResult {
     pub observed_output_bytes: Option<u64>,
     pub failure: Option<NotebookFailure>,
 }
-fn encoded_revision(envelope: &Envelope) -> Result<String> {
+pub(super) fn encoded_revision(envelope: &Envelope) -> Result<String> {
     Ok(digest(&serde_json::to_vec(envelope)?))
 }
 fn guarded(envelope: &Envelope) -> Envelope {
@@ -114,6 +121,89 @@ fn guarded(envelope: &Envelope) -> Envelope {
     next.revision_id = Uuid::new_v4();
     next.operation_id = Uuid::new_v4();
     next
+}
+
+pub(super) fn prepared_stage(
+    plan: &NotebookPlan,
+    plan_revision: &str,
+    results: &[Envelope],
+    kind: NotebookStageKind,
+    ordinal: usize,
+    input_digest: String,
+) -> Result<NotebookStage> {
+    let mut predecessors = Vec::new();
+    match kind {
+        NotebookStageKind::Map => ensure!(
+            ordinal == results.len()
+                && ordinal < plan.chunks.len()
+                && plan.map_input_digests[ordinal] == input_digest,
+            "invalid notebook map progression"
+        ),
+        NotebookStageKind::Reduce => {
+            ensure!(
+                ordinal == 0 && results.len() == plan.chunks.len(),
+                "incomplete notebook reduction"
+            );
+            for envelope in results {
+                let Record::NotebookStage(result) = Ledger::decode(envelope)? else {
+                    bail!("notebook map result absent")
+                };
+                ensure!(
+                    result.kind == NotebookStageKind::Map
+                        && result.outcome == Some(NotebookStageOutcome::Generated),
+                    "notebook map result unavailable"
+                );
+                predecessors.push((
+                    result.id,
+                    encoded_revision(envelope)?,
+                    result
+                        .observed_output_digest
+                        .context("notebook output digest absent")?,
+                ));
+            }
+        }
+    }
+    let stage = NotebookStage {
+        id: NotebookStage::identity(plan.operation, kind, ordinal),
+        conversation: plan.conversation,
+        operation: plan.operation,
+        plan_id: plan.id,
+        core_digest: plan.core_digest.clone(),
+        plan_revision: plan_revision.to_owned(),
+        kind,
+        ordinal,
+        archive_id: plan.archive_id,
+        source_revision: plan.source_revision.clone(),
+        input_digest,
+        predecessors,
+        prepared_revision: None,
+        outcome: None,
+        invoked: None,
+        output: None,
+        observed_output_digest: None,
+        observed_output_bytes: None,
+        failure: None,
+    };
+    stage.validate()?;
+    Ok(stage)
+}
+
+pub(super) fn finished_stage(
+    prepared: &Envelope,
+    result: NotebookResult,
+) -> Result<Box<NotebookStage>> {
+    let Record::NotebookStage(mut stage) = Ledger::decode(prepared)? else {
+        bail!("notebook preparation absent")
+    };
+    stage.prepared_revision = Some(encoded_revision(prepared)?);
+    stage.outcome = Some(result.outcome);
+    stage.invoked = Some(result.invoked);
+    stage.output = result.output;
+    stage.observed_output_digest = result.observed_output_digest;
+    stage.observed_output_bytes = result.observed_output_bytes;
+    stage.failure = result.failure;
+    stage.validate()?;
+    Ok(stage)
 }
 
 impl Ledger {
@@ -457,61 +547,14 @@ impl Ledger {
         ordinal: usize,
         input_digest: String,
     ) -> Result<Option<NotebookPreparedStage>> {
-        let plan = &cursor.plan;
-        let mut predecessors = Vec::new();
-        match kind {
-            NotebookStageKind::Map => ensure!(
-                ordinal == cursor.results.len()
-                    && ordinal < plan.chunks.len()
-                    && plan.map_input_digests[ordinal] == input_digest,
-                "invalid notebook map progression"
-            ),
-            NotebookStageKind::Reduce => {
-                ensure!(
-                    ordinal == 0 && cursor.results.len() == plan.chunks.len(),
-                    "incomplete notebook reduction"
-                );
-                for envelope in &cursor.results {
-                    let Record::NotebookStage(result) = Self::decode(envelope)? else {
-                        bail!("notebook map result absent")
-                    };
-                    ensure!(
-                        result.kind == NotebookStageKind::Map
-                            && result.outcome == Some(NotebookStageOutcome::Generated),
-                        "notebook map result unavailable"
-                    );
-                    predecessors.push((
-                        result.id,
-                        encoded_revision(envelope)?,
-                        result
-                            .observed_output_digest
-                            .context("notebook output digest absent")?,
-                    ));
-                }
-            }
-        }
-        let stage = NotebookStage {
-            id: NotebookStage::identity(plan.operation, kind, ordinal),
-            conversation: plan.conversation,
-            operation: plan.operation,
-            plan_id: plan.id,
-            core_digest: plan.core_digest.clone(),
-            plan_revision: cursor.plan_revision.clone(),
+        let stage = prepared_stage(
+            &cursor.plan,
+            &cursor.plan_revision,
+            &cursor.results,
             kind,
             ordinal,
-            archive_id: plan.archive_id,
-            source_revision: plan.source_revision.clone(),
             input_digest,
-            predecessors,
-            prepared_revision: None,
-            outcome: None,
-            invoked: None,
-            output: None,
-            observed_output_digest: None,
-            observed_output_bytes: None,
-            failure: None,
-        };
-        stage.validate()?;
+        )?;
         let operation = stage.transition(false);
         let fingerprint = stage.prepare_fingerprint()?;
         if self.replay(operation, &fingerprint)?.is_some() {
@@ -555,17 +598,7 @@ impl Ledger {
             mut cursor,
             prepared,
         } = prepared;
-        let Record::NotebookStage(mut stage) = Self::decode(&prepared)? else {
-            bail!("notebook preparation absent")
-        };
-        stage.prepared_revision = Some(encoded_revision(&prepared)?);
-        stage.outcome = Some(result.outcome);
-        stage.invoked = Some(result.invoked);
-        stage.output = result.output;
-        stage.observed_output_digest = result.observed_output_digest;
-        stage.observed_output_bytes = result.observed_output_bytes;
-        stage.failure = result.failure;
-        stage.validate()?;
+        let stage = finished_stage(&prepared, result)?;
         let operation = stage.transition(true);
         let fingerprint = stage.finish_fingerprint()?;
         if self.replay(operation, &fingerprint)?.is_some() {

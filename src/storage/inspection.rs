@@ -280,6 +280,20 @@ impl Scan {
             }
         }
     }
+    fn isolated_checkpoints(&mut self, root: &Path) {
+        for backup in self.entries(root) {
+            if !isolated_backup_directory(&backup) {
+                self.issue(InspectionIssue::UnexpectedEntry);
+                continue;
+            }
+            for child in self.entries(&backup) {
+                match isolated_checkpoint_kind(&child) {
+                    Some(kind) => self.file(&child, kind),
+                    None => self.issue(InspectionIssue::UnexpectedEntry),
+                }
+            }
+        }
+    }
     fn opaque_tree(&mut self, root: &Path, kind: StorageKind) {
         let mut pending = vec![root.to_owned()];
         while let Some(directory) = pending.pop() {
@@ -854,6 +868,20 @@ fn stage_name(path: &Path) -> bool {
         .and_then(|s| s.strip_prefix(".stage-"))
         .is_some_and(uuid_name)
 }
+
+pub(super) fn isolated_backup_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(uuid_name)
+}
+
+pub(super) fn isolated_checkpoint_kind(path: &Path) -> Option<StorageKind> {
+    match path.file_name()?.to_str()? {
+        "publisher.json" | "publisher.lock" => Some(StorageKind::Structural),
+        _ if stage_name(path) => Some(StorageKind::Staging),
+        _ => None,
+    }
+}
 fn same_identity(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -1020,7 +1048,10 @@ pub fn inspect_owned_data(paths: &StorePaths) -> OwnedDataReport {
             "sync" => {
                 for item in scan.entries(&path) {
                     match item.file_name().and_then(|s| s.to_str()).unwrap_or("") {
-                        "state.json" | "health.json" => scan.file(&item, StorageKind::Structural),
+                        "state.json" | "health.json" | "mode.json" => {
+                            scan.file(&item, StorageKind::Structural)
+                        }
+                        "isolated" => scan.isolated_checkpoints(&item),
                         "incoming" => scan.opaque_tree(&item, StorageKind::Staging),
                         _ if stage_name(&item) => scan.file(&item, StorageKind::Staging),
                         _ => scan.issue(InspectionIssue::UnexpectedEntry),
@@ -1065,4 +1096,83 @@ pub fn inspect_owned_data(paths: &StorePaths) -> OwnedDataReport {
     let report = scan.finish(current);
     let _ = lease.unlock();
     report
+}
+
+#[cfg(test)]
+mod isolated_inventory_tests {
+    use super::*;
+    use crate::storage::ordinary_restore::tests::Fixture;
+
+    #[test]
+    fn isolated_checkpoint_inventory_has_fixed_layout_and_redacted_sizes() {
+        let fixture = Fixture::new();
+        let store = fixture.open();
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                sync::mode::SyncModeChoice::IsolatedBackup {
+                    binding_sha256: digest(b"fixture grant"),
+                },
+            )
+            .unwrap();
+        let Some(sync::mode::SyncMode::IsolatedBackup { backup, .. }) =
+            store.sync_mode_snapshot().unwrap().mode
+        else {
+            panic!("isolated mode absent")
+        };
+        drop(store);
+        let paths = fixture.paths();
+        let before = inspect_owned_data(&paths);
+        let root = paths.data.join("sync/isolated").join(backup.to_string());
+        files::directory(&root).unwrap();
+        fs::write(root.join("publisher.json"), b"PRIVATE_PROVIDER_ID").unwrap();
+        fs::write(root.join("publisher.lock"), b"").unwrap();
+        fs::write(root.join(format!(".stage-{}", Uuid::new_v4())), b"staged").unwrap();
+        let report = inspect_owned_data(&paths);
+        assert_eq!(report.status, before.status);
+        assert_eq!(report.issues, before.issues);
+        assert_eq!(report.observed_files, before.observed_files + 3);
+        assert_eq!(
+            report.storage[&StorageKind::Structural].files,
+            before.storage[&StorageKind::Structural].files + 2
+        );
+        assert!(!serde_json::to_string(&report).unwrap().contains("PRIVATE"));
+        assert!(!serde_json::to_string(&report)
+            .unwrap()
+            .contains(&backup.to_string()));
+
+        let foreign = root.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("publisher.json"), b"ignored").unwrap();
+        let report = inspect_owned_data(&paths);
+        assert_eq!(
+            report.issues.get(&InspectionIssue::UnexpectedEntry),
+            Some(&1)
+        );
+        assert_eq!(report.observed_files, before.observed_files + 3);
+        assert!(foreign.join("publisher.json").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_checkpoint_inventory_refuses_file_and_directory_symlinks() {
+        let fixture = Fixture::new();
+        drop(fixture.open());
+        let paths = fixture.paths();
+        let external = fixture.root.join("external");
+        files::directory(&external).unwrap();
+        fs::write(external.join("publisher.json"), b"foreign contents").unwrap();
+        let parent = paths.data.join("sync/isolated");
+        let local = parent.join(Uuid::new_v4().to_string());
+        files::directory(&local).unwrap();
+        std::os::unix::fs::symlink(&external, parent.join(Uuid::new_v4().to_string())).unwrap();
+        std::os::unix::fs::symlink(
+            external.join("publisher.json"),
+            local.join("publisher.json"),
+        )
+        .unwrap();
+        let report = inspect_owned_data(&paths);
+        assert_eq!(report.issues.get(&InspectionIssue::UnsafeEntry), Some(&2));
+    }
 }

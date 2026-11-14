@@ -83,7 +83,7 @@ pub struct Report {
     pub facts: Vec<Fact>,
     pub diagnostics: Diagnostics,
     #[serde(skip)]
-    pub(super) _guard: Option<Box<dyn Send>>,
+    pub(crate) _guard: Option<Box<dyn Send>>,
 }
 impl Request {
     pub fn command(&self) -> Command {
@@ -114,14 +114,16 @@ impl Request {
         }
     }
     pub fn record(&self) -> Option<Uuid> {
-        let correction = match self {
+        record_id(self.profile(), self.correction_id()?).ok()
+    }
+    pub(crate) fn correction_id(&self) -> Option<Uuid> {
+        Some(match self {
             Self::Confirm(v) | Self::Update(v) => v.correction,
             Self::Inspect(v) => v.correction,
             Self::Forget(v) => v.correction,
             Self::Status(v) => v.correction,
             Self::Query(_) => return None,
-        };
-        record_id(self.profile(), correction).ok()
+        })
     }
 }
 impl Report {
@@ -155,7 +157,7 @@ impl Report {
             _guard: None,
         }
     }
-    pub(super) fn fail(&mut self, failure: Failure) {
+    pub(crate) fn fail(&mut self, failure: Failure) {
         self.failure = Some(failure);
         self.facts.clear();
         self.status = match failure {
@@ -182,7 +184,7 @@ impl Report {
         }
         output.write_all(&bytes)
     }
-    pub(super) fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         serde_json::to_vec(self).map_or(usize::MAX, |v| v.len() + 1)
     }
 }

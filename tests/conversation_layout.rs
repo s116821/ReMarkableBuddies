@@ -3,6 +3,9 @@ use remarkable_reader_buddy::conversation_layout::{plan, Geometry, PresentationI
 use remarkable_reader_buddy::storage::Uuid;
 fn context(turns: Vec<Turn>) -> ContextView {
     ContextView {
+        target_uses: vec![],
+        region_sources: vec![],
+        targets: vec![],
         turns,
         sources: vec![],
         normalized_text: vec![],
@@ -193,4 +196,59 @@ fn nil_duplicate_source_links_and_oversized_context_refuse() {
     }
     let ctx = context(vec![good; remarkable_reader_buddy::storage::MAX_ITEMS + 1]);
     assert!(plan(identity(c), &ctx, "draft", Geometry::default()).is_err());
+}
+
+#[test]
+fn target_about_projects_once_and_inherited_turn_does_not_repeat_it() {
+    use remarkable_reader_buddy::conversation::target::{Action, RecordRef, TargetUse};
+    use remarkable_reader_buddy::storage::{digest, Namespace, ObjectRef};
+    let c = Uuid::new_v4();
+    let e = Uuid::new_v4();
+    let u = turn(c, e, 1, Role::User, Mode::Reader, "question");
+    let about = "About: The original circled equation";
+    let body = format!("{about}\nAnswer");
+    let mut answer = turn(c, e, 2, Role::Assistant, Mode::Reader, &body);
+    answer.outcome = Outcome::Completed;
+    let follow = turn(c, Uuid::new_v4(), 3, Role::User, Mode::Reader, "why?");
+    let reference = RecordRef {
+        namespace: Namespace::Source,
+        record: Uuid::new_v4(),
+        revision: Uuid::new_v4(),
+        object: ObjectRef {
+            sha256: digest(b"test"),
+            bytes: 4,
+        },
+    };
+    let mut ctx = context(vec![u.clone(), answer, follow.clone()]);
+    ctx.target_uses = vec![
+        TargetUse {
+            id: TargetUse::id(u.id),
+            conversation: c,
+            turn: u.id,
+            action: Action::Introduce,
+            target: Some(reference.clone()),
+            about: Some(about.into()),
+            inline_body_sha256: Some(digest(body.as_bytes())),
+        },
+        TargetUse {
+            id: TargetUse::id(follow.id),
+            conversation: c,
+            turn: follow.id,
+            action: Action::Inherit,
+            target: Some(reference),
+            about: None,
+            inline_body_sha256: None,
+        },
+    ];
+    let bytes = serde_json::to_vec(&ctx.turns).unwrap();
+    assert!(plan(identity(c), &ctx, "draft", Geometry::default())
+        .unwrap()
+        .about
+        .is_empty());
+    assert_eq!(bytes, serde_json::to_vec(&ctx.turns).unwrap());
+    ctx.turns.remove(1);
+    let plan = plan(identity(c), &ctx, "draft", Geometry::default()).unwrap();
+    assert_eq!(plan.about.len(), 1);
+    assert_eq!(plan.about[0].turn, u.id);
+    assert_eq!(plan.about[0].text, about);
 }

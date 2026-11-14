@@ -41,12 +41,26 @@ pub(super) fn current(
     generation: Uuid,
     scope: &SelectionScope,
 ) -> Result<Option<SelectionTransaction>> {
+    current_with_budget(root, generation, scope, None)
+}
+
+fn current_with_budget(
+    root: &Path,
+    generation: Uuid,
+    scope: &SelectionScope,
+    mut budget: Option<&mut SelectedReadBudget>,
+) -> Result<Option<SelectionTransaction>> {
     let path = path(root, scope)?;
     files::safe_path(&path)?;
     if !path.exists() {
         return Ok(None);
     }
-    let transaction: SelectionTransaction = files::json(&path, MAX_METADATA as u64)?;
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.charge(0, 1, 0, 0)?;
+    }
+    let bytes = files::read_with_budget(&path, MAX_METADATA as u64, budget)?;
+    let transaction: SelectionTransaction = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
     transaction.validate(MAX_ITEMS)?;
     ensure!(
         transaction.store_generation == generation && &transaction.scope == scope,
@@ -183,16 +197,36 @@ pub(super) fn validate_closure(
 pub(super) fn validate_closure_with_budget(
     root: &Path,
     transaction: &SelectionTransaction,
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<Vec<ValidatedManifest>> {
+    validate_closure_for_read(root, transaction, budget, true)
+}
+
+pub(super) fn validate_closure_for_read(
+    root: &Path,
+    transaction: &SelectionTransaction,
     mut budget: Option<&mut SelectedReadBudget>,
+    verify_media: bool,
 ) -> Result<Vec<ValidatedManifest>> {
     transaction.validate(MAX_ITEMS)?;
-    let active =
-        Store::validate_objects_with_budget(root, &transaction.selected, budget.as_deref_mut())?;
+    let active = Store::validate_objects_inner(
+        root,
+        &transaction.selected,
+        budget.as_deref_mut(),
+        None,
+        verify_media,
+    )?;
     closure_index(&active, true)?;
     let mut combined = active.clone();
     let mut parts = vec![(transaction.selected.clone(), active)];
     for manifest in &transaction.retained {
-        let records = Store::validate_objects_with_budget(root, manifest, budget.as_deref_mut())?;
+        let records = Store::validate_objects_inner(
+            root,
+            manifest,
+            budget.as_deref_mut(),
+            None,
+            verify_media,
+        )?;
         combined.extend(records.clone());
         parts.push((manifest.clone(), records));
     }
@@ -221,6 +255,91 @@ pub(super) fn request(
         value,
     ))?))
 }
+
+fn visit_selection_heads(
+    root: &Path,
+    generation: Uuid,
+    budget: &mut SelectedReadBudget,
+    mut visit: impl FnMut(SelectionTransaction, &mut SelectedReadBudget) -> Result<()>,
+) -> Result<()> {
+    let directory = root.join("selections");
+    files::safe_path(&directory)?;
+    if !directory.exists() {
+        return Ok(());
+    }
+    for item in fs::read_dir(directory)? {
+        let path = item?.path();
+        // Atomic staging is never a published receipt and is not deleted here.
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with(".stage-"))
+        {
+            continue;
+        }
+        budget.charge(1, 1, 0, 0)?;
+        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(budget))?;
+        let current: SelectionTransaction = serde_json::from_slice(&bytes)?;
+        current.validate(MAX_ITEMS)?;
+        ensure!(
+            current.store_generation == generation
+                && path.file_name().and_then(|n| n.to_str()) == Some(&current.scope.filename()?),
+            "local operation inventory identity differs"
+        );
+        visit(current, budget)?;
+    }
+    Ok(())
+}
+
+/// Check accepted Store transactions under the publication mutex. Imported
+/// envelope operation IDs are deliberately absent from this inventory.
+fn claim_local_operation(
+    root: &Path,
+    generation: Uuid,
+    operation: Uuid,
+    prerequisites: &[Uuid],
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
+    let mut compatibility_budget;
+    let budget = if let Some(budget) = budget {
+        budget
+    } else {
+        compatibility_budget =
+            SelectedReadBudget::new(MAX_ITEMS as u64, MAX_ITEMS as u64, MAX_METADATA as u64, 0);
+        &mut compatibility_budget
+    };
+    visit_selection_heads(root, generation, budget, |current, budget| {
+        let scope = current.scope.clone();
+        for accepted in history_with_budget(root, generation, &scope, current, Some(budget))? {
+            if accepted.operation == operation || prerequisites.contains(&accepted.operation) {
+                return Err(LocalOperationConflict.into());
+            }
+        }
+        Ok(())
+    })
+}
+
+fn require_unclaimed_indexed_operations(
+    index: &Index,
+    operations: impl IntoIterator<Item = Uuid>,
+) -> Result<()> {
+    for id in operations {
+        if index.operations.contains_key(&id)
+            || index
+                .manifests
+                .get(&id)
+                .is_some_and(|manifest| manifest.scope == Scope::LocalTransaction)
+        {
+            return Err(LocalOperationConflict.into());
+        }
+    }
+    Ok(())
+}
+
+struct CommitGuard<'a> {
+    reads: &'a mut SelectedReadBudget,
+    prerequisites: &'a [Uuid],
+    check: &'a mut dyn FnMut() -> Result<()>,
+}
 pub(super) fn replay(
     chain: &[SelectionTransaction],
     operation: Uuid,
@@ -237,6 +356,78 @@ pub(super) fn replay(
 }
 
 impl Store {
+    /// Bounded discovery hints. Callers verify reachable genesis and the
+    /// domain closure again under the applicable gates before registration.
+    pub(crate) fn selected_scope_candidates(
+        &self,
+        group: Uuid,
+        binding: &str,
+        namespace: Namespace,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Vec<SelectionScope>> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        if target_generation::base_version(&root)? != COMPOUND_STORE_FORMAT {
+            return Ok(Vec::new());
+        }
+        compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        let mut scopes = Vec::new();
+        visit_selection_heads(&root, inner.generation, budget, |head, _| {
+            if head.scope.group == group
+                && head.scope.binding_sha256 == binding
+                && head
+                    .selected
+                    .record_namespaces
+                    .values()
+                    .any(|n| *n == namespace)
+            {
+                scopes.push(head.scope);
+            }
+            Ok(())
+        })?;
+        scopes.sort_by(|a, b| a.key_sha256.cmp(&b.key_sha256));
+        Ok(scopes)
+    }
+
+    /// Lightweight cancellation evidence only. It issues no new token and does
+    /// not validate object history or authorize a handoff/publication. Those
+    /// effects still require their complete current snapshot under domain gates.
+    pub(crate) fn selection_unchanged_for_progress(
+        &self,
+        scope: &SelectionScope,
+        expected: Option<&SelectionToken>,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<bool> {
+        scope.validate()?;
+        ensure!(
+            expected.is_none_or(|t| t.scope() == scope),
+            "foreign progress selection"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        let path = path(&root, scope)?;
+        files::safe_path(&path)?;
+        budget.charge(0, 1, 0, 0)?;
+        if !path.exists() {
+            return Ok(expected.is_none());
+        }
+        let bytes = files::read_with_budget(&path, MAX_METADATA as u64, Some(budget))?;
+        let transaction: SelectionTransaction = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid progress selection"))?;
+        transaction.validate(MAX_ITEMS)?;
+        ensure!(
+            transaction.scope == *scope && transaction.store_generation == inner.generation,
+            "progress selection scope/generation differs"
+        );
+        Ok(expected
+            .is_some_and(|expected| token(&transaction).is_ok_and(|actual| actual == *expected)))
+    }
     /// Read accepted publication evidence after process restart. This does not
     /// mint a live token or publish a mutation. Persisted intent pins are compared
     /// by the domain owner; an unaccepted operation returns None, not permission.
@@ -245,6 +436,24 @@ impl Store {
         scope: &SelectionScope,
         operation: Uuid,
     ) -> Result<Option<SelectionTransaction>> {
+        self.selected_receipt_inner(scope, operation, None)
+    }
+
+    pub(crate) fn selected_receipt_with_budget(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectionTransaction>> {
+        self.selected_receipt_inner(scope, operation, Some(budget))
+    }
+
+    pub(crate) fn selected_receipt_inner(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        mut budget: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionTransaction>> {
         scope.validate()?;
         ensure!(!operation.is_nil(), "nil selection operation");
         let inner = self
@@ -252,13 +461,21 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let Some(current) = current(&root, inner.generation, scope)? else {
+        let Some(current) =
+            current_with_budget(&root, inner.generation, scope, budget.as_deref_mut())?
+        else {
             return Ok(None);
         };
-        let chain = history(&root, inner.generation, scope, current)?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            scope,
+            current,
+            budget.as_deref_mut(),
+        )?;
         let original = chain.into_iter().find(|t| t.operation == operation);
         if let Some(transaction) = &original {
-            validate_closure(&root, transaction)?;
+            validate_closure_with_budget(&root, transaction, budget)?;
         }
         Ok(original)
     }
@@ -272,6 +489,24 @@ impl Store {
         scope: &SelectionScope,
         original_operation: Uuid,
     ) -> Result<Option<SelectionTransaction>> {
+        self.selected_predecessor_inner(scope, original_operation, None)
+    }
+
+    pub(crate) fn selected_predecessor_with_budget(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectionTransaction>> {
+        self.selected_predecessor_inner(scope, original_operation, Some(budget))
+    }
+
+    pub(crate) fn selected_predecessor_inner(
+        &self,
+        scope: &SelectionScope,
+        original_operation: Uuid,
+        mut budget: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionTransaction>> {
         scope.validate()?;
         ensure!(
             !original_operation.is_nil(),
@@ -282,10 +517,18 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let Some(current) = current(&root, inner.generation, scope)? else {
+        let Some(current) =
+            current_with_budget(&root, inner.generation, scope, budget.as_deref_mut())?
+        else {
             return Ok(None);
         };
-        let chain = history(&root, inner.generation, scope, current)?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            scope,
+            current,
+            budget.as_deref_mut(),
+        )?;
         let Some(position) = chain.iter().position(|t| t.operation == original_operation) else {
             return Ok(None);
         };
@@ -297,8 +540,8 @@ impl Store {
         let predecessor = chain
             .get(position + 1)
             .context("original predecessor missing")?;
-        validate_closure(&root, original)?;
-        validate_closure(&root, predecessor)?;
+        validate_closure_with_budget(&root, original, budget.as_deref_mut())?;
+        validate_closure_with_budget(&root, predecessor, budget)?;
         Ok(Some(predecessor.clone()))
     }
     /// Explicit bootstrap only. Snapshot absence does not authorize this call;
@@ -436,6 +679,61 @@ impl Store {
         objects: BTreeMap<String, Vec<u8>>,
         chain: &[SelectionTransaction],
     ) -> Result<SelectionPublication> {
+        self.write_selection_inner(inner, root, previous, transaction, objects, chain, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_selection_inner(
+        &self,
+        inner: &mut Inner,
+        root: &Path,
+        previous: Option<&SelectionTransaction>,
+        transaction: SelectionTransaction,
+        objects: BTreeMap<String, Vec<u8>>,
+        chain: &[SelectionTransaction],
+        mut guard: Option<&mut CommitGuard<'_>>,
+    ) -> Result<SelectionPublication> {
+        // Replay was resolved by the target method before entering this new
+        // publication boundary. Independent scope gates still serialize here.
+        for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
+            Self::validate_namespace_family_with_budget(
+                root,
+                manifest,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
+        }
+        let base_version = target_generation::base_version_with_budget(
+            root,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
+        let prerequisites = guard.as_ref().map_or(&[][..], |g| g.prerequisites);
+        ensure!(
+            prerequisites.is_empty() || inner.index.unavailable == 0,
+            "cannot verify selected commit prerequisites with unavailable history"
+        );
+        if guard.is_some() {
+            require_unclaimed_indexed_operations(
+                &inner.index,
+                std::iter::once(transaction.operation).chain(prerequisites.iter().copied()),
+            )?;
+        }
+        if guard.is_some() || base_version == COMPOUND_STORE_FORMAT {
+            claim_local_operation(
+                root,
+                inner.generation,
+                transaction.operation,
+                prerequisites,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
+        }
+        if base_version == compound_generation::VERSION {
+            compound_generation::validate_ready_with_budget(
+                &self.paths,
+                self.actor_id,
+                inner.generation,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
+        }
         ensure!(
             inner.legacy_sync_handles == 0,
             "stop all legacy sync handles before selected publication"
@@ -452,8 +750,13 @@ impl Store {
         );
         let required: BTreeMap<_, _> = std::iter::once(&transaction.selected)
             .chain(&transaction.retained)
-            .flat_map(|m| m.records.iter().chain(&m.media))
-            .map(|r| (r.sha256.clone(), r.bytes))
+            .flat_map(|m| {
+                m.records
+                    .iter()
+                    .map(|r| (r, false))
+                    .chain(m.media.iter().map(|r| (r, true)))
+            })
+            .map(|(r, media)| (r.sha256.clone(), (r.bytes, media)))
             .collect();
         ensure!(
             objects.keys().all(|h| required.contains_key(h)),
@@ -461,14 +764,36 @@ impl Store {
         );
         Self::trip(inner, Fault::BeforeObjects)?;
         for (hash, bytes) in objects {
+            let (length, media) = required[&hash];
             ensure!(
-                required.get(&hash) == Some(&(bytes.len() as u64)),
+                length == bytes.len() as u64,
                 "selection object size mismatch"
             );
-            files::object(&root.join("objects").join(&hash), &hash, &bytes)?;
+            files::object_with_budget(
+                &root.join("objects").join(&hash),
+                &hash,
+                &bytes,
+                guard.as_mut().map(|g| &mut *g.reads),
+                media,
+            )?;
         }
         Self::trip(inner, Fault::AfterObjects)?;
-        let parts = validate_closure(root, &transaction)?;
+        let parts = validate_closure_with_budget(
+            root,
+            &transaction,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
+        // Live publication and reopen validate identical notebook closure
+        // semantics. A retained original is its own complete historical graph.
+        for (manifest, records) in &parts {
+            notebook_generation::validate_records_with_budget(
+                root,
+                &Index::default(),
+                records,
+                guard.as_mut().map(|g| &mut *g.reads),
+            )?;
+            target_generation::validate_records(&Index::default(), records, &manifest.records)?;
+        }
         let records: Vec<_> = parts
             .iter()
             .flat_map(|(_, rs)| rs.iter().cloned())
@@ -489,26 +814,69 @@ impl Store {
         files::directory(&root.join("selection-history"))?;
         if let Some(previous) = previous {
             let bytes = serde_json::to_vec(previous)?;
-            files::object(
+            files::object_with_budget(
                 &root.join("selection-history").join(digest(&bytes)),
                 &digest(&bytes),
                 &bytes,
+                guard.as_mut().map(|g| &mut *g.reads),
+                false,
             )?;
         }
-        prepare_generation(root, self.actor_id, inner.generation)?;
+        prepare_generation_with_budget(
+            root,
+            self.actor_id,
+            inner.generation,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         Self::trip(inner, Fault::BeforeCommit)?;
         Self::trip(inner, Fault::BeforeActivation)?;
         // One fsync/rename publication commits BOTH winner and retained closure.
         // The lock still protects the token and causal checks performed above.
-        let result = files::atomic_json(&path(root, &transaction.scope)?, &transaction);
-        if let Err(error) = result {
-            // rename may have succeeded before a directory-sync failure. Rebuild
-            // evidence from actual durable metadata; never continue with a stale index.
-            inner.index = self.recover(inner.generation)?;
-            return Err(error);
-        }
+        let marker = path(root, &transaction.scope)?;
+        let is_guarded = guard.is_some();
+        let mut rename_started = !is_guarded;
+        let new_head = is_guarded.then(|| token(&transaction)).transpose()?;
+        let old_head = previous.filter(|_| is_guarded).map(token).transpose()?;
+        let result = if let Some(guard) = guard {
+            files::atomic_json_guarded(&marker, &transaction, || {
+                (guard.check)()?;
+                rename_started = true;
+                Ok(())
+            })
+        } else {
+            files::atomic_json(&marker, &transaction)
+        };
+        let uncertain = match result {
+            Ok(()) => None,
+            Err(error) if !rename_started => return Err(error),
+            Err(error) if is_guarded => {
+                // The guarded path has already validated the exact staged
+                // closure. Observe only this head after a possible rename.
+                // This read is independently bounded by MAX_METADATA.
+                let observed = current(root, inner.generation, &transaction.scope)
+                    .and_then(|transaction| transaction.as_ref().map(token).transpose());
+                match observed {
+                    Ok(observed) if observed == new_head => Some(error),
+                    Ok(observed) if observed == old_head => return Err(error),
+                    _ => {
+                        // Preserve the legacy integrity recovery if neither
+                        // exact head can be established.
+                        inner.index = self.recover(inner.generation)?;
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                inner.index = self.recover(inner.generation)?;
+                return Err(error);
+            }
+        };
         for (manifest, records) in parts {
             Self::apply_index(&mut inner.index, manifest, records);
+        }
+        self.notify_commit();
+        if let Some(error) = uncertain {
+            return Err(error);
         }
         Self::trip(inner, Fault::AfterCommit)?;
         Self::trip(inner, Fault::AfterActivation)?;
@@ -523,6 +891,92 @@ impl Store {
         operation: Uuid,
         records: Vec<Envelope>,
         media: BTreeMap<String, Vec<u8>>,
+    ) -> Result<SelectionPublication> {
+        self.commit_selected_inner(expected, operation, records, media, None)
+    }
+
+    /// Serialize an immediate handoff with publication of the same operation.
+    /// Both callbacks run under the Store mutex. They must avoid Store/gate
+    /// reentry and return before waiting for a provider response.
+    #[allow(
+        dead_code,
+        reason = "the regional Writer caller lands with the paired change"
+    )]
+    pub(crate) fn with_selected_operation_absent<T>(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        reads: &mut SelectedReadBudget,
+        check: impl FnOnce() -> Result<()>,
+        submit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        ensure!(!operation.is_nil(), "nil selected handoff operation");
+        expected.scope.validate()?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.generation == expected.store_generation,
+            "stale selection token"
+        );
+        ensure!(
+            inner.index.unavailable == 0,
+            "cannot authorize selected handoff with unavailable history"
+        );
+        let root = self.generation(inner.generation);
+        let current = current_with_budget(&root, inner.generation, &expected.scope, Some(reads))?
+            .context("selected handoff scope is absent")?;
+        ensure!(token(&current)? == *expected, "stale selection token");
+        require_unclaimed_indexed_operations(&inner.index, [operation])?;
+        claim_local_operation(&root, inner.generation, operation, &[], Some(reads))?;
+        check()?;
+        submit()
+    }
+
+    /// Check time/cancellation under the publication mutex and after syncing the
+    /// staged head, just before rename. The callback must not re-enter the Store.
+    /// An exact historical replay only spends read allowance. Prerequisites
+    /// test absence at this commit and create no durable reservation.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        dead_code,
+        reason = "the regional Writer caller lands with the paired change"
+    )]
+    pub(crate) fn commit_selected_guarded(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+        reads: &mut SelectedReadBudget,
+        prerequisites: &[Uuid],
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<SelectionPublication> {
+        ensure!(
+            prerequisites.len() <= 3 && prerequisites.iter().all(|id| !id.is_nil()),
+            "invalid selected commit prerequisites"
+        );
+        self.commit_selected_inner(
+            expected,
+            operation,
+            records,
+            media,
+            Some(CommitGuard {
+                reads,
+                prerequisites,
+                check,
+            }),
+        )
+    }
+
+    fn commit_selected_inner(
+        &self,
+        expected: &SelectionToken,
+        operation: Uuid,
+        records: Vec<Envelope>,
+        media: BTreeMap<String, Vec<u8>>,
+        mut guard: Option<CommitGuard<'_>>,
     ) -> Result<SelectionPublication> {
         ensure!(
             !operation.is_nil() && !records.is_empty(),
@@ -539,14 +993,32 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
-        let previous = current(&root, inner.generation, &expected.scope)?
-            .context("selected scope is absent")?;
-        let chain = history(&root, inner.generation, &expected.scope, previous.clone())?;
+        let previous = current_with_budget(
+            &root,
+            inner.generation,
+            &expected.scope,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?
+        .context("selected scope is absent")?;
+        let chain = history_with_budget(
+            &root,
+            inner.generation,
+            &expected.scope,
+            previous.clone(),
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         if let Some(receipt) = replay(&chain, operation, &fingerprint)? {
             return Ok(receipt);
         }
+        if let Some(guard) = guard.as_mut() {
+            (guard.check)()?;
+        }
         ensure!(token(&previous)? == *expected, "stale selection token");
-        let selected_records = Self::validate_objects(&root, &previous.selected)?;
+        let selected_records = Self::validate_objects_with_budget(
+            &root,
+            &previous.selected,
+            guard.as_mut().map(|g| &mut *g.reads),
+        )?;
         let selected_index = closure_index(&selected_records, true)?;
         let mut objects = media;
         let mut selected = previous.selected.clone();
@@ -619,13 +1091,14 @@ impl Store {
             },
             (fingerprint, SelectionMutation::Commit),
         )?;
-        self.write_selection(
+        self.write_selection_inner(
             &mut inner,
             &root,
             Some(&previous),
             transaction,
             objects,
             &chain,
+            guard.as_mut(),
         )
     }
 }

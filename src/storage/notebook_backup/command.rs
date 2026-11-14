@@ -426,6 +426,7 @@ mod tests {
             }],
             complete_media: true,
             config_snapshot: None,
+            target_feature: None,
         };
         archive_limits(&backup, 12).unwrap();
         assert!(archive_limits(&backup, 11).is_err());

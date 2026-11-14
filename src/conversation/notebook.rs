@@ -196,3 +196,5 @@ mod processing;
 pub use processing::*;
 mod persistence;
 pub use persistence::*;
+
+pub(crate) mod selected;

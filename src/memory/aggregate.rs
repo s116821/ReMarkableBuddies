@@ -200,6 +200,36 @@ fn owned_fact(envelope: &Envelope, owner: &Owner) -> Result<Fact> {
     }
     Ok(fact)
 }
+pub(crate) fn validate_global_partition(records: &[Envelope], key: &Key) -> Result<()> {
+    let owner = Owner::GlobalFact { key: key.clone() };
+    let mut immutable = BTreeMap::new();
+    for envelope in records {
+        envelope.validate()?;
+        ensure!(
+            envelope.namespace == Namespace::SubjectMemory
+                && envelope.domain_schema_version == 1
+                && envelope.media_descriptors.is_empty(),
+            "unsupported global memory partition"
+        );
+        if envelope.kind == Kind::Value {
+            remember(
+                &mut immutable,
+                envelope.record_id,
+                owned_fact(envelope, &owner)?,
+            )?;
+        } else {
+            ensure!(
+                envelope.payload.is_null() && !envelope.parents.is_empty(),
+                "invalid global forgetting"
+            );
+        }
+    }
+    ensure!(
+        !immutable.is_empty() && records.iter().all(|e| immutable.contains_key(&e.record_id)),
+        "global fact ancestry absent"
+    );
+    Ok(())
+}
 /// Reader partition validation reuses the owned fact and immutable-key rules.
 /// The caller validates the complete mixed causal graph before partitioning.
 pub(crate) fn validate_document_partition(records: &[Envelope], document: Uuid) -> Result<()> {

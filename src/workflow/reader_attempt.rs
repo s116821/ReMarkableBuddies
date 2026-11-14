@@ -7,6 +7,14 @@ use crate::{
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 mod selected;
+#[cfg(target_os = "linux")]
+use crate::conversation::receiving::memory::research::{ResearchDirective, ResearchPolicy};
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub(crate) use selected::ResearchContext;
+#[cfg(target_os = "linux")]
+#[allow(unused_imports)]
+pub(super) use selected::ResearchStage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvidenceKind {
@@ -25,6 +33,7 @@ pub(super) struct Attempt {
     #[cfg(test)]
     reader_preparation: Option<ReaderPreparation>,
     selected: Option<selected::Selected>,
+    target_frame: Option<crate::conversation::target_source::SourceFrame>,
 }
 fn now() -> Result<u64> {
     SystemTime::now()
@@ -32,6 +41,16 @@ fn now() -> Result<u64> {
         .as_millis()
         .try_into()
         .context("timestamp overflow")
+}
+
+fn unresolved_target() -> crate::conversation::target::Candidate {
+    crate::conversation::target::Candidate {
+        subject: "Selected source could not be localized".into(),
+        geometry: None,
+        understanding: crate::conversation::target::Understanding::Uncertain {
+            reason: "missing or invalid explicit target geometry".into(),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -133,6 +152,7 @@ pub(crate) fn assert_attachment_behavior(
         resident_answer: None,
         reader_preparation: None,
         selected: None,
+        target_frame: None,
     };
     assert!(attempt
         .dispatch_selected(workflow, 0, &ReaderHandoff::NextPage)
@@ -165,7 +185,16 @@ impl Attempt {
     ) -> Result<Self> {
         let (selected, user) =
             selected::Selected::new(ledger, workflow, token, root, user, capture)?;
-        Ok(Self {
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    fn selected_input(
+        workflow: &super::Workflow,
+        selected: selected::Selected,
+        user: Turn,
+        capture: Uuid,
+    ) -> Self {
+        Self {
             user,
             assistant: None,
             evidence: capture,
@@ -178,12 +207,210 @@ impl Attempt {
             #[cfg(test)]
             reader_preparation: None,
             selected: Some(selected),
-        })
+            target_frame: None,
+        }
     }
     pub(super) fn check_selected(&self) -> Result<()> {
+        if let Some(frame) = &self.target_frame {
+            frame.check_current()?;
+        }
         self.selected
             .as_ref()
             .map_or(Ok(()), |selected| selected.check())
+    }
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn prepare_resident(
+        ledger: &Ledger,
+        workflow: &super::Workflow,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+    ) -> Result<Self> {
+        let capture = acknowledgment.capture.record_id;
+        let (selected, user) =
+            selected::Selected::new_resident(ledger, workflow, token, acknowledgment, policy)?;
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn prepare_researched_resident(
+        ledger: &Ledger,
+        workflow: &super::Workflow,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+        pdf: super::resident_source::original_pdf::CapturedOriginalPdf,
+    ) -> Result<Self> {
+        let capture = acknowledgment.capture.record_id;
+        let (selected, user) = selected::Selected::new_researched_resident(
+            ledger,
+            workflow,
+            token,
+            acknowledgment,
+            policy,
+            pdf,
+        )?;
+        Ok(Self::selected_input(workflow, selected, user, capture))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn researched(&self) -> bool {
+        self.selected
+            .as_ref()
+            .is_some_and(selected::Selected::researched)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn admit_research_intent(
+        &self,
+        agreement: super::reader_intent::Agreement,
+    ) -> Result<()> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .admit_research_intent(agreement)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_decision(&self) -> Result<(ResearchPolicy, ResearchDirective)> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_decision()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_index_key(&self) -> Result<crate::retrieval::IndexKey> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_index_key()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn research_context(&self) -> Result<ResearchContext> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .research_context()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn query_research_source(
+        &self,
+        expected: &crate::retrieval::IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<crate::retrieval::Retrieved> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .query_research_source(
+                expected,
+                question,
+                max_passages,
+                max_bytes,
+                neighbors,
+                progress,
+            )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn run_researched_stage<T>(
+        &self,
+        stage: ResearchStage,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+        current: &mut dyn FnMut() -> Result<()>,
+        run: impl FnOnce(&mut crate::llm::ModelHandoff<'_>, std::time::Instant) -> Result<T>,
+    ) -> Result<T> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .run_researched_stage(stage, memory, current, run)
+    }
+
+    pub(super) fn selected_resident(&self) -> bool {
+        #[cfg(any(target_os = "linux", test))]
+        return self
+            .selected
+            .as_ref()
+            .is_some_and(selected::Selected::is_resident);
+        #[cfg(not(any(target_os = "linux", test)))]
+        false
+    }
+
+    pub(super) fn model_progress(&self) -> Result<()> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(selected) = &self.selected {
+            return selected.progress();
+        }
+        self.check_selected()
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn capture_selected_handwriting(
+        &mut self,
+        targets: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(selected) = &mut self.selected {
+            selected.capture_handwriting(targets)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn selected_handwriting(&self) -> Option<&crate::handwriting::ConfirmedContext> {
+        self.selected
+            .as_ref()
+            .and_then(selected::Selected::handwriting)
+    }
+
+    pub(super) fn query_memory(
+        &self,
+        memory: &dyn crate::memory::Provider,
+        query: &crate::memory::Query,
+    ) -> Result<crate::memory::QueryResult> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(selected) = &self.selected {
+            return selected.query_memory(memory, query);
+        }
+        memory.query(query)
+    }
+
+    pub(super) fn execute_model(
+        &self,
+        engine: &mut dyn crate::LLMEngine,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        #[cfg(any(target_os = "linux", test))]
+        if let Some(selected) = &self.selected {
+            return selected.execute_model(engine, progress, None);
+        }
+        engine.execute_with_progress(progress)
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn execute_enrichment(
+        &self,
+        engine: &mut dyn crate::LLMEngine,
+        progress: &mut dyn FnMut() -> Result<()>,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+    ) -> Result<String> {
+        self.selected
+            .as_ref()
+            .context("selected Reader attempt absent")?
+            .execute_model(engine, progress, memory)
     }
     pub(super) fn is_selected(&self) -> bool {
         self.selected.is_some()
@@ -305,8 +532,13 @@ impl Attempt {
             #[cfg(test)]
             reader_preparation: None,
             selected: None,
+            target_frame: None,
         };
         attempt.user = attempt.load_turn(ledger, attempt.user.id)?;
+        if ledger.store().source_target_generation()?.is_some() {
+            attempt.target_frame =
+                Some(ledger.target_source_frame(attempt.user.conversation, attempt.evidence)?);
+        }
         Ok(attempt)
     }
     /// A live context arrives only from the controlled new Pending branch.
@@ -406,6 +638,68 @@ impl Attempt {
     pub(super) fn legacy_output(&self) -> bool {
         self.kind == EvidenceKind::Legacy
     }
+    pub(super) fn source_target_enabled(&self) -> bool {
+        self.target_frame.is_some()
+            || self
+                .selected
+                .as_ref()
+                .is_some_and(|s| s.source_target_enabled())
+    }
+    pub(super) fn interpret_source_target(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        candidate: Option<&crate::conversation::target::Candidate>,
+    ) -> Result<()> {
+        let unresolved = unresolved_target();
+        let candidate = candidate.unwrap_or(&unresolved);
+        if let Some(selected) = self.selected.as_mut().filter(|s| s.source_target_enabled()) {
+            self.user = selected.write_target(text, candidate)?.written;
+            return Ok(());
+        }
+        let Some(frame) = self.target_frame.as_mut() else {
+            return self.interpret(ledger, text);
+        };
+        let mut user = self.user.clone();
+        user.text = Some(text.into());
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = now()?;
+        let result = ledger.advance_with_source_target(
+            Uuid::new_v4(),
+            frame.expected_root(),
+            ledger.expected(Namespace::Conversation, user.id)?,
+            user.clone(),
+            frame,
+            candidate,
+        )?;
+        frame.acknowledge(ledger, &result)?;
+        self.user = user;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn interpret_researched_source_target(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        candidate: Option<&crate::conversation::target::Candidate>,
+        current: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let selected = self
+            .selected
+            .as_mut()
+            .context("selected Reader attempt absent")?;
+        selected.require_store(ledger)?;
+        let unresolved = unresolved_target();
+        let candidate = selected
+            .source_target_enabled()
+            .then(|| candidate.unwrap_or(&unresolved));
+        self.user = selected
+            .write_researched(text, false, None, candidate, current)?
+            .written;
+        Ok(())
+    }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
         if let Some(selected) = &mut self.selected {
             let acknowledgment = selected.write(text, false, None)?;
@@ -468,13 +762,43 @@ impl Attempt {
             updated_ms: timestamp,
             completion: None,
         };
-        ledger.append(
-            Uuid::new_v4(),
-            ledger.expected(Namespace::Conversation, turn.conversation)?,
-            turn.clone(),
-            vec![],
-        )?;
+        if let Some(frame) = self.target_frame.as_mut() {
+            frame.check(ledger)?;
+            let result = ledger.append_target_answer(
+                Uuid::new_v4(),
+                frame.expected_root(),
+                turn.clone(),
+                self.user.id,
+            )?;
+            frame.acknowledge(ledger, &result)?;
+        } else {
+            ledger.append(
+                Uuid::new_v4(),
+                ledger.expected(Namespace::Conversation, turn.conversation)?,
+                turn.clone(),
+                vec![],
+            )?;
+        }
         self.assistant = Some(self.load_turn(ledger, turn.id)?);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(dead_code)]
+    pub(super) fn generated_researched_with_memory(
+        &mut self,
+        ledger: &Ledger,
+        text: String,
+        memory: Option<(&dyn crate::memory::Provider, &crate::memory::QueryResult)>,
+        current: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let selected = self
+            .selected
+            .as_mut()
+            .context("selected Reader attempt absent")?;
+        selected.require_store(ledger)?;
+        let acknowledgment = selected.write_researched(&text, true, memory, None, current)?;
+        self.assistant = Some(acknowledgment.written);
         Ok(())
     }
     pub fn outcome(
@@ -484,6 +808,11 @@ impl Attempt {
         outcome: Outcome,
         reason: AttemptReason,
     ) -> Result<()> {
+        if self.selected_resident() && matches!(outcome, Outcome::Failed | Outcome::Canceled) {
+            // A refused input-only request leaves its last accepted selected
+            // stage intact. The caller owns reporting and finalization.
+            return Ok(());
+        }
         anyhow::ensure!(
             self.selected.is_none(),
             "selected terminal publication requires controlled settlement; no ordinary fallback"

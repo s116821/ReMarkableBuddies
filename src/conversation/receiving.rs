@@ -580,6 +580,67 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
     ) -> Result<FrozenRequestContext> {
+        Self::assemble_request_data(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+            "ordinary-historical",
+            |media| {
+                self.store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_ok()
+            },
+        )
+    }
+
+    /// Only the live Attempt can construct this admitted data view. It carries
+    /// no authority to submit a model request or publish a result.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn selected_researched_context(
+        admitted: &crate::workflow::ResearchContext,
+        budget: ReceivingBudget,
+        retrieval: &dyn Provider,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenRequestContext> {
+        Self::assemble_request_data(
+            admitted.conversation(),
+            admitted.request_turn(),
+            None,
+            RequestSource::Original {
+                origin_turn: admitted.request_turn(),
+                source_record: admitted.capture(),
+                expected: admitted.index_key().clone(),
+            },
+            budget,
+            Some(retrieval),
+            token_count,
+            admitted.records().to_vec(),
+            "selected-historical",
+            |media| admitted.media_available(media),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_request_data(
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        records: Vec<Record>,
+        scope: &str,
+        media_available: impl Fn(&Media) -> bool,
+    ) -> Result<FrozenRequestContext> {
         let token_limit = validate_budget(&budget)?;
         let request = records
             .iter()
@@ -636,14 +697,7 @@ impl Ledger {
             selection,
             &budget.context,
             |turns| count(&encoded(turns, budget.max_encoded_bytes)?, &token_count),
-            |media| {
-                self.store
-                    .open_object(&ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes,
-                    })
-                    .is_ok()
-            },
+            &media_available,
         )?;
         ensure!(
             view.turns.last().is_some_and(|turn| turn == &request),
@@ -652,22 +706,14 @@ impl Ledger {
         view.turns.pop();
         if let SourceAssociation::Original { source_record, .. } = &association {
             for media in source_media(source_record)? {
-                if self
-                    .store
-                    .open_object(&ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes,
-                    })
-                    .is_err()
-                    && !view.missing_media.contains(&media)
-                {
+                if !media_available(&media) && !view.missing_media.contains(&media) {
                     view.missing_media.push(media);
                 }
             }
         }
         let mut frame = Frame {
             schema: 1,
-            scope: "ordinary-historical".into(),
+            scope: scope.into(),
             conversation,
             request,
             history: view.turns,

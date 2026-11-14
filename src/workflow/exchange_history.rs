@@ -16,6 +16,7 @@ pub struct PresentedTurn {
     pub id: Uuid,
     pub revision: Uuid,
     pub text: String,
+    pub about: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +121,7 @@ fn current_turn(ledger: &Ledger, turn: &Turn) -> Result<PresentedTurn> {
         "presentation turn changed"
     );
     Ok(PresentedTurn {
+        about: None,
         id: turn.id,
         revision: envelope.revision_id,
         text: turn.text.clone().context("presentation text unavailable")?,
@@ -136,7 +138,7 @@ pub(crate) fn project(
     let HistoricalPageAssociationInspection::HistoricalCandidate(before) = inspect()? else {
         anyhow::bail!("presentation binding unavailable")
     };
-    let context = ledger.context(
+    let context = ledger.presentation_context(
         conversation,
         &ContextBudget {
             max_text_bytes: 64 * 1024,
@@ -171,7 +173,15 @@ pub(crate) fn project(
             let turns = exchange
                 .turns
                 .iter()
-                .map(|turn| current_turn(ledger, turn))
+                .map(|turn| {
+                    let mut presented = current_turn(ledger, turn)?;
+                    presented.about = page
+                        .about
+                        .iter()
+                        .find(|about| about.turn == turn.id)
+                        .map(|about| about.text.to_owned());
+                    Ok(presented)
+                })
                 .collect::<Result<_>>()?;
             Ok(PresentedExchange {
                 id: exchange.id,

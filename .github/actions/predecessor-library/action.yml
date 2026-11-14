@@ -21,7 +21,7 @@ runs:
         CARGO_MESSAGES: ${{ inputs.cargo_messages }}
       run: |
         set -eu
-        python -B -m unittest discover -s scripts/predecessor -p test_capture_producer.py -v
+        python -B -m unittest discover -s scripts/predecessor -p 'test_*.py' -v
         mkdir -p qualification-evidence
         rustc --version --verbose > qualification-evidence/current-rustc.txt
         cargo --version > qualification-evidence/current-cargo.txt
@@ -44,10 +44,13 @@ runs:
         git -C .predecessor-qualification-source rev-parse HEAD > qualification-evidence/old-source.txt
         rustc --version --verbose > qualification-evidence/old-rustc.txt
         cargo --version > qualification-evidence/old-cargo.txt
-        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/source-input-hashes.txt
+        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/source-input-hashes.txt
         test "$(git -C .predecessor-qualification-source rev-parse HEAD)" = 68e42968b4c58b6f8ed1102078d78b40fad33ffc
-        echo 'e0e1e547740f45cd2cebadbd6d1bcba98426d43633f00212961f7d8e56fb5297  scripts/predecessor/old_storage_lease_driver.rs' | sha256sum --check
-        echo 'd8a357ceaf16283c621e792a577fcff946e6e7ac306d735a41708c81c58b8cb2  scripts/predecessor/old_library_outer.py' | sha256sum --check
+        echo '1520b0913849ef68e0d6f82d76cb7949897392461e570b6b9b2d9e4a4e033528  scripts/predecessor/old_storage_lease_driver.rs' | sha256sum --check
+        echo '58b5b3051218dcdffc218c6a035bbb5e04db5d64f38c3359870335587ad419b3  scripts/predecessor/old_library_outer.py' | sha256sum --check
+        echo 'adae04b64e8f21d7ec39be20d3dfe019686d7d01d14c4c856005118223da49ba  scripts/predecessor/test_old_library_outer.py' | sha256sum --check
+        rustc --edition=2021 --test scripts/predecessor/old_storage_lease_driver.rs -o "$RUNNER_TEMP/predecessor-release-unit-tests"
+        "$RUNNER_TEMP/predecessor-release-unit-tests" --nocapture > qualification-evidence/old-release-unit-tests.log 2>&1
         test ! -e .predecessor-qualification-source/examples/rem23_old_storage_lease.rs
         mkdir -p .predecessor-qualification-source/examples
         cp scripts/predecessor/old_storage_lease_driver.rs .predecessor-qualification-source/examples/rem23_old_storage_lease.rs
@@ -60,7 +63,7 @@ runs:
         cargo build --locked --all-features --manifest-path .predecessor-qualification-source/Cargo.toml --example rem23_old_storage_lease --target-dir "$GITHUB_WORKSPACE/target"
         git -C .predecessor-qualification-source diff --exit-code HEAD
         test "$(git -C .predecessor-qualification-source ls-files --others --exclude-standard)" = examples/rem23_old_storage_lease.rs
-        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock target/debug/examples/rem23_old_storage_lease target/debug/reader-buddy scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/input-binary-hashes.txt
+        sha256sum .predecessor-qualification-source/Cargo.lock Cargo.lock target/debug/examples/rem23_old_storage_lease target/debug/reader-buddy scripts/predecessor/capture_producer.py scripts/predecessor/test_capture_producer.py scripts/predecessor/test_old_library_outer.py scripts/predecessor/old_library_outer.py scripts/predecessor/old_storage_lease_driver.rs > qualification-evidence/input-binary-hashes.txt
         python -c 'import json,hashlib,subprocess;from pathlib import Path;h=lambda p:hashlib.sha256(Path(p).read_bytes()).hexdigest();r=json.loads(Path("qualification-evidence/current-producer.json").read_bytes());assert h("target/debug/reader-buddy")==r["current_binary_sha256"],"old build changed the frozen current command";r.update(old_source=subprocess.check_output(["git","-C",".predecessor-qualification-source","rev-parse","HEAD"],text=True).strip(),old_driver_source_sha256=h("scripts/predecessor/old_storage_lease_driver.rs"),old_driver_sha256=h("target/debug/examples/rem23_old_storage_lease"));Path("qualification-evidence/build-receipt.json").write_text(json.dumps(r,indent=2))'
     - name: Run bounded synthetic sync, lease and admission checks
       shell: bash

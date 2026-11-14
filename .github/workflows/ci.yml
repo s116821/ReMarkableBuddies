@@ -123,6 +123,86 @@ jobs:
           cat "$RUNNER_TEMP/current-cargo-test.jsonl"
           exit "$status"
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
+      - name: Exercise composed Reader using the retained normal binary
+        timeout-minutes: 12
+        env:
+          CARGO_MESSAGES: ${{ runner.temp }}/current-cargo-test.jsonl
+        run: |
+          python -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tomllib
+          sys.path.insert(0, 'scripts/predecessor')
+          from capture_producer import select_command
+          root = Path.cwd().resolve()
+          messages = Path(os.environ['CARGO_MESSAGES']).read_text(encoding='utf-8')
+          command = select_command(messages, root)
+          normal = Path(command['executable'])
+          declared = set(tomllib.loads((root / 'Cargo.toml').read_text())['features'])
+          if not normal.is_absolute() or not normal.is_file() or not declared.issubset(command['features']):
+              raise ValueError('complete normal-command artifact is required')
+          libraries = {}
+          finished = []
+          for line in messages.splitlines():
+              try:
+                  value = json.loads(line)
+              except ValueError:
+                  continue
+              if not isinstance(value, dict):
+                  continue
+              if value.get('reason') == 'build-finished':
+                  finished.append(value.get('success'))
+              target = value.get('target', {})
+              if (value.get('reason') != 'compiler-artifact'
+                      or value.get('package_id') != command['package_id']
+                      or target.get('kind') != ['lib']
+                      or value.get('profile', {}).get('test') is not True
+                      or Path(target.get('src_path') or '').resolve() != root / 'src/lib.rs'
+                      or set(value.get('features', [])) != set(command['features'])):
+                  continue
+              path = Path(value.get('executable') or '')
+              if not path.is_absolute() or not path.is_file() or not path.resolve().is_relative_to(root / 'target'):
+                  raise ValueError('invalid current library-test artifact')
+              libraries[str(path.resolve())] = path.resolve()
+          if finished != [True] or len(libraries) != 1:
+              raise ValueError('one complete current library-test artifact is required')
+          library = next(iter(libraries.values()))
+          names = [
+              'researched_pdf_opt_out_skips_transport',
+              'researched_pdf_disabled_skips_transport',
+              'researched_pdf_required_uses_guarded_search',
+              'researched_pdf_selected_memory_stays_pinned',
+              'researched_pdf_unclear_intent_stops_before_interpret',
+              'researched_pdf_drift_refuses_handoff_and_generation',
+              'researched_pdf_lost_ack_recovers_original_without_replay',
+              'researched_pdf_currentness_loss_stops_later_work',
+              'researched_pdf_withheld_search_expires_original_deadline',
+              'researched_pdf_original_read_allowance_cannot_be_renewed',
+          ]
+          names = ['storage::sync::selected::tests::researched_reader::' + name for name in names]
+          listing = subprocess.run([str(library), '--ignored', '--list', '--format', 'terse'],
+                                   check=True, capture_output=True, text=True, timeout=30).stdout.splitlines()
+          if any(listing.count(name + ': test') != 1 for name in names):
+              raise ValueError('all named composed Reader cases must exist exactly once')
+          env = os.environ.copy()
+          env['BUDDY_RESEARCH_FIXTURE_COMMAND'] = str(normal)
+          env['BUDDY_RESEARCH_FIXTURE_COMMAND_SHA256'] = hashlib.sha256(normal.read_bytes()).hexdigest()
+          print('Retained normal command SHA256:', env['BUDDY_RESEARCH_FIXTURE_COMMAND_SHA256'], flush=True)
+          for name in names:
+              result = subprocess.run([str(library), '--ignored', '--exact', name, '--nocapture', '--test-threads=1'],
+                                      env=env, capture_output=True, text=True, timeout=120)
+              print(result.stdout, end='', flush=True)
+              print(result.stderr, end='', file=sys.stderr, flush=True)
+              result.check_returncode()
+              summary = 'test result: ok. 1 passed; 0 failed; 0 ignored;'
+              if sum(line.startswith(summary) for line in result.stdout.splitlines()) != 1:
+                  raise ValueError('composed Reader case did not execute exactly once: ' + name)
+          PY
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - run: python -m unittest discover -s cicd/release -v
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true')
       - name: Verify ordinary Git source admission in an isolated fixture

@@ -127,6 +127,9 @@ impl Fixture {
             api: format!("{base}/drive/v3"),
             upload_api: format!("{base}/upload/drive/v3"),
             token_url: format!("{base}/token"),
+            request_deadline: None,
+            request_cancel: None,
+            isolated_credential_revision: None,
         };
         Self {
             root,

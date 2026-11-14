@@ -22,7 +22,7 @@ fn config_hash(backup: &NotebookBackup) -> Result<Option<String>> {
         .transpose()
         .map_err(Into::into)
 }
-fn read_archive(source: &Path) -> Result<(NotebookBackup, String)> {
+pub(super) fn read_archive(source: &Path) -> Result<(NotebookBackup, String)> {
     let (_, mut witness) = command::Detached::inspect(source).map_err(|_| Refused::Unsupported)?;
     let backup = NotebookBackup::read(source).map_err(|_| Refused::Unsupported)?;
     let hash = digest(&files::read(
@@ -32,7 +32,7 @@ fn read_archive(source: &Path) -> Result<(NotebookBackup, String)> {
     witness.verify().map_err(|_| Refused::Conflict)?;
     Ok((backup, hash))
 }
-fn features(root: &Path) -> Result<(bool, bool)> {
+pub(super) fn features(root: &Path) -> Result<(bool, bool)> {
     Ok((
         command::regular_if_present(&root.join(feedback_generation::MARKER))?,
         command::regular_if_present(&root.join("selection-feature.json"))?,
@@ -46,18 +46,77 @@ fn history_hash(history: &History, flags: (bool, bool), actor: Uuid) -> Result<S
         history.hash()?,
     ))?))
 }
+pub(super) fn target_base_hash(
+    history: &History,
+    flags: (bool, bool),
+    actor: Uuid,
+    origin: &Option<target_generation::ArchiveOrigin>,
+) -> Result<String> {
+    target_base_digest(&history.hash()?, flags, actor, origin)
+}
+pub(super) fn target_base_digest(
+    hash: &str,
+    flags: (bool, bool),
+    actor: Uuid,
+    origin: &Option<target_generation::ArchiveOrigin>,
+) -> Result<String> {
+    Ok(digest(&if let Some(origin) = origin {
+        serde_json::to_vec(&(
+            "ordinary-target-base-history-v1",
+            actor,
+            flags,
+            6u32,
+            origin,
+            hash,
+        ))?
+    } else {
+        serde_json::to_vec(&("ordinary-notebook-restore-history-v1", actor, flags, hash))?
+    }))
+}
+pub(super) fn target_history_hash(
+    history: &History,
+    flags: (bool, bool),
+    actor: Uuid,
+    target: Uuid,
+    base: &Option<target_generation::ArchiveOrigin>,
+    archive: &Option<target_generation::ArchiveOrigin>,
+) -> Result<String> {
+    if base.is_some() || archive.is_some() {
+        Ok(digest(&serde_json::to_vec(&(
+            "ordinary-target-restore-history-v1",
+            actor,
+            flags,
+            if base.is_some() { 6u32 } else { 4u32 },
+            if archive.is_some() { 6u32 } else { 4u32 },
+            6u32,
+            target,
+            base,
+            archive,
+            history.hash()?,
+        ))?))
+    } else {
+        history_hash(history, flags, actor)
+    }
+}
 impl Store {
-    fn notebook_restore_history(&self, inner: &Inner) -> Result<History> {
+    pub(super) fn notebook_restore_history(&self, inner: &Inner) -> Result<History> {
         self.notebook_archive_custody(inner)?;
         let root = self.generation(inner.generation);
         let mut history = History::empty();
+        let actor = if target_generation::is_target(&root)? {
+            None
+        } else {
+            Some(self.actor_id)
+        };
         for manifest in inner.index.manifests.values() {
-            history.add_with_actor(&root, manifest, Some(self.actor_id))?;
+            // A live target base keeps ordinary ready-family admission. Only the
+            // detached archive gets its explicit closed-header context below.
+            history.add_with_actor(&root, manifest, actor)?;
         }
         history.validate()?;
         Ok(history)
     }
-    fn notebook_restore_plan(
+    pub(super) fn notebook_restore_plan(
         &self,
         inner: &Inner,
         source: &Path,
@@ -69,11 +128,19 @@ impl Store {
         let root = self.generation(inner.generation);
         let mut history = self.notebook_restore_history(inner)?;
         let base_flags = features(&root)?;
-        let base_hash = history_hash(&history, base_flags, self.actor_id)?;
+        let base_origin =
+            target_generation::archive_origin(&root, self.actor_id, inner.generation)?;
+        let base_hash = target_base_hash(&history, base_flags, self.actor_id, &base_origin)?;
         let before = history.manifests.len();
+        let archive_context = backup.target_context(source)?;
         for manifest in &backup.manifests {
             history
-                .add_with_actor(source, manifest, Some(self.actor_id))
+                .add_with_archive(
+                    source,
+                    manifest,
+                    Some(self.actor_id),
+                    archive_context.as_ref(),
+                )
                 .map_err(|_| Refused::Conflict)?;
         }
         history.validate().map_err(|_| Refused::Conflict)?;
@@ -89,7 +156,14 @@ impl Store {
                 base_generation: inner.generation,
                 base_history_sha256: base_hash,
                 target_generation: target,
-                target_history_sha256: history_hash(&history, target_flags, self.actor_id)?,
+                target_history_sha256: target_history_hash(
+                    &history,
+                    target_flags,
+                    self.actor_id,
+                    target,
+                    &base_origin,
+                    &backup.target_feature,
+                )?,
                 staged_configuration_sha256: config_hash(backup)?,
                 complete_media: true,
             },
@@ -114,6 +188,7 @@ impl Store {
     ) -> Result<Plan> {
         let inner = self.inner.lock().map_err(|_| Refused::Unavailable)?;
         binding()?;
+        target_restore::refuse_pending(&self.paths)?;
         let (backup, hash) = read_archive(source)?;
         let next = Uuid::new_v4();
         ensure_condition(
@@ -148,8 +223,12 @@ impl Store {
             Refused::Conflict,
         )?;
         let mut attempted = false;
-        if self
-            .restore_notebook_locked(
+        let target = backup.target_feature.is_some()
+            || target_generation::is_target(&self.generation(inner.generation))?;
+        let result = if target {
+            self.restore_target_locked(&mut inner, source, backup, expected, &mut attempted)
+        } else {
+            self.restore_notebook_locked(
                 &mut inner,
                 source,
                 backup,
@@ -157,8 +236,8 @@ impl Store {
                 true,
                 &mut attempted,
             )
-            .is_err()
-        {
+        };
+        if result.is_err() {
             return Ok(if attempted {
                 Publication::Unknown
             } else {
@@ -181,8 +260,11 @@ impl Store {
         if current != inner.generation || current != expected.target_generation {
             return Ok(None);
         }
-        let history = self.notebook_restore_history(inner)?;
         let root = self.generation(current);
+        if target_generation::is_target(&root)? {
+            return target_restore::observe(self, inner, expected);
+        }
+        let history = self.notebook_restore_history(inner)?;
         if history_hash(&history, features(&root)?, self.actor_id)?
             != expected.target_history_sha256
         {

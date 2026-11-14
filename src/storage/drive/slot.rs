@@ -33,7 +33,7 @@ impl SlotPointer {
     pub(crate) fn validate(&self) -> Result<()> {
         self.properties().map(|_| ())
     }
-    fn properties(&self) -> Result<BTreeMap<String, String>> {
+    pub(super) fn properties(&self) -> Result<BTreeMap<String, String>> {
         self.binding.validate()?;
         id(&self.descriptor_id)?;
         ensure!(
@@ -106,6 +106,38 @@ pub struct SlotObservation {
     pub descriptor: Vec<u8>,
     pub candidate_match: PointerMatch,
 }
+
+/// A read of an agreed location, without any local publication candidate.
+/// Absent includes provider not-visible/404; it never grants create authority.
+#[derive(Debug)]
+pub enum AgreedSlotObservation {
+    Absent,
+    Invalid(SlotInvalid),
+    Present(AgreedSlotValue),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotInvalid {
+    Metadata,
+    Descriptor,
+}
+impl std::fmt::Display for SlotInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid agreed slot data")
+    }
+}
+impl std::error::Error for SlotInvalid {}
+
+pub struct AgreedSlotValue {
+    pub pointer: SlotPointer,
+    pub descriptor: Vec<u8>,
+}
+impl std::fmt::Debug for AgreedSlotValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgreedSlotValue")
+            .field("pointer", &self.pointer)
+            .finish_non_exhaustive()
+    }
+}
 impl std::fmt::Debug for SlotObservation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlotObservation")
@@ -115,25 +147,72 @@ impl std::fmt::Debug for SlotObservation {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct MissingPreparedDescriptor;
+
+impl std::fmt::Display for MissingPreparedDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("original prepared slot descriptor is not visible")
+    }
+}
+
+impl std::error::Error for MissingPreparedDescriptor {}
+
 impl GoogleDrive {
     fn slot_descriptor(&mut self, pointer: &SlotPointer) -> Result<Vec<u8>> {
         pointer.properties()?;
         let metadata = self.metadata(&pointer.descriptor_id)?;
-        let tag = metadata.tag()?;
-        ensure!(
-            metadata.id == pointer.descriptor_id
-                && !metadata.trashed
-                && tag.collection == pointer.binding.group
-                && tag.kind == "object"
-                && tag.sha256 == pointer.descriptor_sha256,
-            "slot descriptor identity mismatch"
-        );
+        let tag = metadata.tag().map_err(|_| SlotInvalid::Descriptor)?;
+        if !(metadata.id == pointer.descriptor_id
+            && !metadata.trashed
+            && tag.collection == pointer.binding.group
+            && tag.kind == "object"
+            && tag.sha256 == pointer.descriptor_sha256)
+        {
+            return Err(SlotInvalid::Descriptor.into());
+        }
         let bytes = self.download(&pointer.descriptor_id, MAX_DESCRIPTOR)?;
-        ensure!(
-            !bytes.is_empty() && digest(&bytes) == pointer.descriptor_sha256,
-            "slot descriptor integrity mismatch"
-        );
+        if bytes.is_empty() || digest(&bytes) != pointer.descriptor_sha256 {
+            return Err(SlotInvalid::Descriptor.into());
+        }
         Ok(bytes)
+    }
+
+    /// GET-only. The caller must additionally validate root/base/domain closure.
+    /// Transport/auth failures remain errors, distinct from invalid occupied data.
+    pub fn observe_agreed_slot(&mut self, binding: &SlotBinding) -> Result<AgreedSlotObservation> {
+        binding.validate()?;
+        self.authorize(binding.group)?;
+        self.read_agreed_slot(binding)
+    }
+    fn read_agreed_slot(&mut self, binding: &SlotBinding) -> Result<AgreedSlotObservation> {
+        let metadata = match self.metadata(&binding.slot_id) {
+            Ok(metadata) => metadata,
+            Err(error) if missing(&error) => return Ok(AgreedSlotObservation::Absent),
+            Err(error) if error.is::<InvalidRemoteData>() => {
+                return Ok(AgreedSlotObservation::Invalid(SlotInvalid::Metadata));
+            }
+            Err(error) => return Err(error),
+        };
+        let pointer = match SlotPointer::from_metadata(binding, metadata) {
+            Ok(pointer) => pointer,
+            Err(_) => return Ok(AgreedSlotObservation::Invalid(SlotInvalid::Metadata)),
+        };
+        let descriptor = match self.slot_descriptor(&pointer) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if missing(&error)
+                    || error.is::<InvalidRemoteData>()
+                    || error.is::<SlotInvalid>() =>
+            {
+                return Ok(AgreedSlotObservation::Invalid(SlotInvalid::Descriptor));
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(AgreedSlotObservation::Present(AgreedSlotValue {
+            pointer,
+            descriptor,
+        }))
     }
 
     pub fn prepare_slot(
@@ -153,7 +232,10 @@ impl GoogleDrive {
             "slot descriptor exceeds supported bound"
         );
         self.authorize(pointer.binding.group)?;
-        let bytes = self.slot_descriptor(&pointer)?;
+        let bytes = match self.slot_descriptor(&pointer) {
+            Err(error) if missing(&error) => return Err(MissingPreparedDescriptor.into()),
+            result => result?,
+        };
         ensure!(
             bytes.len() as u64 == reference.bytes,
             "slot descriptor size mismatch"
@@ -180,17 +262,19 @@ impl GoogleDrive {
         self.observe_pointer(&prepared.pointer)
     }
     fn observe_pointer(&mut self, pointer: &SlotPointer) -> Result<SlotObservation> {
-        let observed =
-            SlotPointer::from_metadata(&pointer.binding, self.metadata(&pointer.binding.slot_id)?)?;
-        let descriptor = self.slot_descriptor(&observed)?;
+        let value = match self.read_agreed_slot(&pointer.binding)? {
+            AgreedSlotObservation::Present(value) => value,
+            AgreedSlotObservation::Absent => anyhow::bail!("agreed slot not visible"),
+            AgreedSlotObservation::Invalid(reason) => return Err(reason.into()),
+        };
         Ok(SlotObservation {
-            candidate_match: if observed == *pointer {
+            candidate_match: if value.pointer == *pointer {
                 PointerMatch::Same
             } else {
                 PointerMatch::Different
             },
-            pointer: observed,
-            descriptor,
+            pointer: value.pointer,
+            descriptor: value.descriptor,
         })
     }
 
@@ -198,6 +282,15 @@ impl GoogleDrive {
     /// On an uncertain outcome, errors never mean "slot is free". Retry/read the
     /// same pinned ID; this method does not allocate, overwrite, delete or rebase.
     pub fn create_or_read_slot(&mut self, prepared: &PreparedSlot) -> Result<SlotObservation> {
+        self.create_or_read_slot_with(prepared, |_| Ok(()), |_| Ok(()))
+    }
+
+    pub(super) fn create_or_read_slot_with(
+        &mut self,
+        prepared: &PreparedSlot,
+        before_send: impl FnOnce(usize) -> Result<()>,
+        after_send: impl FnOnce(Option<u16>) -> Result<()>,
+    ) -> Result<SlotObservation> {
         ensure!(
             prepared.application == self.credentials.client_id
                 && prepared.account == self.credentials.account_permission_id,
@@ -212,26 +305,12 @@ impl GoogleDrive {
             bytes.len() as u64 == prepared.reference.bytes,
             "slot descriptor size mismatch"
         );
-        let request = serde_json::to_vec(&json!({
-            "id": pointer.binding.slot_id,
-            "name": "buddy-commit-slot",
-            "mimeType": "application/octet-stream",
-            "parents": ["appDataFolder"],
-            "appProperties": properties,
-        }))?;
-        ensure!(
-            request.len() <= MAX_REQUEST,
-            "slot request exceeds supported bound"
-        );
+        let request = slot_request(&pointer.binding.slot_id, properties)?;
         let token = self.token()?;
-        if let Ok(mut response) = self
-            .agent
-            .post(format!("{}/files", self.api))
-            .query("fields", "id")
-            .header("Authorization", token)
-            .header("Content-Type", "application/json")
-            .send(request)
-        {
+        before_send(request.len())?;
+        let response = self.send_slot_request(&token, request)?;
+        after_send(response.as_ref().map(|r| r.status().as_u16()))?;
+        if let Some(mut response) = response {
             let status = response.status().as_u16();
             if status != 409 && !(500..600).contains(&status) {
                 check(&mut response)?;
@@ -241,4 +320,39 @@ impl GoogleDrive {
         // observation below is the only acknowledgement. Never log that error.
         self.observe_pointer(pointer)
     }
+
+    pub(super) fn send_slot_request(
+        &self,
+        token: &str,
+        request: Vec<u8>,
+    ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        Ok(self
+            .bounded(self.agent.post(format!("{}/files", self.api)))?
+            .query("fields", "id")
+            .header("Authorization", token)
+            .header("Content-Type", "application/json")
+            .send(request)
+            .ok())
+    }
+}
+
+pub(super) fn slot_request(id: &str, properties: BTreeMap<String, String>) -> Result<Vec<u8>> {
+    let request = serde_json::to_vec(&json!({
+        "id": id,
+        "name": "buddy-commit-slot",
+        "mimeType": "application/octet-stream",
+        "parents": ["appDataFolder"],
+        "appProperties": properties,
+    }))?;
+    ensure!(
+        request.len() <= MAX_REQUEST,
+        "slot request exceeds supported bound"
+    );
+    Ok(request)
+}
+
+fn missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<TransportFailure>()
+        .is_some_and(|failure| failure.status == 404)
 }

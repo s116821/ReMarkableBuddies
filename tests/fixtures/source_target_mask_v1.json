@@ -1,0 +1,46 @@
+{
+  "dimensions": [
+    2,
+    2
+  ],
+  "geometry": {
+    "components": [
+      [
+        [
+          0,
+          0
+        ],
+        [
+          500000,
+          0
+        ],
+        [
+          500000,
+          1000000
+        ],
+        [
+          0,
+          1000000
+        ]
+      ]
+    ]
+  },
+  "input_png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAHUlEQVR4AQESAO3/AAAAAP//AAD/AAAA/4AA/wD/MWMGexuuedIAAAAASUVORK5CYII=",
+  "output_png": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAGUlEQVR4AQEOAPH/AAAAAP///wB/f/////8qXgf4TjpU+wAAAABJRU5ErkJggg==",
+  "recipe": "historical-original-mask-v1:image0.25.10/png0.18.1:rgb8-fast-nofilter",
+  "rgb": [
+    0,
+    0,
+    0,
+    255,
+    255,
+    255,
+    127,
+    127,
+    255,
+    255,
+    255,
+    255
+  ],
+  "sha256": "d1e59d94527fb228a1363704612192bdd45586d68844dca8bf7abcfbffa3e8c9"
+}

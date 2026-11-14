@@ -127,6 +127,66 @@ mod linux_controls {
         assert_eq!(serde_json::to_value(old).unwrap()["status"], "unsupported");
     }
     #[test]
+    fn isolated_checkpoint_inventory_is_bounded_and_does_not_follow_links() {
+        let f = Fixture::new();
+        let store = Store::open(f.paths()).unwrap();
+        store
+            .set_sync_mode(
+                &store.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                storage::sync::mode::SyncModeChoice::IsolatedBackup {
+                    binding_sha256: storage::digest(b"fixture grant"),
+                },
+            )
+            .unwrap();
+        let Some(storage::sync::mode::SyncMode::IsolatedBackup { backup, .. }) =
+            store.sync_mode_snapshot().unwrap().mode
+        else {
+            panic!("isolated mode absent")
+        };
+        drop(store);
+        let baseline = f.report();
+        let parent = f.paths().data.join("sync/isolated");
+        let root = parent.join(backup.to_string());
+        storage::files::directory(&root).unwrap();
+        fs::write(root.join("publisher.json"), b"PRIVATE_PROVIDER_ID").unwrap();
+        fs::write(root.join("publisher.lock"), b"").unwrap();
+        fs::write(root.join(format!(".stage-{}", Uuid::new_v4())), b"staged").unwrap();
+        let report = f.report();
+        assert_eq!(report["status"], "complete");
+        assert_eq!(
+            report["observed_files"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap(),
+            baseline["observed_files"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                + 3
+        );
+        assert!(!report.to_string().contains("PRIVATE_PROVIDER_ID"));
+        assert!(!report.to_string().contains(&backup.to_string()));
+        let foreign = root.join("unexpected");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("publisher.json"), b"foreign contents").unwrap();
+        std::os::unix::fs::symlink(&root, parent.join(Uuid::new_v4().to_string())).unwrap();
+        let other = parent.join(Uuid::new_v4().to_string());
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(root.join("publisher.json"), other.join("publisher.json"))
+            .unwrap();
+        let report_with_foreign = f.report();
+        assert_eq!(report_with_foreign["status"], "partial");
+        assert_eq!(report_with_foreign["issues"]["unexpected-entry"], "1");
+        assert_eq!(report_with_foreign["issues"]["unsafe-entry"], "2");
+        assert_eq!(
+            report_with_foreign["observed_files"],
+            report["observed_files"]
+        );
+    }
+    #[test]
     fn retained_notebook_and_feedback_inside_current_four_have_independent_bindings() {
         use crate::{conversation::AttemptReason, unassociated_feedback::Feedback};
         let f = Fixture::new();

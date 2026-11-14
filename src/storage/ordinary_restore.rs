@@ -40,7 +40,8 @@ pub(crate) struct Preview {
     pub additive: bool,
     pub configuration_applied: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Conditions {
     pub archive_sha256: String,
     pub base_generation: Uuid,
@@ -88,9 +89,18 @@ impl History {
         manifest: &Manifest,
         actor: Option<Uuid>,
     ) -> Result<()> {
+        self.add_with_archive(root, manifest, actor, None)
+    }
+    pub(super) fn add_with_archive(
+        &mut self,
+        root: &Path,
+        manifest: &Manifest,
+        actor: Option<Uuid>,
+        target: Option<&super::notebook_backup::TargetArchiveContext<'_>>,
+    ) -> Result<()> {
         if let Some(old) = self.manifests.get(&manifest.transaction_id) {
             ensure!(old == manifest, "restore transaction collision");
-            Store::validate_objects_policy(root, manifest, None, actor)?;
+            Store::validate_objects_archive(root, manifest, None, actor, target)?;
             return Ok(());
         }
         let encoded = serde_json::to_vec(manifest)?;
@@ -106,7 +116,8 @@ impl History {
             self.objects
                 .insert(reference.sha256.clone(), reference.clone());
         }
-        for (record, hash) in Store::validate_objects_policy(root, manifest, None, actor)? {
+        for (record, hash) in Store::validate_objects_archive(root, manifest, None, actor, target)?
+        {
             // Require a record object only on this new admission; arbitrary
             // domain payload arrays remain valid and old readers are untouched.
             let bytes = files::read(&root.join("objects").join(&hash), MAX_RECORD as u64)?;
@@ -141,9 +152,12 @@ impl History {
         Ok(())
     }
     pub(super) fn validate(&self) -> Result<()> {
-        Store::can_apply(
+        let records = self.records.values().cloned().collect::<Vec<_>>();
+        Store::can_apply(&Index::default(), &records)?;
+        target_generation::validate_records(
             &Index::default(),
-            &self.records.values().cloned().collect::<Vec<_>>(),
+            &records,
+            &self.objects.values().cloned().collect::<Vec<_>>(),
         )
     }
     pub(super) fn hash(&self) -> Result<String> {
@@ -162,7 +176,7 @@ impl History {
         }
     }
 }
-fn history_hash(manifests: &BTreeMap<Uuid, Manifest>) -> Result<String> {
+pub(super) fn history_hash(manifests: &BTreeMap<Uuid, Manifest>) -> Result<String> {
     let mut bytes = b"urn:remarkable-buddies:ordinary-history:v1:\n".to_vec();
     for (id, manifest) in manifests {
         bytes.extend_from_slice(
@@ -184,7 +198,12 @@ pub(super) fn load_archive(source: &Path) -> Result<(Backup, String)> {
     files::safe_path(source).map_err(|_| Refused::InvalidInput)?;
     let bytes = files::read(&source.join("backup.json"), MAX_METADATA as u64)
         .map_err(|_| Refused::Unavailable)?;
-    let raw = strict_json(&bytes).map_err(|_| Refused::InvalidInput)?;
+    Ok((parse_archive(source, &bytes)?.0, digest(&bytes)))
+}
+
+pub(super) fn parse_archive(source: &Path, bytes: &[u8]) -> Result<(Backup, BackupInspection)> {
+    require(bytes.len() <= MAX_METADATA, Refused::InvalidInput)?;
+    let raw = strict_json(bytes).map_err(|_| Refused::InvalidInput)?;
     require(raw.is_object(), Refused::InvalidInput)?;
     require(
         raw.get("format").and_then(Value::as_u64) == Some(u64::from(FORMAT))
@@ -205,9 +224,9 @@ pub(super) fn load_archive(source: &Path) -> Result<(Backup, String)> {
         crate::config::inspection::document(&serde_json::to_vec(config)?)
             .map_err(|_| Refused::InvalidInput)?;
     }
-    let backup: Backup = serde_json::from_slice(&bytes).map_err(|_| Refused::InvalidInput)?;
-    backup.inspect(source).map_err(|_| Refused::InvalidInput)?;
-    Ok((backup, digest(&bytes)))
+    let backup: Backup = serde_json::from_slice(bytes).map_err(|_| Refused::InvalidInput)?;
+    let inspection = backup.inspect(source).map_err(|_| Refused::InvalidInput)?;
+    Ok((backup, inspection))
 }
 fn staged_hash(backup: &Backup) -> Result<Option<String>> {
     backup

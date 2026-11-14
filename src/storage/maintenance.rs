@@ -63,6 +63,8 @@ enum NotebookAdmission {
     Restore,
     Preferences,
     ReadyOrdinary,
+    SelectedMode,
+    Handwriting,
 }
 
 // A definite empty regular directory or definite absence; never follow links.
@@ -92,7 +94,7 @@ pub(crate) struct ExistingCustody {
     pub(super) paths: StorePaths,
     pub(super) actor: Uuid,
     pub(super) generation: Uuid,
-    lease: Lease,
+    pub(super) lease: Lease,
 }
 
 impl ExistingCustody {
@@ -162,9 +164,27 @@ impl Store {
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, false)
     }
+    /// Read-only handwriting context custody. Validate existing formats so the
+    /// ordinary/local-domain leases can refuse selected state, never initialize,
+    /// repair, clean staging, publish capabilities or acquire mutation authority.
+    pub(crate) fn open_existing_for_handwriting(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::Handwriting,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
-        Self::open_existing_inner(paths, true)
+        Self::open_existing_using(
+            paths,
+            true,
+            NotebookAdmission::SelectedMode,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
     }
     /// Selected archive custody only; no initialization or restore admission.
     pub(crate) fn open_existing_for_archive(paths: StorePaths) -> Result<Self, Refusal> {
@@ -298,6 +318,14 @@ impl Store {
             // preparation/history/backup use their separately validated APIs.
             return Err(Refusal::Unsupported);
         }
+        if admission == NotebookAdmission::SelectedMode
+            && notebook
+            && super::target_generation::base_version(&generation_root)
+                .map_err(|_| Refusal::Unsupported)?
+                != super::compound_generation::VERSION
+        {
+            return Err(Refusal::Unsupported);
+        }
         for path in [
             &generation_root,
             &generation_root.join("objects"),
@@ -305,7 +333,16 @@ impl Store {
         ] {
             directory(path)?;
         }
-        if notebook {
+        if super::target_generation::base_version(&generation_root)
+            .map_err(|_| Refusal::Unsupported)?
+            == super::compound_generation::VERSION
+        {
+            if admission != NotebookAdmission::SelectedMode {
+                return Err(Refusal::Unsupported);
+            }
+            super::compound_generation::validate_ready(&paths, actor, generation)
+                .map_err(|_| Refusal::Unsupported)?;
+        } else if notebook {
             super::notebook_generation::validate_ready(&paths, actor, generation)
                 .map_err(|_| Refusal::Unsupported)?;
         } else if selected_aware {
@@ -317,7 +354,9 @@ impl Store {
         let notebook_preferences = notebook
             && matches!(
                 admission,
-                NotebookAdmission::Preferences | NotebookAdmission::ReadyOrdinary
+                NotebookAdmission::Preferences
+                    | NotebookAdmission::ReadyOrdinary
+                    | NotebookAdmission::Handwriting
             );
         if notebook_preferences {
             empty_if_present(&generation_root.join("selections"))?;
@@ -326,6 +365,7 @@ impl Store {
         let store = Self {
             paths,
             actor_id: actor,
+            runtime_policy: None,
             _lease: lease,
             inner: Mutex::new(Inner {
                 generation,
@@ -337,6 +377,7 @@ impl Store {
                 local_domain_handles: 0,
             }),
             wake: Mutex::new(None),
+            selected_checkpoint: std::sync::RwLock::new(()),
             export_active: std::sync::atomic::AtomicBool::new(false),
             writer_active: std::sync::atomic::AtomicBool::new(false),
         };

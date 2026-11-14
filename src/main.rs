@@ -24,8 +24,11 @@ enum ConversationOperation {
     RecoverPending,
     WriterInspect,
     WriterGenerate,
+    WriterGenerateImage,
+    WriterGenerateTarget,
     WriterRefine,
     WriterRecover,
+    TargetChange,
 }
 impl ConversationOperation {
     fn selected(
@@ -98,6 +101,9 @@ pub struct Args {
     /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
     #[arg(long, exclusive = true)]
     handwriting: bool,
+    /// Explicit unverified page transcription with selected confirmed examples
+    #[arg(long, exclusive = true)]
+    handwriting_transcription: bool,
     /// Saved role and export-backend declarations; no runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
     product_settings_operation: Option<config::product_settings::Operation>,
@@ -202,10 +208,10 @@ pub struct Args {
     /// Bounded JSON input for an explicit memory operation
     #[arg(long, value_name = "FILE", requires = "memory_operation")]
     memory_input: Option<std::path::PathBuf>,
-    /// Explicit local storage-mode maintenance; no sync or runtime activation
+    /// Explicit storage-mode maintenance or qualified provider control; no runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["simulate", "api_key", "model", "base_url", "trigger_corner", "debug_dump", "log_level", "inspect_owned_data", "export_note", "personalization_operation", "memory_operation", "memory_input"])]
     sync_mode_operation: Option<remarkable_reader_buddy::mode_maintenance::Operation>,
-    /// Bounded choice JSON from an absolute file or exact-dash stdin
+    /// Bounded choice JSON; provider controls require exact-dash stdin
     #[arg(
         long,
         value_name = "FILE",
@@ -228,6 +234,11 @@ pub struct Args {
     /// Generate/refine an unrendered Writer draft or prepare export; bounded JSON stdin
     #[arg(long, conflicts_with_all=["research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note"])]
     writer_note: bool,
+    /// Inspect, explicitly edit, or observe an original shared preference operation
+    #[arg(long, value_enum, requires="shared_preferences_input", conflicts_with_all=["inspect_owned_data_v3","inspect_selected_outbox","configuration_schema","export_portable_configuration","inspect_portable_configuration","portable_configuration_operation","portable_configuration_input","resident_stock_recovery","handwriting","product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    shared_preferences_operation: Option<remarkable_reader_buddy::shared_preferences::Operation>,
+    #[arg(long, requires="shared_preferences_operation", conflicts_with_all=["inspect_owned_data_v3","inspect_selected_outbox","configuration_schema","export_portable_configuration","inspect_portable_configuration","portable_configuration_operation","portable_configuration_input","resident_stock_recovery","handwriting","product_settings_operation","product_settings_input","research_settings_operation","research_settings_input","inspect_conversations","conversation_operation","conversation_input","inspect_source_cache","source_cache_operation","source_cache_input","credential_reference_operation","credential_reference_input","model_credential_operation","model_credential_input","memory_settings_operation","memory_settings_input","ordinary_export_operation","ordinary_export_input","model_settings_operation","model_settings_input","restore_operation","restore_input","basic_settings_operation","basic_settings_input","configuration_operation","simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","writer_note"])]
+    shared_preferences_input: Option<std::path::PathBuf>,
 }
 
 fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_logger::Builder {
@@ -247,7 +258,24 @@ fn logging(level: Option<log::LevelFilter>, environment: Option<&str>) -> env_lo
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(result) = remarkable_reader_buddy::retrieval::pdf_worker::dispatch() {
+        return result;
+    }
+
     let args = Args::parse();
+    if let Some(operation) = args.shared_preferences_operation {
+        let report = remarkable_reader_buddy::shared_preferences::run(
+            operation,
+            args.shared_preferences_input
+                .as_deref()
+                .expect("required preference input"),
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        report.write_to(&mut std::io::stdout().lock())?;
+        return Ok(());
+    }
     if let Some(operation) = args.portable_configuration_operation {
         use config::portable::import;
         let path = std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into);
@@ -285,6 +313,17 @@ fn main() -> Result<()> {
     }
     if args.resident_stock_recovery {
         return stock_recovery();
+    }
+    if args.handwriting_transcription {
+        let report = remarkable_reader_buddy::handwriting_transcription::command::dispatch(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        let succeeded = report
+            .write_to(&mut std::io::stdout().lock())
+            .map_err(|_| anyhow::anyhow!("output-failure"))?;
+        anyhow::ensure!(succeeded, "transcription-refused");
+        return Ok(());
     }
     if args.handwriting {
         let report = remarkable_reader_buddy::handwriting::command::run(
@@ -339,10 +378,24 @@ fn main() -> Result<()> {
     }
     if let Some(operation) = args.conversation_operation {
         let input = args.conversation_input.as_deref().expect("required input");
+        if matches!(operation, ConversationOperation::TargetChange) {
+            return remarkable_reader_buddy::conversation::target_command::run(
+                std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+                input,
+                &mut std::io::stdin().lock(),
+            )
+            .write_to(&mut std::io::stdout().lock());
+        }
         use remarkable_reader_buddy::writer::selected_command as selected_writer;
         let writer_operation = match operation {
             ConversationOperation::WriterInspect => Some(selected_writer::Operation::Inspect),
             ConversationOperation::WriterGenerate => Some(selected_writer::Operation::Generate),
+            ConversationOperation::WriterGenerateImage => {
+                Some(selected_writer::Operation::GenerateImage)
+            }
+            ConversationOperation::WriterGenerateTarget => {
+                Some(selected_writer::Operation::GenerateTarget)
+            }
             ConversationOperation::WriterRefine => Some(selected_writer::Operation::Refine),
             ConversationOperation::WriterRecover => Some(selected_writer::Operation::Recover),
             _ => None,
@@ -643,6 +696,16 @@ fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     remarkable_reader_buddy::workflow::resident_supervisor::recovery::refuse_occupied_activation()?;
     #[cfg(target_os = "linux")]
+    if args.simulate.is_none() {
+        if let Some(path) = std::env::var_os("REMARKABLE_BUDDIES_CONFIG") {
+            if remarkable_reader_buddy::reader_runtime::run_installed_selected(path.into(), || {
+                logging(args.log_level, std::env::var("RUST_LOG").ok().as_deref()).init();
+            })? {
+                return Ok(());
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
     let notification_environment = if args.simulate.is_none() {
         Some(remarkable_reader_buddy::workflow::resident_supervisor::health::NotificationEnvironment::capture())
     } else {
@@ -752,7 +815,13 @@ fn main() -> Result<()> {
     sleep(Duration::from_millis(1000));
     let _sync_worker = match route {
         RuntimeRoute::ExistingReader => Worker::google(store.clone(), config.sync.clone())?,
-        RuntimeRoute::OrdinaryLocal => None,
+        RuntimeRoute::OrdinaryLocal => Worker::isolated(
+            store.clone(),
+            config.sync.clone(),
+            config
+                .saved_path()
+                .expect("loaded Config has a source path"),
+        )?,
     };
     #[cfg(target_os = "linux")]
     let workflow = {
@@ -824,6 +893,21 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use log::{Level, LevelFilter, Log, Metadata};
+    #[test]
+    fn handwriting_transcription_is_exclusive_before_any_runtime() {
+        assert!(Args::try_parse_from(["reader-buddy", "--handwriting-transcription"]).is_ok());
+        for extra in [
+            vec!["--handwriting"],
+            vec!["--writer-note"],
+            vec!["--model", "unused"],
+            vec!["--inspect-owned-data"],
+            vec!["--product-settings-operation", "inspect"],
+        ] {
+            let mut args = vec!["reader-buddy", "--handwriting-transcription"];
+            args.extend(extra);
+            assert!(Args::try_parse_from(args).is_err());
+        }
+    }
     #[test]
     fn handwriting_is_exclusive_before_any_runtime() {
         assert!(Args::try_parse_from(["reader-buddy", "--handwriting"]).is_ok());
@@ -1051,6 +1135,7 @@ mod tests {
                 "export-note",
                 "export-portable-configuration",
                 "handwriting",
+                "handwriting-transcription",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
@@ -1079,6 +1164,8 @@ mod tests {
                 "resident-stock-recovery",
                 "restore-input",
                 "restore-operation",
+                "shared-preferences-input",
+                "shared-preferences-operation",
                 "simulate",
                 "source-cache-input",
                 "source-cache-operation",
@@ -1091,6 +1178,7 @@ mod tests {
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
         assert!(!args.resident_stock_recovery);
         assert!(!args.handwriting);
+        assert!(!args.handwriting_transcription);
         assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());
         assert!(args.conversation_input.is_none());
@@ -1106,6 +1194,8 @@ mod tests {
         assert!(args.inspect_portable_configuration.is_none());
         assert!(args.portable_configuration_operation.is_none());
         assert!(args.portable_configuration_input.is_none());
+        assert!(args.shared_preferences_operation.is_none());
+        assert!(args.shared_preferences_input.is_none());
         assert!(args.research_settings_operation.is_none());
         assert!(args.research_settings_input.is_none());
         assert!(args.model.is_none());

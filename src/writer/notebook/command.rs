@@ -96,7 +96,7 @@ impl Request {
             _ => None,
         }
     }
-    fn fields(&self) -> Result<(&str, usize, Option<TurnRange>)> {
+    pub(super) fn fields(&self) -> Result<(&str, usize, Option<TurnRange>)> {
         match self.model() {
             Self::GenerateNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
             Self::RefineNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
@@ -560,7 +560,7 @@ fn prepare_inner(
     }
     Ok(Prepared::Fresh(Box::new(input)))
 }
-fn generation_report(
+pub(super) fn generation_report(
     request: &Request,
     status: runner::Status,
     failure: Option<runner::Failure>,

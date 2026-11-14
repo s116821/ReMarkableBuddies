@@ -23,12 +23,64 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Configuration {
     pub selection: Option<SelectionScope>,
+    /// Local opt-in only; never part of portable shared settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub researched_pdf: Option<ResearchedPdf>,
 }
 impl Configuration {
     pub fn validate(&self) -> Result<()> {
         if let Some(scope) = &self.selection {
             scope.validate()?;
         }
+        if let Some(researched) = &self.researched_pdf {
+            ensure!(
+                self.selection.is_some(),
+                "researched Reader needs a selected document"
+            );
+            researched.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ResearchedPdf {
+    pub research_model: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ResearchedPdf {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // A derived struct alone also accepts positional JSON arrays. This
+        // explicit local opt-in must be an object, with duplicate fields refused.
+        let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
+        if !raw.get().trim_start().starts_with('{') {
+            return Err(serde::de::Error::custom("researched_pdf must be an object"));
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            research_model: Option<String>,
+        }
+        let fields: Fields = serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            research_model: fields.research_model,
+        })
+    }
+}
+
+impl ResearchedPdf {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.research_model.as_deref().is_none_or(|model| {
+                !model.is_empty()
+                    && model.len() <= 256
+                    && model == model.trim()
+                    && !model.chars().any(char::is_control)
+            }),
+            "researched Reader search declaration is invalid"
+        );
         Ok(())
     }
 }
@@ -171,11 +223,20 @@ fn admission_status(status: crate::memory::maintenance::ReportStatus) -> Status 
         _ => Status::Unavailable,
     }
 }
+fn open_status(error: &anyhow::Error) -> Status {
+    use crate::storage::maintenance::Refusal;
+    match error.downcast_ref::<Refusal>() {
+        Some(Refusal::Unsupported) => Status::Unsupported,
+        Some(Refusal::Busy) => Status::Busy,
+        Some(Refusal::Unavailable) => Status::Unavailable,
+        None => admission_status(crate::memory::maintenance::store_open_status(error)),
+    }
+}
 fn open(config: &Config) -> std::result::Result<Arc<Store>, Status> {
     crate::memory::maintenance::preflight(config, false).map_err(admission_status)?;
     Store::open(config.paths.clone())
         .map(Arc::new)
-        .map_err(|error| admission_status(crate::memory::maintenance::store_open_status(&error)))
+        .map_err(|error| open_status(&error))
 }
 
 pub enum StartupDecision {
@@ -208,6 +269,7 @@ enum OrdinaryModeRefusal {
     Unavailable,
     Nonordinary,
     LegacySync,
+    SelectedFamily,
 }
 impl OrdinaryModeRefusal {
     fn report(self) -> Report {
@@ -221,6 +283,10 @@ impl OrdinaryModeRefusal {
                 Status::Unsupported,
                 "explicit local mode requires legacy sync disabled",
             ),
+            Self::SelectedFamily => (
+                Status::Unsupported,
+                "compound notebook storage requires an explicit selected Reader route",
+            ),
         };
         let mut report = Report::new("startup", status);
         report.ordinary_startup_error = Some(reason);
@@ -228,6 +294,12 @@ impl OrdinaryModeRefusal {
     }
 }
 fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), OrdinaryModeRefusal> {
+    if !store
+        .ordinary_reader_family()
+        .map_err(|_| OrdinaryModeRefusal::Unavailable)?
+    {
+        return Err(OrdinaryModeRefusal::SelectedFamily);
+    }
     let mode = store
         .sync_mode_snapshot()
         .map_err(|_| OrdinaryModeRefusal::Unavailable)?;
@@ -235,6 +307,16 @@ fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Ordi
         None => Ok(()),
         Some(SyncMode::LocalOnly) if !config.sync.enabled => Ok(()),
         Some(SyncMode::LocalOnly) => Err(OrdinaryModeRefusal::LegacySync),
+        Some(SyncMode::IsolatedBackup { .. })
+            if !config.sync.enabled
+                && config.reader.selection.is_none()
+                && config.memory.selection.is_none()
+                && store
+                    .ordinary_isolated_family()
+                    .map_err(|_| OrdinaryModeRefusal::Unavailable)? =>
+        {
+            Ok(())
+        }
         _ => Err(OrdinaryModeRefusal::Nonordinary),
     }
 }
@@ -254,12 +336,17 @@ pub fn ordinary_store(
                 fresh_auxiliary_roots(config)
                     .map_err(|_| Box::new(Report::new("startup", Status::Unavailable)))?;
             }
-            Arc::new(Store::open(config.paths.clone()).map_err(|error| {
-                Box::new(Report::new(
-                    "startup",
-                    admission_status(crate::memory::maintenance::store_open_status(&error)),
-                ))
-            })?)
+            Arc::new(
+                (if config.reader_enabled()
+                    && !config.sync.enabled
+                    && config.reader.selection.is_none()
+                {
+                    Store::open_source_target_startup(config)
+                } else {
+                    Store::open(config.paths.clone())
+                })
+                .map_err(|error| Box::new(Report::new("startup", open_status(&error))))?,
+            )
         }
     };
     ordinary_mode(&store, config).map_err(|refusal| Box::new(refusal.report()))?;
@@ -294,6 +381,24 @@ fn selected_mode(
 /// Called from actual startup after final dotenv/config selection, before secrets
 /// or RealDevice/provider construction. No native query can occur in this platform.
 pub fn startup(config: &Config) -> StartupDecision {
+    // A pending target promotion must enter before ready-only preflight/open.
+    // Legacy sync retains its supported non-target route.
+    if config.reader.selection.is_none()
+        && config.reader_enabled()
+        && !config.sync.enabled
+        && config.paths.data.join("identity.json").exists()
+    {
+        return match Store::open_source_target_startup(config) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                match ordinary_mode(&store, config) {
+                    Ok(()) => StartupDecision::Ordinary(Some(store)),
+                    Err(refusal) => StartupDecision::Report(Box::new(refusal.report())),
+                }
+            }
+            Err(error) => StartupDecision::refused(open_status(&error)),
+        };
+    }
     if config.reader.selection.is_none() {
         use crate::memory::maintenance::{preflight_state, StoreReadiness};
         match preflight_state(config, true) {
@@ -370,6 +475,61 @@ pub fn startup(config: &Config) -> StartupDecision {
         report.data = Some(serde_json::json!({"reason":"no-native-adapter"}));
     }
     StartupDecision::Report(Box::new(report))
+}
+
+/// The installed selected service route uses only the explicitly trusted
+/// configuration path, before dotenv or ordinary startup can resolve secrets.
+#[cfg(target_os = "linux")]
+pub fn run_installed_selected(
+    config_path: PathBuf,
+    initialize_logging: impl FnOnce(),
+) -> Result<bool> {
+    use crate::{
+        storage::sync::selected::ReaderPreferences,
+        workflow::resident_supervisor::{
+            health::NotificationEnvironment, recovery::activation::InstalledReaderSelection,
+        },
+    };
+    use std::time::{Duration, Instant};
+
+    let config = Config::load(Some(config_path.clone()))?;
+    let Some(scope) = config.reader.selection.as_ref() else {
+        return Ok(false);
+    };
+    initialize_logging();
+    let started = Instant::now();
+    let Some(installation) = InstalledReaderSelection::load(started + Duration::from_secs(10))?
+    else {
+        if let StartupDecision::Report(mut report) = startup(&config) {
+            report.write_to(&mut std::io::stdout().lock())?;
+        }
+        return Ok(true);
+    };
+    let admitted = (|| -> Result<_> {
+        let store = Arc::new(Store::open_selected_target_preparation(&config)?);
+        let reader = Arc::new(SelectedAdmission::new(store.clone(), scope.clone())?);
+        let (policy, token) =
+            ReaderPreferences::open(store.clone(), config_path.clone(), &reader, started)?;
+        let (store, reader, policy, token) = policy.promote_targets(store, reader, token)?;
+        let health = NotificationEnvironment::capture()
+            .connect()?
+            .context("selected Reader service health unavailable")?;
+        Ok((store, reader, health, policy, token))
+    })();
+    let Ok((store, reader, health, policy, token)) = admitted else {
+        Report::new("startup", Status::Unavailable).write_to(&mut std::io::stdout().lock())?;
+        return Ok(true);
+    };
+    crate::workflow::selected_resident_reader::run(
+        store,
+        reader,
+        &config_path,
+        installation,
+        health,
+        policy,
+        token,
+    )?;
+    Ok(true)
 }
 
 #[derive(Deserialize)]
@@ -695,6 +855,19 @@ mod tests {
             )
             .unwrap();
         let paths = store.paths.clone();
+        fn snapshot(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            let mut result = BTreeMap::new();
+            for item in std::fs::read_dir(root).unwrap() {
+                let path = item.unwrap().path();
+                if path.is_dir() {
+                    result.extend(snapshot(&path));
+                } else {
+                    result.insert(path.clone(), std::fs::read(path).unwrap());
+                }
+            }
+            result
+        }
+        let before = snapshot(&paths.data);
         drop(store);
         let config = Config {
             paths,
@@ -703,6 +876,8 @@ mod tests {
         let StartupDecision::Ordinary(Some(admitted)) = startup(&config) else {
             panic!("local-only should admit ordinary data")
         };
+        assert!(admitted.source_target_generation().unwrap().is_none());
+        assert_eq!(snapshot(&config.paths.data), before);
         let saved = admitted.clone();
         let reused = ordinary_store(&config, Some(admitted)).ok().unwrap();
         assert!(Arc::ptr_eq(&saved, &reused), "no second Store open");

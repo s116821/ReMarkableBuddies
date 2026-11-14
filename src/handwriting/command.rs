@@ -20,11 +20,14 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
             return refusal;
         }
     };
+    let Ok(config) = Config::load(config_path) else {
+        refusal.fail(Failure::StoreUnavailable);
+        return refusal;
+    };
+    if config.sync.enabled {
+        return crate::storage::sync::selected::run_handwriting(config, input);
+    }
     let outcome = (|| -> Result<LocalCorrections> {
-        let config = Config::load(config_path).map_err(|_| Failure::StoreUnavailable)?;
-        if config.sync.enabled {
-            return Err(Failure::UnsupportedMode);
-        }
         let store = Store::open(config.paths.clone()).map_err(|error| {
             if error
                 .downcast_ref::<std::io::Error>()

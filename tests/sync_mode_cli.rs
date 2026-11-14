@@ -15,6 +15,77 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[test]
+fn create_group_requires_strict_stdin_and_refuses_unqualified_without_mutation() {
+    let fixture = Fixture::new();
+    let group = Uuid::new_v4();
+    let binding = storage::digest(b"unqualified cli");
+    let store = Store::open(fixture.paths()).unwrap();
+    let expected = serde_json::to_value(&store.sync_mode_snapshot().unwrap().token).unwrap();
+    let prep = storage::compound_generation::Request {
+        operation: Uuid::new_v4(),
+        actor: store.actor_id,
+        source_generation: serde_json::from_slice(
+            &fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        )
+        .unwrap(),
+        group,
+        binding_sha256: binding.clone(),
+        expected_mode: serde_json::from_value(expected.clone()).unwrap(),
+    };
+    drop(store);
+    drop(Store::prepare_shared_notebook(fixture.paths(), prep).unwrap());
+    let request = json!({"control_version":1,"operation":Uuid::new_v4(),"expected":expected,
+        "group":group,"binding_sha256":binding,"profile":Uuid::new_v4()});
+    let bytes = serde_json::to_vec(&request).unwrap();
+    let current = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+    assert_eq!(
+        fixture.run("create-group", None, false)["status"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(&bytes), true)["status"],
+        "invalid-input"
+    );
+    let mut unknown = request.clone();
+    unknown["root_id"] = json!("not-allowed");
+    assert_eq!(
+        fixture.run(
+            "create-group",
+            Some(&serde_json::to_vec(&unknown).unwrap()),
+            false
+        )["status"],
+        "invalid-input"
+    );
+    let duplicate = format!(
+        "{{\"control_version\":1,{}",
+        std::str::from_utf8(&bytes).unwrap().trim_start_matches('{')
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(duplicate.as_bytes()), false)["status"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(&vec![b'x'; MAX_INPUT + 1]), false)["status"],
+        "invalid-input"
+    );
+    let report = fixture.run("create-group", Some(&bytes), false);
+    assert_eq!(report["status"], "unsupported");
+    assert_eq!(report["activation_performed"], false);
+    assert!(!fixture.paths().data.join("sync/state.json").exists());
+    assert!(!fixture.paths().data.join("sync/mode.json").exists());
+    assert!(!fixture.paths().credentials.join("drive.json").exists());
+    assert_eq!(
+        fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        current
+    );
+    fixture.save_config(true);
+    assert_eq!(
+        fixture.run("create-group", Some(&bytes), false)["status"],
+        "unsupported"
+    );
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -397,12 +468,28 @@ fn assert_ordinary_refuses(f: &Fixture, expected: &str) {
 }
 
 #[test]
-fn actual_normal_startup_refuses_nonordinary_mode_before_runtime_constructors() {
-    for mode in [isolated(), shared(Uuid::new_v4())] {
+fn actual_normal_startup_refuses_incompatible_mode_before_runtime_constructors() {
+    // Ordinary isolated mode is now a supported local runtime. This negative
+    // CLI fixture covers the incompatible legacy-publisher combination instead.
+    // Positive isolated admission/Dispatch is exercised without device constructors
+    // by the mode-maintenance library fixtures.
+    for (mode, legacy_sync, refusal) in [
+        (
+            isolated(),
+            true,
+            "ordinary mode requires absent or LocalOnly choice",
+        ),
+        (
+            shared(Uuid::new_v4()),
+            false,
+            "ordinary Reader startup unsupported",
+        ),
+    ] {
         let f = Fixture::new();
         let initial = f.initialize();
         assert_eq!(f.choose(&request(&initial, mode))["status"], "ok");
-        assert_ordinary_refuses(&f, "ordinary mode requires absent or LocalOnly choice");
+        f.save_config(legacy_sync);
+        assert_ordinary_refuses(&f, refusal);
     }
     let f = Fixture::new();
     let initial = f.initialize();

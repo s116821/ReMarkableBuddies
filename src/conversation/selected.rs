@@ -24,6 +24,47 @@ impl SelectedDomainProjection {
             (self.objects.get(revision)?.sha256 == hash).then_some(record)
         })
     }
+    pub(crate) fn target_views(
+        &self,
+        uses: &[super::target::TargetUse],
+    ) -> Result<Vec<super::target::TargetView>> {
+        let exact = |reference: &super::target::RecordRef| -> Result<Record> {
+            let envelope = self
+                .ancestors
+                .get(&reference.revision)
+                .context("target included revision absent")?;
+            ensure!(
+                envelope.namespace == reference.namespace
+                    && envelope.record_id == reference.record
+                    && self.objects.get(&reference.revision) == Some(&reference.object),
+                "target included exact reference differs"
+            );
+            self.records
+                .get(&reference.revision)
+                .cloned()
+                .context("target included value absent")
+        };
+        let mut views = Vec::new();
+        let mut seen = BTreeSet::new();
+        for used in uses {
+            let Some(reference) = &used.target else {
+                continue;
+            };
+            if !seen.insert(reference.revision) {
+                continue;
+            }
+            let Record::SourceTarget(target) = exact(reference)? else {
+                anyhow::bail!("target included source-target absent")
+            };
+            let source = exact(&target.source.record)?;
+            views.push(super::target::TargetView::new(
+                reference.clone(),
+                *target,
+                source,
+            )?);
+        }
+        Ok(views)
+    }
     pub fn document_ownership(&self) -> Result<BTreeMap<Uuid, DocumentOwnership>> {
         let mut owners: BTreeMap<Uuid, BTreeSet<Uuid>> = BTreeMap::new();
         for record in self.records.values() {
@@ -37,6 +78,39 @@ impl SelectedDomainProjection {
             owners.entry(conversation).or_default();
             let mut document = None;
             match record {
+                Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_) => {
+                    document = super::target::validate_links(
+                        record,
+                        &|reference| {
+                            let envelope = self
+                                .ancestors
+                                .get(&reference.revision)
+                                .context("target included revision absent")?;
+                            ensure!(
+                                envelope.namespace == reference.namespace
+                                    && envelope.record_id == reference.record
+                                    && self.objects.get(&reference.revision)
+                                        == Some(&reference.object),
+                                "target selected exact reference differs"
+                            );
+                            self.records
+                                .get(&reference.revision)
+                                .cloned()
+                                .context("target selected value absent")
+                        },
+                        &|id| {
+                            let Some((_, Some(Record::Turn(turn)))) =
+                                self.head(Namespace::Conversation, id)
+                            else {
+                                anyhow::bail!("target selected user absent")
+                            };
+                            Ok(turn.clone())
+                        },
+                    )?;
+                }
                 Record::Root(root) => {
                     if let Some(binding) = root.binding {
                         self.require_binding(binding, conversation)?;
@@ -69,6 +143,9 @@ impl SelectedDomainProjection {
                                     s.id == *source
                                         && s.conversation == conversation
                                         && s.turn == turn.id,
+                                Record::RegionSource(s) => s.id == *source && s.conversation == conversation
+                                    && matches!(self.head(Namespace::Conversation,s.turn), Some((_,Some(Record::Turn(origin))))
+                                        if origin.sources.contains(&s.id) && origin.sequence <= turn.sequence),
                                 Record::NormalizedText(s) =>
                                     s.id == *source
                                         && s.conversation == conversation
@@ -137,6 +214,7 @@ impl SelectedDomainProjection {
                         "selected notebook archive origin relationship missing"
                     );
                     // Historical document metadata never grants native ownership.
+                    document = Some(source.document);
                 }
                 Record::NotebookPlan(plan) => {
                     ensure!(
@@ -643,6 +721,10 @@ impl SelectedDomainProjection {
 pub(super) fn conversation_id(record: &Record) -> Uuid {
     match record {
         Record::Root(r) => r.id,
+        Record::SourceTarget(r) => r.conversation,
+        Record::RegionSource(r) => r.conversation,
+        Record::TargetUse(r) => r.conversation,
+        Record::TargetState(r) => r.conversation,
         Record::RequestEvidence(r) => r.conversation,
         Record::Turn(r) => r.conversation,
         Record::Source(r) => r.conversation,

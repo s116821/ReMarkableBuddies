@@ -5,6 +5,8 @@ pub(crate) mod ordinary_export;
 #[path = "ordinary_restore.rs"]
 pub(crate) mod ordinary_restore;
 
+#[path = "isolated_backup.rs"]
+pub(super) mod isolated_backup;
 #[path = "notebook_backup.rs"]
 pub(crate) mod notebook_backup;
 
@@ -267,6 +269,78 @@ impl Store {
     pub(crate) fn export_feedback(&self, destination: &Path) -> Result<bool> {
         self.export_policy(destination, true)
     }
+
+    /// Prepare the ordinary data portion of an isolated backup. The caller owns
+    /// a fresh staging path and keeps the original mode lease for this attempt.
+    /// On error, inspect any surviving marker before reusing the staged result.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the isolated publisher is a separate increment")
+    )]
+    pub(crate) fn export_isolated_snapshot(
+        &self,
+        lease: &sync::mode::SyncModeLease,
+        destination: &Path,
+    ) -> Result<Option<BackupInspection>> {
+        self.with_isolated_snapshot(lease, destination, |inner, backup, bytes| {
+            reserve_archive_root(destination)?;
+            files::directory(&destination.join("objects"))?;
+            self.export_write_locked(
+                inner,
+                destination,
+                backup,
+                bytes,
+                &mut false,
+                |path, bytes| {
+                    let report = backup.inspect(destination)?;
+                    files::atomic(path, bytes)?;
+                    Ok(report)
+                },
+            )
+        })
+    }
+
+    fn with_isolated_snapshot<T>(
+        &self,
+        lease: &sync::mode::SyncModeLease,
+        destination: &Path,
+        prepare: impl FnOnce(&Inner, &Backup, &[u8]) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let destination = canonical_archive_path(destination)?;
+        require_archive_disjoint(
+            &destination,
+            [&self.paths.data, &self.paths.cache, &self.paths.credentials].map(PathBuf::as_path),
+        )?;
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        lease.require_isolated_locked(self)?;
+        let current: Uuid = files::json(&self.paths.data.join("CURRENT"), 128)?;
+        ensure!(
+            current == inner.generation,
+            "isolated backup store generation changed"
+        );
+        ensure!(
+            inner.index.unavailable == 0,
+            "unavailable commits prevent complete export"
+        );
+        ensure!(
+            feedback_generation::version(&self.generation(inner.generation))? == FORMAT,
+            "isolated snapshot requires ordinary format-1 storage"
+        );
+        let backup = self.collect_backup_locked(&inner, false)?;
+        if backup.manifests.is_empty() {
+            return Ok(None);
+        }
+        let bytes = serde_json::to_vec(&backup)?;
+        ensure!(
+            bytes.len() <= MAX_METADATA,
+            "backup metadata exceeds supported restore bound"
+        );
+        prepare(&inner, &backup, &bytes).map(Some)
+    }
+
     fn export_policy(&self, destination: &Path, feedback: bool) -> Result<bool> {
         files::safe_path(destination)?;
         ensure!(
@@ -309,6 +383,16 @@ impl Store {
         self.export_backup_policy(inner, false)
     }
     fn export_backup_policy(&self, inner: &Inner, feedback: bool) -> Result<Backup> {
+        let mut backup = self.collect_backup_locked(inner, feedback)?;
+        let config_path = self.paths.data.join("config.snapshot.json");
+        if config_path.exists() {
+            let config: crate::config::Config = files::json(&config_path, MAX_RECORD as u64)?;
+            config.validate()?;
+            backup.config_snapshot = Some(config);
+        }
+        Ok(backup)
+    }
+    fn collect_backup_locked(&self, inner: &Inner, feedback: bool) -> Result<Backup> {
         let root = self.generation(inner.generation);
         let version = feedback_generation::version(&root)?;
         ensure!(
@@ -316,7 +400,7 @@ impl Store {
                 version == feedback_generation::VERSION
                     && !root.join("selection-feature.json").exists()
             } else {
-                version != feedback_generation::VERSION && version != notebook_generation::VERSION
+                matches!(version, FORMAT | selection::SELECTED_STORE_FORMAT)
             },
             "unsupported backup generation policy"
         );
@@ -336,14 +420,6 @@ impl Store {
             "backup inventory exceeds supported restore bounds"
         );
         let complete_media = descriptors.iter().all(|h| inventory.contains_key(h));
-        let config_path = self.paths.data.join("config.snapshot.json");
-        let config_snapshot = if config_path.exists() {
-            let config: crate::config::Config = files::json(&config_path, MAX_RECORD as u64)?;
-            config.validate()?;
-            Some(config)
-        } else {
-            None
-        };
         Ok(Backup {
             format: if feedback {
                 feedback_generation::VERSION
@@ -353,7 +429,7 @@ impl Store {
             manifests,
             objects: inventory.values().cloned().collect(),
             complete_media,
-            config_snapshot,
+            config_snapshot: None,
             selected_history: None,
             feedback_history: feedback.then_some(FeedbackHistory {
                 format: 1,
@@ -364,15 +440,15 @@ impl Store {
             }),
         })
     }
-    fn export_write_locked(
+    fn export_write_locked<T>(
         &self,
         inner: &Inner,
         destination: &Path,
         backup: &Backup,
         backup_bytes: &[u8],
         attempted: &mut bool,
-        publish: impl FnOnce(&Path, &[u8]) -> Result<()>,
-    ) -> Result<()> {
+        publish: impl FnOnce(&Path, &[u8]) -> Result<T>,
+    ) -> Result<T> {
         let root = self.generation(inner.generation);
         for item in &backup.objects {
             let path = root.join("objects").join(&item.sha256);
@@ -384,8 +460,7 @@ impl Store {
             )?;
         }
         *attempted = true;
-        publish(&destination.join("backup.json"), backup_bytes)?;
-        Ok(())
+        publish(&destination.join("backup.json"), backup_bytes)
     }
 
     /// Verify a complete format-1 or selected format-2 archive without opening a
@@ -506,7 +581,10 @@ impl Store {
         );
         let root = self.generation(inner.generation);
         ensure!(
-            !matches!(feedback_generation::version(&root)?, 3 | 4),
+            matches!(
+                feedback_generation::version(&root)?,
+                FORMAT | selection::SELECTED_STORE_FORMAT
+            ),
             "selected feature backup unsupported"
         );
         let selected = selection::portable::collect(&root, self.actor_id, inner.generation)?;
@@ -675,7 +753,10 @@ impl Store {
     ) -> Result<()> {
         let current_root = self.generation(inner.generation);
         ensure!(
-            feedback_generation::version(&current_root)? != notebook_generation::VERSION,
+            matches!(
+                feedback_generation::version(&current_root)?,
+                FORMAT | selection::SELECTED_STORE_FORMAT | feedback_generation::VERSION
+            ),
             "legacy restore does not support notebook generation"
         );
         if exclusive {
@@ -873,6 +954,36 @@ impl Store {
     }
 }
 
+fn reserve_archive_root(destination: &Path) -> Result<()> {
+    // Exclusive reservation gives this attempt custody of a private root.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(destination)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(destination)?;
+    files::sync_dir(destination.parent().context("export parent missing")?)
+}
+
+fn canonical_archive_path(path: &Path) -> Result<PathBuf> {
+    files::safe_path(path)?;
+    inspection::canonical_with_missing_tail(path).context("archive path unavailable")
+}
+
+fn require_archive_disjoint<'a>(
+    canonical: &Path,
+    others: impl IntoIterator<Item = &'a Path>,
+) -> Result<()> {
+    for other in others {
+        let overlaps =
+            crate::restore_maintenance::overlap(canonical, &canonical_archive_path(other)?)
+                .map_err(|_| anyhow::anyhow!("cannot compare archive paths"))?;
+        ensure!(!overlaps, "isolated backup overlaps protected path");
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 impl Store {
     /// Same Store mutex as configuration/data publication; no credential-specific owner.
@@ -922,5 +1033,286 @@ impl Store {
                 hook,
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod isolated_snapshot_tests {
+    use super::ordinary_restore::tests::{record, Fixture};
+    use super::*;
+    use serde_json::json;
+    use sync::mode::{SyncModeChoice, SyncModeLease};
+
+    const SCREENSHOT: &[u8] = include_bytes!("../../tests/fixtures/trigger-dismiss/closed.png");
+
+    fn isolated_lease(store: &std::sync::Arc<Store>) -> SyncModeLease {
+        let original = store.sync_mode_snapshot().unwrap();
+        store
+            .set_sync_mode(
+                &original.token,
+                Uuid::new_v4(),
+                SyncModeChoice::IsolatedBackup {
+                    binding_sha256: digest(b"private account binding"),
+                },
+            )
+            .unwrap();
+        store
+            .sync_mode_lease(&store.sync_mode_snapshot().unwrap().token)
+            .unwrap()
+    }
+
+    fn screenshot_descriptor() -> Media {
+        Media {
+            sha256: digest(SCREENSHOT),
+            bytes: SCREENSHOT.len() as u64,
+            media_type: "image/png".into(),
+        }
+    }
+
+    #[test]
+    fn restores_exact_history_and_screenshot_to_a_distinct_actor_without_config() {
+        let source = Fixture::new();
+        let store = source.open();
+        let lease = isolated_lease(&store);
+        // Invalid config would prevent an ordinary export through the legacy policy.
+        fs::write(
+            store.paths.data.join("config.snapshot.json"),
+            b"PRIVATE_INVALID_CONFIG",
+        )
+        .unwrap();
+        fs::write(
+            store.paths.credentials.join("drive.json"),
+            b"PRIVATE_DRIVE_SECRET",
+        )
+        .unwrap();
+        fs::write(store.paths.cache.join("diagnostic"), b"PRIVATE_DIAGNOSTIC").unwrap();
+
+        let mut initial = record(&store);
+        let screenshot = screenshot_descriptor();
+        initial.media_descriptors.push(screenshot.clone());
+        store
+            .commit(
+                vec![initial.clone()],
+                BTreeMap::from([(screenshot.sha256.clone(), SCREENSHOT.to_vec())]),
+            )
+            .unwrap();
+        let mut next = initial.clone();
+        next.revision_id = Uuid::new_v4();
+        next.operation_id = Uuid::new_v4();
+        next.parents.insert(initial.revision_id);
+        next.payload = json!({"text": "updated local history"});
+        store
+            .commit(
+                vec![next.clone()],
+                BTreeMap::from([(screenshot.sha256.clone(), SCREENSHOT.to_vec())]),
+            )
+            .unwrap();
+
+        let path = source.root.join("isolated");
+        let report = store
+            .export_isolated_snapshot(&lease, &path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Store::inspect_backup(&path).unwrap(), report);
+        assert_eq!((report.format, report.manifests, report.objects), (1, 2, 3));
+        assert!(report.complete_media);
+        assert!(!report.configuration_included);
+        let marker = fs::read(path.join("backup.json")).unwrap();
+        let archive: serde_json::Value = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(
+            archive
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "format",
+                "manifests",
+                "objects",
+                "complete_media",
+                "config_snapshot",
+            ])
+        );
+        assert!(archive["config_snapshot"].is_null());
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(path.join("objects")).unwrap().count(), 3);
+        assert_eq!(
+            fs::read(path.join("objects").join(&screenshot.sha256)).unwrap(),
+            SCREENSHOT
+        );
+
+        let target = Fixture::new();
+        let restored = target.open();
+        let original_actor = restored.actor_id;
+        assert_ne!(original_actor, store.actor_id);
+        let plan = restored.prepare_ordinary_restore(&path, || Ok(())).unwrap();
+        assert!(plan.preview.source.complete_media);
+        assert!(!plan.preview.source.configuration_included);
+        assert!(matches!(
+            restored
+                .apply_ordinary_restore(&path, &plan.conditions, || Ok(()))
+                .unwrap(),
+            ordinary_restore::Publication::Verified(_)
+        ));
+        assert_eq!(restored.actor_id, original_actor);
+        assert_eq!(restored.manifests().unwrap(), store.manifests().unwrap());
+        assert!(restored.heads(next.namespace, next.record_id).unwrap() == vec![next]);
+        for reference in restored
+            .manifests()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m.records.iter().chain(&m.media))
+        {
+            assert_eq!(
+                restored.read_object(reference).unwrap(),
+                store.read_object(reference).unwrap()
+            );
+        }
+        assert_eq!(fs::read(path.join("backup.json")).unwrap(), marker);
+        assert!(store.export_isolated_snapshot(&lease, &path).is_err());
+        for owned in [
+            &store.paths.data,
+            &store.paths.cache,
+            &store.paths.credentials,
+        ] {
+            let nested = owned.join("refused");
+            assert!(store.export_isolated_snapshot(&lease, &nested).is_err());
+            assert!(!nested.exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refuses_case_alias_of_owned_root() {
+        let source = Fixture::new();
+        let store = source.open();
+        let lease = isolated_lease(&store);
+        store.commit(vec![record(&store)], BTreeMap::new()).unwrap();
+        let alias = source.root.join("CREDENTIALS").join("refused");
+        assert!(store.export_isolated_snapshot(&lease, &alias).is_err());
+        assert!(!alias.exists());
+    }
+
+    #[test]
+    fn refuses_wrong_store_mode_and_stale_leases_and_skips_empty_store() {
+        let source = Fixture::new();
+        let store = source.open();
+        let lease = isolated_lease(&store);
+        let empty = source.root.join("empty");
+        assert!(store
+            .export_isolated_snapshot(&lease, &empty)
+            .unwrap()
+            .is_none());
+        assert!(!empty.exists());
+        store.commit(vec![record(&store)], BTreeMap::new()).unwrap();
+
+        let foreign = Fixture::new();
+        let foreign_store = foreign.open();
+        foreign_store
+            .commit(vec![record(&foreign_store)], BTreeMap::new())
+            .unwrap();
+        let path = foreign.root.join("refused");
+        assert!(foreign_store
+            .export_isolated_snapshot(&lease, &path)
+            .is_err());
+        assert!(!path.exists());
+
+        let current = foreign_store.sync_mode_snapshot().unwrap();
+        foreign_store
+            .set_sync_mode(
+                &current.token,
+                Uuid::new_v4(),
+                SyncModeChoice::SharedGroup {
+                    group: Uuid::new_v4(),
+                    binding_sha256: digest(b"shared binding"),
+                    root_id: "shared-root".into(),
+                },
+            )
+            .unwrap();
+        let shared = foreign_store
+            .sync_mode_lease(&foreign_store.sync_mode_snapshot().unwrap().token)
+            .unwrap();
+        assert!(foreign_store
+            .export_isolated_snapshot(&shared, &path)
+            .is_err());
+        assert!(!path.exists());
+
+        // A genuine public transition refuses a live lease. Replace a private
+        // mode file in the fixture to exercise revalidation inside the export.
+        let mode_path = store.paths.data.join("sync/mode.json");
+        let mut mode: serde_json::Value =
+            serde_json::from_slice(&fs::read(&mode_path).unwrap()).unwrap();
+        mode["transitions"][0]["epoch"] = json!(Uuid::new_v4());
+        fs::write(&mode_path, serde_json::to_vec(&mode).unwrap()).unwrap();
+        let changed = store.sync_mode_snapshot().unwrap();
+        assert_ne!(changed.epoch, lease.snapshot().epoch);
+        assert_eq!(changed.mode, lease.snapshot().mode);
+        assert!(store.export_isolated_snapshot(&lease, &empty).is_err());
+        assert!(!empty.exists());
+    }
+
+    #[test]
+    fn preserves_declared_omission_and_refuses_corrupt_required_bytes() {
+        let source = Fixture::new();
+        let store = source.open();
+        let lease = isolated_lease(&store);
+        let media = screenshot_descriptor();
+        let mut entry = record(&store);
+        entry.media_descriptors.push(media.clone());
+        let bytes = serde_json::to_vec(&entry).unwrap();
+        let reference = ObjectRef {
+            sha256: digest(&bytes),
+            bytes: bytes.len() as u64,
+        };
+        let coverage = Coverage::Omitted {
+            sha256: media.sha256.clone(),
+            reason: Omission::SizeDeferred,
+        };
+        let manifest = Manifest {
+            format: FORMAT,
+            transaction_id: Uuid::new_v4(),
+            scope: Scope::LocalTransaction,
+            records: vec![reference.clone()],
+            record_namespaces: BTreeMap::from([(reference.sha256.clone(), entry.namespace)]),
+            media: vec![],
+            media_coverage: vec![coverage.clone()],
+        };
+        store
+            .import(manifest, BTreeMap::from([(reference.sha256, bytes)]))
+            .unwrap();
+        let partial = source.root.join("partial");
+        let report = store
+            .export_isolated_snapshot(&lease, &partial)
+            .unwrap()
+            .unwrap();
+        assert!(!report.complete_media);
+        assert_eq!(Store::inspect_backup(&partial).unwrap(), report);
+        assert_eq!(
+            Backup::read(&partial).unwrap().manifests[0].media_coverage,
+            vec![coverage]
+        );
+        assert!(!partial.join("objects").join(&media.sha256).exists());
+
+        let mut required = record(&store);
+        required.media_descriptors.push(media.clone());
+        store
+            .commit(
+                vec![required],
+                BTreeMap::from([(media.sha256.clone(), SCREENSHOT.to_vec())]),
+            )
+            .unwrap();
+        let generation = store.inner.lock().unwrap().generation;
+        let bytes_path = store
+            .generation(generation)
+            .join("objects")
+            .join(&media.sha256);
+        let path = source.root.join("corrupt");
+        fs::write(&bytes_path, b"corrupt screenshot").unwrap();
+        assert!(store.export_isolated_snapshot(&lease, &path).is_err());
+        assert!(!path.exists());
+        fs::remove_file(bytes_path).unwrap();
+        assert!(store.export_isolated_snapshot(&lease, &path).is_err());
+        assert!(!path.exists());
     }
 }

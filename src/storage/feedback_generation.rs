@@ -28,11 +28,26 @@ pub(crate) fn validate_version(
     version: u32,
     allow_pending: bool,
 ) -> Result<()> {
+    validate_version_with_budget(root, actor, generation, version, allow_pending, None)
+}
+pub(super) fn validate_version_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    version: u32,
+    allow_pending: bool,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
+) -> Result<()> {
+    let version = if version == target_generation::VERSION {
+        target_generation::base_version_with_budget(root, budget.as_deref_mut())?
+    } else {
+        version
+    };
     let marker = root.join(MARKER);
     files::safe_path(&marker)?;
     if version == VERSION || marker.exists() {
         ensure!(
-            files::json::<Feature>(&marker, MAX_RECORD as u64)
+            files::json_with_budget::<Feature>(&marker, MAX_RECORD as u64, budget.as_deref_mut())
                 .map_err(|_| anyhow::anyhow!("invalid feedback feature"))?
                 == Feature {
                     format: 1,
@@ -46,7 +61,17 @@ pub(crate) fn validate_version(
                 || allow_pending
                 || (version == notebook_generation::VERSION
                     && notebook_generation::validate_version(
-                        root, actor, generation, version, false
+                        root,
+                        actor,
+                        generation,
+                        version,
+                        false,
+                        budget.as_deref_mut()
+                    )
+                    .is_ok())
+                || (version == compound_generation::VERSION
+                    && compound_generation::validate_feature_with_budget(
+                        root, actor, generation, budget
                     )
                     .is_ok()),
             "interrupted feedback preparation"
@@ -98,6 +123,13 @@ pub(crate) fn prepare(
     );
     let generation = inner.generation;
     let root = store.generation(generation);
+    ensure!(
+        matches!(
+            version(&root)?,
+            FORMAT | selection::SELECTED_STORE_FORMAT | VERSION | notebook_generation::VERSION
+        ),
+        "feedback preparation does not support compound storage"
+    );
     selection::validate_generation_preparing(&root, store.actor_id, generation)?;
     if version(&root)? == notebook_generation::VERSION {
         ensure!(
@@ -145,7 +177,10 @@ pub(super) fn admit(
         "feedback is not selected/group data"
     );
     ensure!(
-        matches!(version(root)?, VERSION | notebook_generation::VERSION) && index.unavailable == 0,
+        matches!(
+            version(root)?,
+            VERSION | notebook_generation::VERSION | compound_generation::VERSION
+        ) && index.unavailable == 0,
         "feedback requires prepared complete generation"
     );
     validate(root, actor, generation, false)?;

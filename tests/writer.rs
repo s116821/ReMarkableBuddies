@@ -1463,3 +1463,234 @@ fn relocated_notebook_scenario_binary_freezes_local_asset_and_retains_a_closed_r
     );
     assert_eq!(std::fs::read(report_path).unwrap(), report_bytes);
 }
+
+#[test]
+fn stored_target_cli_sends_only_exact_mask_then_reopens_original_regional_source() {
+    use base64::Engine as _;
+    use remarkable_reader_buddy::{
+        config::Config,
+        conversation::{
+            target::{geometry::Geometry, Candidate, RecordRef, Understanding},
+            ImageUse, SourceObservation, TargetChange,
+        },
+        storage::{digest, Media, ObjectRef},
+    };
+    use std::{
+        io::Cursor,
+        process::{Command, Stdio},
+    };
+    let local = Local::new();
+    let api = Api::new(vec![
+        reply(r#"{"pages":[{"page":1,"status":"transcribed","text":"Selected equation x = 7"}]}"#),
+        reply("# Region\n\nSelected equation x = 7."),
+        reply("# Region\n\nA shorter explanation of x = 7."),
+    ]);
+    let config = Config {
+        paths: StorePaths {
+            data: local.0.join("data"),
+            cache: local.0.join("cache"),
+            credentials: local.0.join("credentials"),
+        },
+        model: Some("fixture-model".into()),
+        base_url: Some(api.origin.clone()),
+        ..Default::default()
+    };
+    let config_path = local.0.join("config.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let config = Config::load(Some(config_path.clone())).unwrap();
+    let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, None)
+        .unwrap_or_else(|_| panic!("ordinary product startup failed"));
+    let ledger = Ledger::new(store);
+    let c = Uuid::new_v4();
+    ledger.create(c, Uuid::new_v4(), 1).unwrap();
+    let user = Turn {
+        id: Uuid::new_v4(),
+        conversation: c,
+        exchange: Uuid::new_v4(),
+        sequence: 0,
+        role: Role::User,
+        mode: Mode::Reader,
+        outcome: Outcome::Prepared,
+        text: None,
+        sources: vec![Uuid::new_v4()],
+        correction_of: None,
+        created_ms: 1,
+        updated_ms: 1,
+        completion: None,
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([0, 0, 0])))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let png = encoded.into_inner();
+    let media = Media {
+        sha256: digest(&png),
+        bytes: png.len() as u64,
+        media_type: "image/png".into(),
+    };
+    ledger.stage_image(&media, png.as_slice()).unwrap();
+    let source = ImageUse {
+        id: user.sources[0],
+        conversation: c,
+        turn: user.id,
+        image: media,
+        observation: SourceObservation {
+            document: Uuid::new_v4(),
+            page: Uuid::new_v4(),
+            session: "synthetic-cli".into(),
+            visit: "synthetic-cli".into(),
+            content_revision: None,
+            order_revision: None,
+            capability_revision: "synthetic-cli".into(),
+            evidence_procedure: "synthetic-retained-original".into(),
+        },
+        width: 2,
+        height: 2,
+        purpose: "overview".into(),
+        ordinal: 0,
+        parent: None,
+        parent_dimensions: None,
+        crop: None,
+        transform: [0.5, 0., 0., 0.5, 0., 0.],
+        target: None,
+        captured_ms: 1,
+    };
+    ledger
+        .append(
+            Uuid::new_v4(),
+            ledger.expected(Namespace::Conversation, c).unwrap(),
+            user.clone(),
+            vec![source],
+        )
+        .unwrap();
+    let explicit = Turn {
+        id: Uuid::new_v4(),
+        conversation: c,
+        exchange: Uuid::new_v4(),
+        sequence: 0,
+        role: Role::User,
+        mode: Mode::Reader,
+        outcome: Outcome::Interpreted,
+        text: Some("Use the left region".into()),
+        sources: vec![],
+        correction_of: None,
+        created_ms: 1,
+        updated_ms: 1,
+        completion: None,
+    };
+    let target_id = Uuid::new_v5(&explicit.id, b"urn:rmb:source-target:v1");
+    ledger
+        .change_target(
+            Uuid::new_v4(),
+            ledger.expected(Namespace::Conversation, c).unwrap(),
+            explicit,
+            &TargetChange::Retarget {
+                source: user.sources[0],
+                candidate: Candidate {
+                    subject: "Left equation".into(),
+                    geometry: Some(Geometry {
+                        components: vec![vec![
+                            [0, 0],
+                            [500_000, 0],
+                            [500_000, 1_000_000],
+                            [0, 1_000_000],
+                        ]],
+                    }),
+                    understanding: Understanding::Interpreted,
+                },
+            },
+        )
+        .unwrap();
+    let envelope = ledger
+        .store()
+        .value(Namespace::Source, target_id)
+        .unwrap()
+        .unwrap();
+    let bytes = serde_json::to_vec(&envelope).unwrap();
+    let target = RecordRef {
+        namespace: Namespace::Source,
+        record: target_id,
+        revision: envelope.revision_id,
+        object: ObjectRef {
+            sha256: digest(&bytes),
+            bytes: bytes.len() as u64,
+        },
+    };
+    let request = remarkable_reader_buddy::writer::target::Request::GenerateTarget {
+        conversation: c,
+        operation: Uuid::new_v4(),
+        expected_root: ledger.expected(Namespace::Conversation, c).unwrap(),
+        target,
+        request: "Make regional notes".into(),
+        guidance: None,
+    };
+    drop(ledger);
+    let execute = |request: &Value| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reader-buddy"))
+            .arg("--writer-note")
+            .env("REMARKABLE_BUDDIES_CONFIG", &config_path)
+            .env("OPENAI_API_KEY", "local-fixture-key")
+            .env_remove("OPENAI_BASE_URL")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(request).unwrap())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let generated = execute(&serde_json::to_value(&request).unwrap());
+    assert_eq!(generated["status"], "generated", "{generated}");
+    assert_eq!(api.count(), 2);
+    let requests = api.requests.lock().unwrap();
+    let parts = requests[0]["messages"][0]["content"].as_array().unwrap();
+    let image = parts
+        .iter()
+        .find_map(|p| p["image_url"]["url"].as_str())
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.split_once(',').unwrap().1)
+        .unwrap();
+    let mask = image::load_from_memory(&bytes).unwrap().to_rgb8();
+    assert_eq!(mask.dimensions(), (2, 2));
+    assert_eq!(mask.get_pixel(0, 0).0, [0, 0, 0]);
+    assert_eq!(mask.get_pixel(1, 0).0, [255, 255, 255]);
+    assert!(!requests[1]["messages"][0]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["type"] == "image_url"));
+    drop(requests);
+    let refined = execute(
+        &json!({"command":"refine","conversation":c,"operation":Uuid::new_v4(),"request":"Shorter","draft":generated["draft"]}),
+    );
+    assert_eq!(refined["status"], "generated", "{refined}");
+    assert_eq!(api.count(), 3);
+    let ledger = Ledger::new(Arc::new(Store::open(config.paths).unwrap()));
+    let records = ledger.inspect(c, false).unwrap();
+    let regions = records
+        .iter()
+        .filter_map(|r| {
+            if let Record::RegionSource(r) = r {
+                Some(r)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].target.record, target_id);
+    assert!(records.iter().any(|r|matches!(r,Record::Turn(t) if t.id.to_string()==refined["draft"].as_str().unwrap() && t.text.as_deref().is_some_and(|s|s.matches("About: Left equation").count()==1))));
+}

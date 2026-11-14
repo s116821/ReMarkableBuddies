@@ -87,6 +87,22 @@ struct Model {
     response: Option<std::result::Result<String, String>>,
 }
 impl LLMEngine for Model {
+    fn guarded_timeout(&self) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(1))
+    }
+    fn execute_with_handoff(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut crate::llm::ModelHandoff<'_>,
+    ) -> Result<String> {
+        progress()?;
+        let mut result = None;
+        handoff(&mut || {
+            result = Some(self.execute());
+            Ok(())
+        })?;
+        result.ok_or_else(|| anyhow::anyhow!("fixture submit absent"))?
+    }
     fn add_text_content(&mut self, _: &str) {}
     fn add_image_content(&mut self, _: &str) {}
     fn clear_content(&mut self) {}
@@ -683,4 +699,135 @@ fn interruption_after_saved_generation_requires_new_explicit_export_intent() {
     assert_eq!(exported.status, Status::Exported);
     assert_eq!(m.calls, 1);
     assert_eq!(d.counts().2, 1);
+}
+
+#[test]
+fn regional_joined_generation_exports_then_refines_same_target_and_replays_without_calls() {
+    use crate::conversation::{target_source::tests::fixture, ContextBudget};
+    let (_f, ledger, c, _) = fixture();
+    let view = ledger
+        .context(
+            c,
+            &ContextBudget {
+                max_text_bytes: 4096,
+                max_turns: 8,
+                provider_token_limit: Some(4096),
+            },
+            |_| Ok(1),
+        )
+        .unwrap();
+    let target = view.targets[0].reference.clone();
+    let target_id = target.record;
+    let config = crate::config::Config {
+        paths: ledger.store().paths.clone(),
+        ..Default::default()
+    };
+    let request = Request::GenerateTargetAndExport {
+        outer_operation: Uuid::new_v4(),
+        correlation: Uuid::new_v4(),
+        effect_operation: Uuid::new_v4(),
+        generation: writer::target::Request::GenerateTarget {
+            conversation: c,
+            operation: Uuid::new_v4(),
+            expected_root: ledger.expected(Namespace::Conversation, c).unwrap(),
+            target,
+            request: "Make selected-region notes".into(),
+            guidance: None,
+        },
+    };
+    let mut model = Model {
+        calls: 0,
+        hook: None,
+        response: Some(Ok(
+            r#"{"pages":[{"page":1,"status":"transcribed","text":"x = 7"}]}"#.into(),
+        )),
+    };
+    let destination = Destination::default();
+    let (_sender, canceled) = watch::channel(false);
+    let generated = run_regional(
+        &ledger,
+        &mut model,
+        &destination,
+        &request,
+        &config,
+        "fixture",
+        canceled.clone(),
+    );
+    assert_eq!(
+        generated.status,
+        Status::Exported,
+        "{}",
+        serde_json::to_string(&generated).unwrap()
+    );
+    assert_eq!(model.calls, 2);
+    let scope = ledger
+        .export_association(c, generated.correlation)
+        .unwrap()
+        .unwrap()
+        .source_scope;
+    assert!(scope.ends_with(&format!(":target:{target_id}")));
+    let calls = (model.calls, destination.0.lock().unwrap().writes);
+    let replay = run_regional(
+        &ledger,
+        &mut model,
+        &destination,
+        &request,
+        &config,
+        "fixture",
+        canceled.clone(),
+    );
+    assert_eq!(replay.status, Status::Historical);
+    assert_eq!((model.calls, destination.0.lock().unwrap().writes), calls);
+    model.response = Some(Ok(
+        "# Study\n\nx = 7. A shorter regional explanation.".into()
+    ));
+    let refine = Request::RefineAndExport {
+        outer_operation: Uuid::new_v4(),
+        refinement: writer::Request::Refine {
+            conversation: c,
+            operation: Uuid::new_v4(),
+            request: "Shorter".into(),
+            draft: generated.draft.unwrap(),
+        },
+        correlation: generated.correlation,
+        effect_operation: Uuid::new_v4(),
+    };
+    let refined = run(
+        &ledger,
+        &mut model,
+        &destination,
+        &refine,
+        &config.personalization_snapshot().unwrap(),
+        canceled,
+    );
+    assert_eq!(
+        refined.status,
+        Status::Exported,
+        "{}",
+        serde_json::to_string(&refined).unwrap()
+    );
+    assert_eq!(model.calls, 3);
+    let state = destination.0.lock().unwrap();
+    assert_eq!(state.writes, 2);
+    assert_eq!(state.notes.len(), 1);
+    assert_eq!(state.notes.values().next().unwrap().version, 2);
+    assert_eq!(
+        state
+            .notes
+            .values()
+            .next()
+            .unwrap()
+            .content
+            .matches("About: Original region")
+            .count(),
+        1
+    );
+    assert_eq!(
+        ledger
+            .export_association(c, generated.correlation)
+            .unwrap()
+            .unwrap()
+            .source_scope,
+        scope
+    );
 }

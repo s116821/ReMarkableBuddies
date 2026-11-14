@@ -278,7 +278,17 @@ pub(crate) fn read_with_budget(
     Ok(bytes)
 }
 pub fn json<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
-    serde_json::from_slice(&read(path, limit)?)
+    json_with_budget(path, limit, None)
+}
+pub(crate) fn json_with_budget<T: DeserializeOwned>(
+    path: &Path,
+    limit: u64,
+    mut budget: Option<&mut super::selection::SelectedReadBudget>,
+) -> Result<T> {
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.charge(0, 1, 0, 0)?;
+    }
+    serde_json::from_slice(&read_with_budget(path, limit, budget)?)
         .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))
 }
 pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -324,6 +334,53 @@ fn atomic_failure(path: &Path, failure: AtomicFailure) -> Result<()> {
     }
     Ok(())
 }
+// Exact-path, one-shot marker interlock for production-path tests only.
+#[cfg(test)]
+type MarkerInterlock = (PathBuf, usize, Box<dyn FnOnce()>);
+#[cfg(test)]
+thread_local! {
+    static MARKER_INTERLOCK: std::cell::RefCell<Option<MarkerInterlock>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct MarkerInterlockReset;
+#[cfg(test)]
+impl Drop for MarkerInterlockReset {
+    fn drop(&mut self) {
+        MARKER_INTERLOCK.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+#[cfg(test)]
+pub(crate) fn interlock_marker_for_test(
+    path: PathBuf,
+    skip: usize,
+    change: impl FnOnce() + 'static,
+) -> MarkerInterlockReset {
+    MARKER_INTERLOCK.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some((path, skip, Box::new(change)));
+    });
+    MarkerInterlockReset
+}
+#[cfg(test)]
+fn marker_interlock(path: &Path) {
+    let change = MARKER_INTERLOCK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let (target, skip, _) = slot.as_mut()?;
+        if target != path {
+            return None;
+        }
+        if *skip > 0 {
+            *skip -= 1;
+            return None;
+        }
+        slot.take().map(|(_, _, change)| change)
+    });
+    if let Some(change) = change {
+        change();
+    }
+}
 impl Drop for Temporary {
     fn drop(&mut self) {
         drop(self.file.take());
@@ -363,6 +420,14 @@ pub(crate) fn publish_archive_marker(root: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn atomic_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+    atomic_with_guard(path, write, || Ok(()))
+}
+
+fn atomic_with_guard(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> Result<()>,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     safe_path(path)?;
     let parent = path.parent().context("missing owned parent")?;
     let tmp = parent.join(format!(".stage-{}", Uuid::new_v4()));
@@ -384,6 +449,9 @@ fn atomic_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Resu
     drop(temporary.file.take());
     #[cfg(all(test, unix))]
     atomic_failure(path, AtomicFailure::BeforeRename)?;
+    #[cfg(test)]
+    marker_interlock(path);
+    before_rename()?;
     fs::rename(&temporary.path, path).context("atomic publication failed")?;
     #[cfg(all(test, unix))]
     atomic_failure(path, AtomicFailure::RenameAcknowledgment)?;
@@ -418,6 +486,14 @@ pub(crate) fn cleanup_staging(directory: &Path) -> Result<()> {
 pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     atomic(path, &serde_json::to_vec(value)?)
 }
+pub(crate) fn atomic_json_guarded<T: Serialize>(
+    path: &Path,
+    value: &T,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    atomic_with_guard(path, |file| Ok(file.write_all(&bytes)?), before_rename)
+}
 pub fn create_identity<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     safe_path(path)?;
     let mut options = OpenOptions::new();
@@ -437,10 +513,30 @@ pub fn create_identity<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     sync_dir(path.parent().context("identity parent missing")?)
 }
 pub fn object(path: &Path, expected: &str, bytes: &[u8]) -> Result<()> {
+    object_with_budget(path, expected, bytes, None, false)
+}
+pub(crate) fn object_with_budget(
+    path: &Path,
+    expected: &str,
+    bytes: &[u8],
+    mut budget: Option<&mut super::selection::SelectedReadBudget>,
+    media: bool,
+) -> Result<()> {
     ensure!(digest(bytes) == expected, "object hash mismatch");
     if path.exists() {
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.charge(0, 1, 0, 0)?;
+            if media {
+                let reference = super::ObjectRef {
+                    sha256: expected.to_owned(),
+                    bytes: bytes.len() as u64,
+                };
+                Source::open_with_budget(path, &reference, Some(budget), true)?;
+                return Ok(());
+            }
+        }
         ensure!(
-            read(path, bytes.len() as u64)? == bytes,
+            read_with_budget(path, bytes.len() as u64, budget)? == bytes,
             "stored object collision"
         );
         return Ok(());

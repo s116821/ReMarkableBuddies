@@ -472,6 +472,19 @@ fn composed_post_consumption_panic_is_sticky_without_publication() {
         .unwrap()
         .unwrap()
         .transaction;
+    // A raw initialized mixed snapshot is not ready for product admission.
+    // Neither absent nor corrupt receiving bookkeeping can replace registration.
+    let selected_before = serde_json::to_vec(&store.manifests().unwrap()).unwrap();
+    assert!(reader.with_current(&initial, |_| Ok(())).is_err());
+    let checkpoint = store.paths.data.join("sync/state.json");
+    assert!(!checkpoint.exists());
+    std::fs::write(&checkpoint, b"not a receiving checkpoint").unwrap();
+    assert!(reader.with_current(&initial, |_| Ok(())).is_err());
+    assert_eq!(
+        serde_json::to_vec(&store.manifests().unwrap()).unwrap(),
+        selected_before
+    );
+    std::fs::remove_file(checkpoint).unwrap();
     let memory = memory::selected::SelectedMemory::new(store.clone(), identity.clone()).unwrap();
     let global_key = memory::Key {
         profile: identity.profile,
@@ -521,6 +534,9 @@ fn composed_post_consumption_panic_is_sticky_without_publication() {
             registrations,
         })
         .unwrap();
+    // The exact receiving-local registration now supplies readiness independently
+    // of any worker status/checkpoint file.
+    reader.with_current(&initial, |_| Ok(())).unwrap();
     let interpretation = SelectedReaderWrite {
         operation: Uuid::new_v4(),
         root: selected_pin(&store, &initial, conversation),

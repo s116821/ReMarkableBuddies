@@ -1,3 +1,6 @@
+// Typed native image/intent ingress remains an explicit integration gap.
+#[allow(dead_code)]
+pub(crate) mod handwriting;
 use crate::{
     config::Config,
     conversation::{
@@ -36,7 +39,7 @@ pub struct Dispatch<'a> {
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
-    blank_events: std::collections::BTreeSet<Uuid>,
+    input_events: std::collections::BTreeSet<Uuid>,
 }
 
 impl<'a> Dispatch<'a> {
@@ -47,9 +50,13 @@ impl<'a> Dispatch<'a> {
             "unified dispatch requires ordinary local configuration"
         );
         config.memory.validate()?;
-        let local = Arc::new(crate::mode_maintenance::admit_local_dispatch(
-            ledger.store(),
-        )?);
+        let store = ledger.store();
+        let local = Arc::new(match store.sync_mode_snapshot()?.mode {
+            Some(crate::storage::sync::mode::SyncMode::IsolatedBackup { .. }) => {
+                crate::mode_maintenance::admit_isolated_local_dispatch(store, config)?
+            }
+            _ => crate::mode_maintenance::admit_local_dispatch(store)?,
+        });
         let memory = if config.memory.enabled {
             Some(Arc::new(crate::memory::LocalMemory::admitted_local(
                 ledger.store().clone(),
@@ -67,8 +74,20 @@ impl<'a> Dispatch<'a> {
             store: ledger.store().clone(),
             _local: local,
             memory,
-            blank_events: Default::default(),
+            input_events: Default::default(),
         })
+    }
+
+    pub(crate) fn handwriting_runtime(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<Option<crate::handwriting::runtime::Runtime>> {
+        self.require_ledger(ledger)?;
+        crate::handwriting::runtime::Runtime::new(
+            self.config,
+            self.store.clone(),
+            self._local.clone(),
+        )
     }
 
     pub fn local_memory(&self) -> Option<Arc<crate::memory::LocalMemory>> {
@@ -120,7 +139,7 @@ impl<'a> Dispatch<'a> {
             "conversation revision changed"
         );
         ensure!(
-            self.blank_events.len() < 4096 && self.blank_events.insert(admitted.operation),
+            self.input_events.len() < 4096 && self.input_events.insert(admitted.operation),
             "blank start event unavailable or already consumed"
         );
         open()

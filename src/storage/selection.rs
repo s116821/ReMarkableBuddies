@@ -1,5 +1,6 @@
 //! Domain-opaque atomic selected references. No domain/native admission or worker.
 mod budget;
+pub(crate) use budget::SelectedReadCheckpoint;
 pub use budget::{SelectedReadBudget, SelectedReadUsage};
 mod outbox;
 pub(crate) mod portable;
@@ -157,12 +158,37 @@ pub struct SelectionToken {
     selection_sha256: String,
 }
 impl Store {
+    pub(crate) fn read_selected_proof_record(
+        &self,
+        reference: &ObjectRef,
+        reads: Option<&mut SelectedReadBudget>,
+    ) -> Result<Vec<u8>> {
+        ensure!(
+            reference.bytes <= MAX_RECORD as u64,
+            "selected proof record too large"
+        );
+        if let Some(reads) = reads {
+            // Reachability and integrity verification stream once before the
+            // content read. Account for the final verification buffer too.
+            reads.charge(0, 1, 2 * reference.bytes + 64 * 1024, 0)?;
+        }
+        self.read_object(reference)
+    }
+
     pub(crate) fn historical_predecessor_token(
         &self,
         scope: &SelectionScope,
         operation: Uuid,
     ) -> Result<Option<SelectionToken>> {
-        self.selected_predecessor(scope, operation)?
+        self.historical_predecessor_token_inner(scope, operation, None)
+    }
+    pub(crate) fn historical_predecessor_token_inner(
+        &self,
+        scope: &SelectionScope,
+        operation: Uuid,
+        reads: Option<&mut SelectedReadBudget>,
+    ) -> Result<Option<SelectionToken>> {
+        self.selected_predecessor_inner(scope, operation, reads)?
             .as_ref()
             .map(publication::token)
             .transpose()
@@ -227,6 +253,54 @@ pub struct SelectedReadSnapshot {
 }
 
 impl Store {
+    /// Historical immutable staging; no selection/admission is minted. The full
+    /// exact closure is validated independently of the all-history index.
+    pub(crate) fn stage_selected_candidate(
+        &self,
+        manifest: &Manifest,
+        objects: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Vec<Envelope>> {
+        manifest.validate()?;
+        let required: BTreeMap<_, _> = manifest
+            .records
+            .iter()
+            .chain(&manifest.media)
+            .map(|r| (r.sha256.as_str(), r.bytes))
+            .collect();
+        ensure!(
+            objects.len() == required.len()
+                && objects.iter().all(|(hash, bytes)| {
+                    required.get(hash.as_str()) == Some(&(bytes.len() as u64))
+                        && digest(bytes) == *hash
+                }),
+            "candidate object closure differs"
+        );
+        let media_bytes = manifest.media.iter().try_fold(0u64, |n, r| {
+            n.checked_add(r.bytes).context("candidate media overflow")
+        })?;
+        ensure!(
+            media_bytes <= MAX_MEDIA,
+            "candidate media exceeds receiving bound"
+        );
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        let root = self.generation(inner.generation);
+        Self::validate_namespace_family(&root, manifest)?;
+        if target_generation::base_version(&root)? == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
+        for (hash, bytes) in objects {
+            files::object(&root.join("objects").join(hash), hash, bytes)?;
+        }
+        let records = Self::validate_objects(&root, manifest)?;
+        publication::closure_index(&records, true)?;
+        notebook_generation::validate_records(&root, &Index::default(), &records)?;
+        target_generation::validate_records(&Index::default(), &records, &manifest.records)?;
+        Ok(records.into_iter().map(|(envelope, _)| envelope).collect())
+    }
+
     /// Read an existing complete selection. Absence is not an empty winner or
     /// permission to bootstrap/publish. Bootstrap is a separate explicit call.
     /// Reachable accepted history and required historical closures must remain
@@ -237,7 +311,7 @@ impl Store {
         limit: usize,
     ) -> Result<Option<SelectedSnapshot>> {
         Ok(self
-            .selected_snapshot_inner(scope, limit, None)?
+            .selected_snapshot_inner(scope, limit, None, true)?
             .map(|read| read.snapshot))
     }
 
@@ -251,7 +325,17 @@ impl Store {
         limit: usize,
         budget: &mut SelectedReadBudget,
     ) -> Result<Option<SelectedReadSnapshot>> {
-        self.selected_snapshot_inner(scope, limit, Some(budget))
+        self.selected_snapshot_inner(scope, limit, Some(budget), true)
+    }
+
+    // Metadata-only historical evidence for handwriting ranking. Callers
+    // verify the selected sample independently before admitting an example.
+    pub(crate) fn selected_handwriting_metadata(
+        &self,
+        scope: &SelectionScope,
+        budget: &mut SelectedReadBudget,
+    ) -> Result<Option<SelectedReadSnapshot>> {
+        self.selected_snapshot_inner(scope, MAX_ITEMS, Some(budget), false)
     }
 
     fn selected_snapshot_inner(
@@ -259,6 +343,7 @@ impl Store {
         scope: &SelectionScope,
         limit: usize,
         mut budget: Option<&mut SelectedReadBudget>,
+        verify_media: bool,
     ) -> Result<Option<SelectedReadSnapshot>> {
         scope.validate()?;
         ensure!(
@@ -273,6 +358,9 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         let root = self.generation(inner.generation);
+        if target_generation::base_version(&root)? == compound_generation::VERSION {
+            compound_generation::validate_ready(&self.paths, self.actor_id, inner.generation)?;
+        }
         let path = root.join("selections").join(scope.filename()?);
         files::safe_path(&path)?;
         if !path.exists() {
@@ -314,10 +402,11 @@ impl Store {
         let mut accepted_history = Vec::new();
         let mut sha256 = head_sha256;
         for transaction in history {
-            let parts = publication::validate_closure_with_budget(
+            let parts = publication::validate_closure_for_read(
                 &root,
                 &transaction,
                 budget.as_deref_mut(),
+                verify_media,
             )?;
             let previous = transaction.previous_sha256.clone();
             if keep_history {
@@ -342,22 +431,33 @@ impl Store {
             };
             sha256 = previous;
         }
-        let selected_records = Self::validate_objects_with_budget(
+        let selected_records = Self::validate_objects_inner(
             &root,
             &transaction.selected,
             budget.as_deref_mut(),
+            None,
+            verify_media,
         )?;
         publication::closure_index(&selected_records, true)?;
         let mut retained_records = Vec::new();
         for manifest in &transaction.retained {
             retained_records.extend(
-                Self::validate_objects_with_budget(&root, manifest, budget.as_deref_mut())?
-                    .into_iter()
-                    .map(|(record, _)| record),
+                Self::validate_objects_inner(
+                    &root,
+                    manifest,
+                    budget.as_deref_mut(),
+                    None,
+                    verify_media,
+                )?
+                .into_iter()
+                .map(|(record, _)| record),
             );
         }
         let mut media = BTreeMap::new();
-        for manifest in std::iter::once(&transaction.selected).chain(&transaction.retained) {
+        for manifest in std::iter::once(&transaction.selected)
+            .chain(&transaction.retained)
+            .filter(|_| verify_media)
+        {
             for reference in &manifest.media {
                 if let Some(existing) = media.get(&reference.sha256) {
                     let existing: &files::Source = existing;
@@ -398,6 +498,16 @@ impl Store {
 }
 
 pub(crate) const SELECTED_STORE_FORMAT: u32 = 2;
+pub(crate) const COMPOUND_STORE_FORMAT: u32 = 5;
+
+#[derive(Debug)]
+pub(crate) struct LocalOperationConflict;
+impl std::fmt::Display for LocalOperationConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("local selected operation already has a publication receipt")
+    }
+}
+impl std::error::Error for LocalOperationConflict {}
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SelectionFeature {
@@ -406,21 +516,36 @@ struct SelectionFeature {
     generation: Uuid,
 }
 pub(crate) fn validate_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, false)
+    validate_generation_with_budget(root, actor, generation, None)
+}
+pub(super) fn validate_generation_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    budget: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false, false, false, budget)
 }
 pub(crate) fn validate_generation_preparing(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, true, false)
+    validate_generation_policy(root, actor, generation, true, false, false, None)
 }
 pub(crate) fn validate_generation_preparing_notebook(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
 ) -> Result<()> {
-    validate_generation_policy(root, actor, generation, false, true)
+    validate_generation_policy(root, actor, generation, false, true, false, None)
+}
+pub(crate) fn validate_generation_preparing_targets(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+) -> Result<()> {
+    validate_generation_policy(root, actor, generation, false, true, true, None)
 }
 fn validate_generation_policy(
     root: &Path,
@@ -428,12 +553,26 @@ fn validate_generation_policy(
     generation: Uuid,
     preparing: bool,
     preparing_notebook: bool,
+    preparing_targets: bool,
+    mut budget: Option<&mut SelectedReadBudget>,
 ) -> Result<()> {
     ensure!(
         !actor.is_nil() && !generation.is_nil(),
         "nil selected store identity"
     );
-    let version: u32 = files::json(&root.join("format.json"), 64)?;
+    let raw_version: u32 =
+        files::json_with_budget(&root.join("format.json"), 64, budget.as_deref_mut())?;
+    if raw_version == target_generation::VERSION {
+        target_generation::validate_feature_with_budget(
+            root,
+            actor,
+            generation,
+            budget.as_deref_mut(),
+        )?;
+    } else if root.join(target_generation::MARKER).exists() {
+        ensure!(preparing_targets, "interrupted source-target preparation");
+    }
+    let version = target_generation::base_version_with_budget(root, budget.as_deref_mut())?;
     ensure!(
         matches!(
             version,
@@ -441,11 +580,26 @@ fn validate_generation_policy(
                 | SELECTED_STORE_FORMAT
                 | feedback_generation::VERSION
                 | notebook_generation::VERSION
+                | compound_generation::VERSION
         ),
         "unsupported generation format"
     );
-    feedback_generation::validate_version(root, actor, generation, version, preparing)?;
-    notebook_generation::validate_version(root, actor, generation, version, preparing_notebook)?;
+    feedback_generation::validate_version_with_budget(
+        root,
+        actor,
+        generation,
+        version,
+        preparing,
+        budget.as_deref_mut(),
+    )?;
+    notebook_generation::validate_version(
+        root,
+        actor,
+        generation,
+        version,
+        preparing_notebook,
+        budget.as_deref_mut(),
+    )?;
     if version == FORMAT {
         ensure!(
             !has_selected(root)?,
@@ -454,9 +608,12 @@ fn validate_generation_policy(
     }
     let feature = root.join("selection-feature.json");
     files::safe_path(&feature)?;
-    if version == SELECTED_STORE_FORMAT || feature.exists() {
+    if version == SELECTED_STORE_FORMAT
+        || version == compound_generation::VERSION
+        || feature.exists()
+    {
         ensure!(
-            files::json::<SelectionFeature>(&feature, MAX_RECORD as u64)?
+            files::json_with_budget::<SelectionFeature>(&feature, MAX_RECORD as u64, budget)?
                 == SelectionFeature {
                     format: FORMAT,
                     actor,
@@ -468,8 +625,16 @@ fn validate_generation_policy(
     Ok(())
 }
 pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
-    validate_generation(root, actor, generation)?;
-    let version = files::json::<u32>(&root.join("format.json"), 64)?;
+    prepare_generation_with_budget(root, actor, generation, None)
+}
+fn prepare_generation_with_budget(
+    root: &Path,
+    actor: Uuid,
+    generation: Uuid,
+    mut budget: Option<&mut SelectedReadBudget>,
+) -> Result<()> {
+    validate_generation_with_budget(root, actor, generation, budget.as_deref_mut())?;
+    let version = files::json_with_budget::<u32>(&root.join("format.json"), 64, budget)?;
     ensure!(
         version != notebook_generation::VERSION,
         "selected notebook storage unsupported"
@@ -491,6 +656,18 @@ pub(crate) fn prepare_generation(root: &Path, actor: Uuid, generation: Uuid) -> 
         }
     }
     Ok(())
+}
+
+pub(super) fn stage_compound_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    compound_generation::validate_owned_staging(root, actor, generation)?;
+    files::atomic_json(
+        &root.join("selection-feature.json"),
+        &SelectionFeature {
+            format: FORMAT,
+            actor,
+            generation,
+        },
+    )
 }
 
 pub(crate) fn has_selected(root: &Path) -> Result<bool> {
@@ -525,7 +702,12 @@ pub(crate) fn recover_selected(root: &Path, generation: Uuid) -> Result<Vec<Vali
         );
         let scope = current.scope.clone();
         for transaction in publication::history(root, generation, &scope, current)? {
-            pending.extend(publication::validate_closure(root, &transaction)?);
+            let parts = publication::validate_closure(root, &transaction)?;
+            for (manifest, records) in &parts {
+                notebook_generation::validate_records(root, &Index::default(), records)?;
+                target_generation::validate_records(&Index::default(), records, &manifest.records)?;
+            }
+            pending.extend(parts);
         }
     }
     Ok(pending)

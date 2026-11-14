@@ -10,7 +10,11 @@ pub mod portable;
 pub mod product;
 pub mod product_settings;
 pub mod research_settings;
+// The selected researched receiver is assembled separately from ordinary resolve.
+#[allow(dead_code)]
+pub(crate) mod researched_reader;
 pub mod schema;
+mod source_snapshot;
 use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
@@ -20,6 +24,7 @@ use crate::{
 use anyhow::{ensure, Result};
 pub use personalization::{Personalization, PersonalizationSnapshot};
 use serde::{Deserialize, Serialize};
+pub use source_snapshot::SourceSnapshot;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -61,6 +66,10 @@ impl SyncPolicy {
             !self.namespaces.contains(&Namespace::UnassociatedFeedback),
             "unassociated feedback live sync unsupported"
         );
+        ensure!(
+            !self.namespaces.contains(&Namespace::PortableConfiguration),
+            "portable configuration uses selected shared sync only"
+        );
         ensure!(self.max_media_bytes <= MAX_MEDIA, "invalid media limit");
         ensure!(
             self.collection.is_none_or(|c| !c.is_nil()),
@@ -101,10 +110,15 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub research_policy: Option<Option<ResearchPolicy>>,
+    // Append new fields to preserve legacy positional Config array prefixes.
+    pub handwriting: crate::handwriting::Configuration,
+    #[serde(skip)]
+    pub source_snapshot: Option<SourceSnapshot>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
+            source_snapshot: None,
             config_schema_version: 1,
             product_settings: None,
             model: None,
@@ -116,6 +130,7 @@ impl Default for Config {
             model_credential: None,
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
+            handwriting: crate::handwriting::Configuration::default(),
             reader: crate::reader_runtime::Configuration::default(),
             personalization: Personalization::default(),
             research_policy: None,
@@ -123,16 +138,24 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn saved_path(&self) -> Option<&Path> {
+        self.source_snapshot
+            .as_ref()
+            .map(|source| source.fingerprint().0)
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
         let explicit = path.is_some();
         let path =
             path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into());
-        let config = if path.exists() {
-            files::json(&path, MAX_RECORD as u64)?
+        let (mut config, observed): (Self, Option<Vec<u8>>) = if path.exists() {
+            let bytes = files::read(&path, MAX_RECORD as u64)?;
+            (serde_json::from_slice(&bytes)?, Some(bytes))
         } else {
             ensure!(!explicit, "selected configuration is missing");
-            Self::default()
+            (Self::default(), None)
         };
+        config.source_snapshot = Some(SourceSnapshot::observed(path, observed.as_deref()));
         Self::validate(&config)?;
         Ok(config)
     }
@@ -155,6 +178,11 @@ impl Config {
         );
         self.sync.validate()?;
         self.memory.validate()?;
+        self.handwriting.validate()?;
+        ensure!(
+            !self.handwriting.enabled || !self.sync.enabled,
+            "handwriting requires local or selected admission without legacy sync"
+        );
         self.reader.validate()?;
         ensure!(
             !(self.reader.selection.is_some() && self.sync.enabled),
