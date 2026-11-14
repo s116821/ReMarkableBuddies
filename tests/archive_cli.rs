@@ -349,12 +349,18 @@ fn retained_command_selector_is_explicit_complete_and_closed() {
         invalid[index] = Some(value.into());
         assert!(RetainedCommand::select(invalid).is_err());
     }
+    // Joining onto a Windows verbatim path can remove the dot component.
+    let separator = std::path::MAIN_SEPARATOR;
+    let mut dot_path = path.parent().unwrap().as_os_str().to_os_string();
+    dot_path.push(format!("{separator}.{separator}"));
+    dot_path.push(path.file_name().unwrap());
+    assert_ne!(dot_path.as_os_str(), path.as_os_str());
     for invalid_path in [
         PathBuf::new(),
         PathBuf::from("retained-command"),
         path.with_file_name("missing"),
         path.parent().unwrap().to_path_buf(),
-        path.parent().unwrap().join(".").join("retained-command"),
+        PathBuf::from(dot_path),
     ] {
         assert!(RetainedCommand::select(custody_values(&invalid_path, bytes)).is_err());
     }
