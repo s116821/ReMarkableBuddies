@@ -1037,18 +1037,18 @@ fn ordinary_marked_sdk_reader_composes_one_erase_with_the_saved_user_projection(
                     let capture: RecordRef =
                         serde_json::from_value(mark["capture"].clone()).unwrap();
                     let mut budget = ReadBudget::default();
-                    assert_eq!(
-                        store.resolve_record(&interpreted, &mut budget).unwrap(),
-                        current
+                    assert!(
+                        store.resolve_record(&interpreted, &mut budget).unwrap() == current,
+                        "interpreted receipt reference differs from the current user"
                     );
                     assert_eq!(user.sources.as_slice(), &[capture.record]);
                     let capture_head = store
                         .value(Namespace::Source, capture.record)
                         .unwrap()
                         .unwrap();
-                    assert_eq!(
-                        store.resolve_record(&capture, &mut budget).unwrap(),
-                        capture_head
+                    assert!(
+                        store.resolve_record(&capture, &mut budget).unwrap() == capture_head,
+                        "receipt capture reference differs from the current capture"
                     );
                     let batch = ledger.stored_sdk_images(capture.record).unwrap();
                     assert_eq!(batch.turn, user.id);
