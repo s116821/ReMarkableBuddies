@@ -700,3 +700,287 @@ fn notebook_archive_cli_refuses_case_aliases_without_changing_owned_paths() {
     assert!(!destination.exists());
     assert_eq!(snapshot(&paths.data), before);
 }
+
+// The isolated exporter is crate-private and is already covered with its real
+// producer in archive_maintenance::tests. This external CLI fixture uses the
+// real public ordinary and portable exporters, then assembles only the fixed
+// V1 outer marker. It does not qualify isolated lease/publication custody.
+fn isolated_cli_package(source: &Fixture, partial: bool) -> (std::path::PathBuf, String, Value) {
+    use buddy::storage::{
+        digest, Coverage, Envelope, Kind, Manifest, Media, Namespace, ObjectRef, Omission, Scope,
+        Uuid,
+    };
+    use std::collections::BTreeMap;
+    let store = Store::open(source.paths()).unwrap();
+    let media = if partial {
+        b"PRIVATE_OMITTED_MEDIA".as_slice()
+    } else {
+        b"".as_slice()
+    };
+    let media_sha = digest(media);
+    let entry = Envelope {
+        envelope_version: 1,
+        namespace: Namespace::Conversation,
+        domain_schema_version: 1,
+        record_id: Uuid::new_v4(),
+        revision_id: Uuid::new_v4(),
+        parents: Default::default(),
+        operation_id: Uuid::new_v4(),
+        actor_id: store.actor_id,
+        kind: Kind::Value,
+        payload: json!({"text":"PRIVATE_CONVERSATION"}),
+        media_descriptors: vec![Media {
+            sha256: media_sha.clone(),
+            bytes: media.len() as u64,
+            media_type: "application/octet-stream".into(),
+        }],
+    };
+    if partial {
+        let bytes = serde_json::to_vec(&entry).unwrap();
+        let sha = digest(&bytes);
+        store
+            .import(
+                Manifest {
+                    format: 1,
+                    transaction_id: Uuid::new_v4(),
+                    scope: Scope::LocalTransaction,
+                    records: vec![ObjectRef {
+                        sha256: sha.clone(),
+                        bytes: bytes.len() as u64,
+                    }],
+                    record_namespaces: BTreeMap::from([(sha.clone(), Namespace::Conversation)]),
+                    media: vec![],
+                    media_coverage: vec![Coverage::Omitted {
+                        sha256: media_sha,
+                        reason: Omission::SizeDeferred,
+                    }],
+                },
+                BTreeMap::from([(sha, bytes)]),
+            )
+            .unwrap();
+    } else {
+        store
+            .commit(vec![entry], BTreeMap::from([(media_sha, media.to_vec())]))
+            .unwrap();
+    }
+    fs::write(
+        source.root.join("config.json"),
+        serde_json::to_vec(&json!({"paths":source.paths(),
+        "personalization":{"enabled":true,"text":"PRIVATE_PORTABLE_TEXT"},"model":"PRIVATE_MODEL"}))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        source.paths().credentials.join("credential-sentinel"),
+        b"PRIVATE_CREDENTIAL",
+    )
+    .unwrap();
+    fs::write(
+        source.paths().cache.join("cache-sentinel"),
+        b"PRIVATE_CACHE",
+    )
+    .unwrap();
+    let package = source.root.join("isolated-package");
+    fs::create_dir(&package).unwrap();
+    assert_eq!(store.export(&package.join("data")).unwrap(), !partial);
+    drop(store);
+    let mut exported = Vec::new();
+    buddy::config::portable::export(source.root.join("config.json"))
+        .write_to(&mut exported)
+        .unwrap();
+    let portable: Value = serde_json::from_slice(&exported).unwrap();
+    assert_eq!(portable["status"], "ok");
+    let artifact = serde_json::to_vec(&portable["artifact"]).unwrap();
+    fs::write(package.join("portable-configuration.json"), &artifact).unwrap();
+    let data = fs::read(package.join("data/backup.json")).unwrap();
+    let data_ref = json!({"bytes":data.len(),"sha256":digest(&data)});
+    let portable_ref = json!({"bytes":artifact.len(),"sha256":digest(&artifact)});
+    let marker = serde_json::to_vec(&json!({"isolated_backup_version":1,"data_backup":data_ref,
+        "portable_configuration":portable_ref}))
+    .unwrap();
+    fs::write(package.join("isolated-backup.json"), &marker).unwrap();
+    let marker_sha = digest(&marker);
+    let expected = json!({"marker_sha256":marker_sha,"data_backup":data_ref,"portable_configuration":portable_ref,
+        "declared_settings":portable["artifact"]["settings"].as_object().unwrap().len(),
+        "data":Store::inspect_backup(&package.join("data")).unwrap()});
+    (package, marker_sha, expected)
+}
+
+fn package_inventory(
+    root: &Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+    let mut values = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            values.extend(package_inventory(&path));
+            values.insert(path, None);
+        } else {
+            values.insert(path.clone(), Some(fs::read(&path).unwrap()));
+        }
+    }
+    values
+}
+
+fn isolated_inspector() -> Fixture {
+    let inspector = Fixture::new();
+    fs::write(
+        inspector.root.join("config.json"),
+        b"PRIVATE_INVALID_CONFIG",
+    )
+    .unwrap();
+    fs::write(
+        inspector.root.join(".env"),
+        b"OPENAI_API_KEY=PRIVATE_DOTENV_SENTINEL\nREADER_BUDDY_DEBUG_DUMP=PRIVATE_POISON\n",
+    )
+    .unwrap();
+    inspector
+}
+
+fn assert_isolated_inspector_untouched(inspector: &Fixture, file_input: bool) {
+    let names = fs::read_dir(&inspector.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut expected = std::collections::BTreeSet::from([
+        std::ffi::OsString::from(".env"),
+        std::ffi::OsString::from("config.json"),
+    ]);
+    if file_input {
+        expected.insert(std::ffi::OsString::from("input.json"));
+    }
+    assert_eq!(
+        names, expected,
+        "offline inspection created unexpected runtime files"
+    );
+    assert_eq!(
+        fs::read(inspector.root.join("config.json")).unwrap(),
+        b"PRIVATE_INVALID_CONFIG"
+    );
+    assert_eq!(
+        fs::read(inspector.root.join(".env")).unwrap(),
+        b"OPENAI_API_KEY=PRIVATE_DOTENV_SENTINEL\nREADER_BUDDY_DEBUG_DUMP=PRIVATE_POISON\n"
+    );
+    assert!(inspector.inventory().is_empty());
+    for path in [
+        inspector.paths().data,
+        inspector.paths().cache,
+        inspector.paths().credentials,
+    ] {
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn isolated_archive_cli_checks_exact_stdin_and_file_without_runtime_or_owned_state() {
+    for partial in [false, true] {
+        let source = Fixture::new();
+        let (package, marker, expected) = isolated_cli_package(&source, partial);
+        let source_before = source.inventory();
+        let package_before = package_inventory(&package);
+        let inspector = isolated_inspector();
+        let request = serde_json::to_vec(&json!({"path":package,"marker_sha256":marker})).unwrap();
+        for file in [false, true] {
+            let result = run_bytes(&inspector, "inspect-isolated", &request, file);
+            assert_eq!(
+                result,
+                json!({"report_version":1,"operation":"inspect-isolated","status":"ok",
+                "incomplete":partial,"activation_performed":false,"data":{"isolated_package":expected}})
+            );
+            assert!(!serde_json::to_string(&result)
+                .unwrap()
+                .contains(package.to_str().unwrap()));
+            assert_isolated_inspector_untouched(&inspector, file);
+            assert_eq!(source.inventory(), source_before);
+            assert_eq!(package_inventory(&package), package_before);
+        }
+        let ordinary = run(&inspector, "inspect", &package.join("data"));
+        assert_eq!(ordinary["status"], "ok");
+        assert_eq!(ordinary["incomplete"], partial);
+        assert_eq!(ordinary["data"], json!({"inspection":expected["data"]}));
+        assert_eq!(
+            fs::read(inspector.root.join("config.json")).unwrap(),
+            b"PRIVATE_INVALID_CONFIG"
+        );
+    }
+}
+
+#[test]
+fn isolated_archive_cli_refuses_wrong_marker_and_extra_members_without_changing_package() {
+    let source = Fixture::new();
+    let (package, marker, _) = isolated_cli_package(&source, false);
+    let inspector = isolated_inspector();
+    let request =
+        |sha: &str| serde_json::to_vec(&json!({"path":package,"marker_sha256":sha})).unwrap();
+    for file in [false, true] {
+        let before = package_inventory(&package);
+        let refused = run_bytes(
+            &inspector,
+            "inspect-isolated",
+            &request(&buddy::storage::digest(b"wrong original")),
+            file,
+        );
+        assert_eq!(refused["status"], "unsupported");
+        assert!(refused["data"].is_null());
+        assert_eq!(package_inventory(&package), before);
+        for extra in [
+            package.join("PRIVATE_EXTRA"),
+            package.join("data/PRIVATE_EXTRA"),
+            package.join("data/objects/PRIVATE_EXTRA"),
+        ] {
+            fs::write(&extra, b"PRIVATE_EXTRA_MEMBER").unwrap();
+            let before = package_inventory(&package);
+            let refused = run_bytes(&inspector, "inspect-isolated", &request(&marker), file);
+            assert_eq!(refused["status"], "unsupported");
+            assert!(refused["data"].is_null());
+            assert_eq!(package_inventory(&package), before);
+            fs::remove_file(extra).unwrap();
+        }
+        assert_isolated_inspector_untouched(&inspector, file);
+    }
+    assert!(inspector.inventory().is_empty());
+}
+
+#[test]
+fn isolated_archive_cli_keeps_closed_input_caps_and_old_input_shapes() {
+    let source = Fixture::new();
+    let (package, marker, _) = isolated_cli_package(&source, false);
+    let inspector = isolated_inspector();
+    let request = serde_json::to_vec(&json!({"path":package,"marker_sha256":marker})).unwrap();
+    let mut exact = request.clone();
+    exact.resize(MAX_INPUT, b' ');
+    for file in [false, true] {
+        assert_eq!(
+            run_bytes(&inspector, "inspect-isolated", &exact, file)["status"],
+            "ok"
+        );
+        let mut oversized = exact.clone();
+        oversized.push(b' ');
+        assert_eq!(
+            run_bytes(&inspector, "inspect-isolated", &oversized, file)["status"],
+            "invalid-input"
+        );
+        for input in [
+            json!({"path":package}),
+            json!({"path":package,"marker_sha256":marker,"grant":"PRIVATE_GRANT"}),
+            json!({"path":"relative","marker_sha256":marker}),
+            json!({"path":package,"marker_sha256":"not-a-digest"}),
+        ] {
+            assert_eq!(
+                run_bytes(
+                    &inspector,
+                    "inspect-isolated",
+                    &serde_json::to_vec(&input).unwrap(),
+                    file
+                )["status"],
+                "invalid-input"
+            );
+        }
+        assert_eq!(
+            run_bytes(&inspector, "inspect", &request, file)["status"],
+            "invalid-input"
+        );
+        assert_isolated_inspector_untouched(&inspector, file);
+    }
+    assert!(inspector.inventory().is_empty());
+}
