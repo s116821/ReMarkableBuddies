@@ -567,7 +567,7 @@ impl Ledger {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
                 admitted_intent: None,
-                marked_question,
+                marked_question: marked_question.map(Box::new),
             }),
             vec![],
         )?;
