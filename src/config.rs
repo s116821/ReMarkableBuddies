@@ -1,6 +1,7 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
 pub mod basic;
 pub mod credential_reference;
+mod initial;
 pub mod inspection;
 pub mod memory_settings;
 pub mod model_credential;
