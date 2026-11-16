@@ -115,6 +115,8 @@ impl Ledger {
             directive,
             &records,
             anchor.as_ref(),
+            false,
+            false,
         )
     }
 }
@@ -126,6 +128,8 @@ fn from_records(
     directive: SourceDirective,
     records: &[Record],
     historical: Option<&RequestEvidence>,
+    exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     use SourceResolutionRefusal as Refusal;
     ensure!(
@@ -135,7 +139,7 @@ fn from_records(
     let current = request(records, conversation, request_turn)?;
     match directive {
         SourceDirective::Explicit(choice) => {
-            match original(records, current, choice, 512 * 1024)
+            match original(records, current, choice, 512 * 1024, allow_notebook)
                 .map_err(|_| Refusal::InvalidSource)?
             {
                 SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
@@ -188,7 +192,7 @@ fn from_records(
                 SourceAssociation::Original {
                     origin_turn,
                     source_record,
-                    ..
+                    expected: original_key,
                 } => {
                     let source_identity =
                         source_id(&source_record).ok_or(Refusal::InvalidSource)?;
@@ -201,12 +205,22 @@ fn from_records(
                         origin_turn,
                         source_record: current_source,
                         expected,
-                    } = original(records, current, choice, 512 * 1024)
+                    } = original(records, current, choice, 512 * 1024, allow_notebook)
                         .map_err(|_| Refusal::InvalidSource)?
                     else {
                         return Err(Refusal::InvalidSource.into());
                     };
                     ensure!(current_source == source_record, Refusal::ChangedSource);
+                    if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_)) {
+                        ensure!(expected == original_key, Refusal::ChangedSource);
+                    } else if exact_original_bytes {
+                        ensure!(
+                            expected.document == original_key.document
+                                && expected.format == original_key.format
+                                && expected.source_sha256 == original_key.source_sha256,
+                            Refusal::ChangedSource
+                        );
+                    }
                     Ok(RequestSource::Original {
                         origin_turn,
                         source_record: source_identity,
@@ -224,10 +238,20 @@ pub(super) fn for_frame(
     conversation: Uuid,
     request_turn: Uuid,
     directive: SourceDirective,
+    exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     match directive {
         SourceDirective::Explicit(source) => Ok(source),
-        inherited => from_records(conversation, request_turn, inherited, records, None),
+        inherited => from_records(
+            conversation,
+            request_turn,
+            inherited,
+            records,
+            None,
+            exact_original_bytes,
+            allow_notebook,
+        ),
     }
 }
 

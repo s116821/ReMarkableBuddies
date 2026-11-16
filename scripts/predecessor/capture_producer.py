@@ -41,6 +41,38 @@ def select_command(messages, workspace):
     return next(iter(found.values()))
 
 
+def select_library_test(messages, workspace, command):
+    workspace = Path(workspace).resolve()
+    libraries = {}
+    finished = []
+    for line in messages.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        if value.get('reason') == 'build-finished':
+            finished.append(value.get('success'))
+        target = value.get('target', {})
+        if (value.get('reason') != 'compiler-artifact'
+                or value.get('package_id') != command['package_id']
+                or target.get('kind') != ['lib']
+                or value.get('profile', {}).get('test') is not True
+                or Path(target.get('src_path') or '').resolve() != workspace / 'src/lib.rs'
+                or set(value.get('features', [])) != set(command['features'])):
+            continue
+        path = Path(value.get('executable') or '')
+        if not path.is_absolute() or not path.is_file() or not path.resolve().is_relative_to(workspace / 'target'):
+            raise ValueError('invalid current library-test artifact')
+        artifact = {key: value[key] for key in ['package_id', 'target', 'profile', 'features', 'executable']}
+        artifact['executable'] = str(path.resolve())
+        libraries[json.dumps(artifact, sort_keys=True)] = artifact
+    if finished != [True] or len(libraries) != 1:
+        raise ValueError('one complete current library-test artifact is required')
+    return next(iter(libraries.values()))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--workspace', required=True)
@@ -62,6 +94,7 @@ def main():
     manifest = (workspace / 'Cargo.toml').read_bytes()
     declared_features = set(tomllib.loads(manifest.decode()).get('features', {}))
     verify_build_identity(compiled, args.source_sha, tree, head_tree, declared_features, artifact['features'])
+    library = select_library_test(messages.decode(), workspace, artifact)
     result = {
         'current_source': compiled, 'current_head': args.source_head, 'current_tree': tree,
         'head_tree_equivalent': True, 'producer_command': 'cargo test --locked --all-features --message-format=json',
@@ -69,6 +102,8 @@ def main():
         'cargo_lock_sha256': hashlib.sha256((workspace / 'Cargo.lock').read_bytes()).hexdigest(),
         'manifest_sha256': hashlib.sha256(manifest).hexdigest(),
         'current_binary_sha256': hashlib.sha256(Path(artifact['executable']).read_bytes()).hexdigest(),
+        'current_library_test': library,
+        'current_library_test_sha256': hashlib.sha256(Path(library['executable']).read_bytes()).hexdigest(),
     }
     with Path(args.output).open('x', encoding='utf-8') as output:
         json.dump(result, output, indent=2)

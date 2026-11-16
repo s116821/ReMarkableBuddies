@@ -293,9 +293,20 @@ impl Session {
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+    ) -> Result<Option<super::super::writer_request::InstalledRequest>> {
         self.pending.lease.current()?;
         super::super::writer_request::take(self.pending.lease.record().activation(), document, page)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::super::writer_request::RegionalPin>> {
+        self.pending.lease.current()?;
+        super::super::writer_request::peek(self.pending.lease.record().activation())
     }
 
     /// Only the installed first-gesture caller may compose this with live source

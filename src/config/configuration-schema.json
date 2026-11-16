@@ -237,11 +237,42 @@
     "reader": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [{
+        "if": {
+          "required": ["researched_pdf"],
+          "properties": { "researched_pdf": { "type": "object" } }
+        },
+        "then": {
+          "required": ["selection"],
+          "properties": { "selection": { "$ref": "#/$defs/readerSelection" } }
+        }
+      }],
       "properties": {
+        "researched_pdf": {
+          "description": "Local opt-in for selected original-PDF researched Reader requests. Requires selection. An absent search model does not authorize web research.",
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "research_model": {
+                  "type": ["string", "null"],
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
         "selection": {
           "anyOf": [
-            { "$ref": "#/$defs/readerSelection" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/readerSelection"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -279,6 +310,33 @@
         }
       ],
       "description": "Absent and explicit null parent remain distinct declarations even though both use effective defaults."
+    },
+    "handwriting": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {
+        "enabled": false,
+        "profile": null
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "description": "Enabled requires a nonnil active profile and ordinary local route; semantic admission remains typed/runtime checked."
     }
   },
   "$defs": {
@@ -286,11 +344,23 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "group": { "$ref": "#/$defs/uuid" },
-        "key_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "binding_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "group": {
+          "$ref": "#/$defs/uuid"
+        },
+        "key_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "binding_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
       },
-      "required": ["group", "key_sha256", "binding_sha256"]
+      "required": [
+        "group",
+        "key_sha256",
+        "binding_sha256"
+      ]
     },
     "uuid": {
       "type": "string",

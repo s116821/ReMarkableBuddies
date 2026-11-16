@@ -96,7 +96,7 @@ impl Report {
         }
     }
 }
-fn final_stop(canceled: bool, elapsed: Duration) -> Option<Failure> {
+pub(super) fn final_stop(canceled: bool, elapsed: Duration) -> Option<Failure> {
     if canceled {
         Some(Failure::Canceled)
     } else if elapsed >= Duration::from_secs(600) {
@@ -138,46 +138,29 @@ pub(crate) fn run_owned<E: LLMEngine>(
             admission,
             payloads,
         } = input;
-        let Some(mut cursor) = ledger.admit_notebook(admission)? else {
+        let Some(cursor) = ledger.admit_notebook(admission)? else {
             report.status = Status::Historical;
             return Ok(None);
         };
         report.admitted = true;
-        {
-            let mut runner = Runner {
-                ledger,
-                engine: &mut *engine,
-                canceled: &mut *canceled,
-                report: &mut report,
-                started,
-            };
-            for ordinal in 0..payloads.plan.chunks.len() {
-                let Some(next) = runner.step(
-                    cursor,
-                    NotebookStageKind::Map,
-                    ordinal,
-                    payloads.map_parts(ordinal)?,
-                    &[],
-                )?
-                else {
-                    return Ok(None);
-                };
-                cursor = next;
-            }
-            let outputs = cursor.map_outputs()?;
-            let parts = payloads.reducer_parts(&outputs)?;
-            let Some(next) = runner.step(
-                cursor,
-                NotebookStageKind::Reduce,
-                0,
-                &parts,
-                &payloads.reducer_images.attachments,
-            )?
-            else {
-                return Ok(None);
-            };
-            cursor = next;
-        }
+        let mut runner = Runner {
+            ledger,
+            engine: &mut *engine,
+            canceled: &mut *canceled,
+            report: &mut report,
+            started,
+        };
+        let Some(cursor) = run_sequence(
+            cursor,
+            &payloads,
+            NotebookRunCursor::map_outputs,
+            |cursor, kind, ordinal, parts, images| {
+                runner.step(cursor, kind, ordinal, parts, images)
+            },
+        )?
+        else {
+            return Ok(None);
+        };
         if let Some(failure) = final_stop(canceled(), started.elapsed()) {
             report.status = Status::Canceled;
             report.failure = Some(failure);
@@ -212,6 +195,35 @@ pub(crate) fn run_owned<E: LLMEngine>(
         }
     }
 }
+pub(super) fn run_sequence<C>(
+    mut cursor: C,
+    payloads: &FrozenNotebookPayloads,
+    outputs: impl FnOnce(&C) -> Result<Vec<NotebookMapOutput>>,
+    mut step: impl FnMut(C, NotebookStageKind, usize, &[String], &[String]) -> Result<Option<C>>,
+) -> Result<Option<C>> {
+    for ordinal in 0..payloads.plan.chunks.len() {
+        let Some(next) = step(
+            cursor,
+            NotebookStageKind::Map,
+            ordinal,
+            payloads.map_parts(ordinal)?,
+            &[],
+        )?
+        else {
+            return Ok(None);
+        };
+        cursor = next;
+    }
+    let parts = payloads.reducer_parts(&outputs(&cursor)?)?;
+    step(
+        cursor,
+        NotebookStageKind::Reduce,
+        0,
+        &parts,
+        &payloads.reducer_images.attachments,
+    )
+}
+
 struct Runner<'a, E> {
     ledger: &'a Ledger,
     engine: &'a mut E,
@@ -287,84 +299,11 @@ impl<E: LLMEngine> Runner<'_, E> {
                 Some(response)
             }
         };
-        let body = response.as_ref().and_then(|result| result.as_ref().ok());
-        let retained = body
-            .filter(|text| match kind {
-                NotebookStageKind::Map => {
-                    serde_json::to_vec(text).is_ok_and(|bytes| bytes.len() <= MAX_MAP_REPLY)
-                }
-                NotebookStageKind::Reduce => text.len() <= super::super::MAX_DRAFT,
-            })
-            .cloned();
-        let observed_output_digest = body.map(|body| digest(body.as_bytes()));
-        let observed_output_bytes = body.map(|body| body.len() as u64);
-        let (outcome, output, failure, status, reported) = if let Some(stop) = stop {
-            self.report.remote_cost_unknown |= invoked;
-            let (outcome, failure, status) = match stop {
-                Failure::Canceled => (
-                    NotebookStageOutcome::Canceled,
-                    NotebookFailure::Canceled,
-                    Status::Canceled,
-                ),
-                Failure::Deadline => (
-                    NotebookStageOutcome::Canceled,
-                    NotebookFailure::Deadline,
-                    Status::Canceled,
-                ),
-                _ => (
-                    NotebookStageOutcome::Uncertain,
-                    NotebookFailure::PublicationUnknown,
-                    Status::Stale,
-                ),
-            };
-            (outcome, retained, Some(failure), status, Some(stop))
-        } else if let Some(body) = body {
-            let valid = match kind {
-                NotebookStageKind::Map => {
-                    !body.trim().is_empty()
-                        && !body.contains('\0')
-                        && serde_json::to_vec(body)?.len() <= MAX_MAP_REPLY
-                }
-                NotebookStageKind::Reduce => super::super::parse_draft(body).is_ok(),
-            };
-            if valid {
-                (
-                    NotebookStageOutcome::Generated,
-                    retained,
-                    None,
-                    Status::Generated,
-                    None,
-                )
-            } else {
-                (
-                    NotebookStageOutcome::Failed,
-                    retained,
-                    Some(NotebookFailure::InvalidOutput),
-                    Status::Failed,
-                    Some(Failure::Output),
-                )
-            }
-        } else {
-            self.report.remote_cost_unknown |= invoked;
-            (
-                NotebookStageOutcome::Failed,
-                None,
-                Some(NotebookFailure::Provider),
-                Status::Failed,
-                Some(Failure::Provider),
-            )
-        };
-        let publication = self.ledger.finish_notebook_stage_observed(
-            prepared,
-            NotebookResult {
-                outcome,
-                invoked,
-                output,
-                observed_output_digest,
-                observed_output_bytes,
-                failure,
-            },
-        )?;
+        let (result, status, reported) =
+            classify_result(kind, response.as_ref(), stop, invoked, self.report)?;
+        let publication = self
+            .ledger
+            .finish_notebook_stage_observed(prepared, result)?;
         match publication {
             NotebookStagePublication::Generated(cursor) => {
                 self.report.confirmed_stage_results += 1;
@@ -384,6 +323,99 @@ impl<E: LLMEngine> Runner<'_, E> {
             }
         }
     }
+}
+
+pub(super) fn classify_result(
+    kind: NotebookStageKind,
+    response: Option<&Result<String>>,
+    stop: Option<Failure>,
+    invoked: bool,
+    report: &mut Report,
+) -> Result<(NotebookResult, Status, Option<Failure>)> {
+    let body = response.and_then(|result| result.as_ref().ok());
+    let retained = body
+        .filter(|text| match kind {
+            NotebookStageKind::Map => {
+                serde_json::to_vec(text).is_ok_and(|bytes| bytes.len() <= MAX_MAP_REPLY)
+            }
+            NotebookStageKind::Reduce => text.len() <= super::super::MAX_DRAFT,
+        })
+        .cloned();
+    let observed_output_digest = body.map(|body| digest(body.as_bytes()));
+    let observed_output_bytes = body.map(|body| body.len() as u64);
+    let (outcome, output, failure, status, reported) = if let Some(stop) = stop {
+        report.remote_cost_unknown |= invoked;
+        let (outcome, failure, status) = match stop {
+            Failure::Canceled => (
+                NotebookStageOutcome::Canceled,
+                NotebookFailure::Canceled,
+                Status::Canceled,
+            ),
+            Failure::Deadline => (
+                NotebookStageOutcome::Canceled,
+                NotebookFailure::Deadline,
+                Status::Canceled,
+            ),
+            Failure::Storage => (
+                NotebookStageOutcome::Uncertain,
+                NotebookFailure::PublicationUnknown,
+                Status::Uncertain,
+            ),
+            _ => (
+                NotebookStageOutcome::Uncertain,
+                NotebookFailure::PublicationUnknown,
+                Status::Stale,
+            ),
+        };
+        (outcome, retained, Some(failure), status, Some(stop))
+    } else if let Some(body) = body {
+        let valid = match kind {
+            NotebookStageKind::Map => {
+                !body.trim().is_empty()
+                    && !body.contains('\0')
+                    && serde_json::to_vec(body)?.len() <= MAX_MAP_REPLY
+            }
+            NotebookStageKind::Reduce => super::super::parse_draft(body).is_ok(),
+        };
+        if valid {
+            (
+                NotebookStageOutcome::Generated,
+                retained,
+                None,
+                Status::Generated,
+                None,
+            )
+        } else {
+            (
+                NotebookStageOutcome::Failed,
+                retained,
+                Some(NotebookFailure::InvalidOutput),
+                Status::Failed,
+                Some(Failure::Output),
+            )
+        }
+    } else {
+        report.remote_cost_unknown |= invoked;
+        (
+            NotebookStageOutcome::Failed,
+            None,
+            Some(NotebookFailure::Provider),
+            Status::Failed,
+            Some(Failure::Provider),
+        )
+    };
+    Ok((
+        NotebookResult {
+            outcome,
+            invoked,
+            output,
+            observed_output_digest,
+            observed_output_bytes,
+            failure,
+        },
+        status,
+        reported,
+    ))
 }
 
 #[cfg(test)]

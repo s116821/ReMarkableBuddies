@@ -4,7 +4,19 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::assert_selected_policy_boundaries;
 mod reader_attempt;
+#[cfg(target_os = "linux")]
+pub(crate) use reader_attempt::ResearchContext;
+// The researched receiver joins parsed readings to its own selected admission.
+#[allow(dead_code)]
+mod reader_intent;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
 pub mod resident_output;
@@ -14,11 +26,24 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+#[doc(hidden)]
+pub use resident_source::original_pdf::development_original_pdf;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::fresh_receiver_fixture;
+
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod selected_buddy;
+#[cfg(target_os = "linux")]
+pub(crate) mod selected_resident_reader;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
 #[cfg(test)]
@@ -47,8 +72,14 @@ pub enum AnswerPageType {
     Invalid,
 }
 pub enum AcquiredEvidence {
-    Legacy { images: Vec<Vec<u8>> },
-    Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
+    Legacy {
+        images: Vec<Vec<u8>>,
+    },
+    Sdk {
+        batch: Box<remarkable_open_sdk::capture::CapturedBatch>,
+        marked_source: Option<Box<crate::device::backend::MarkedSourceBinding>>,
+        destination: Option<exchange_history::UserPresentationTarget>,
+    },
     Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
     ResidentHistorical(Box<crate::conversation::ResidentSourceCapture>),
 }
@@ -98,6 +129,15 @@ impl Workflow {
             Box::new(selected_backend::RefusingBackend::new()),
         );
         Self::with_selected(facade, debug_dump)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_owned_reader_fixture(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+    ) -> Self {
+        let mut workflow = Self::selected_runtime(admission, false);
+        workflow.device = Box::new(selected_backend::RefusingBackend::with_owned_fixture());
+        workflow
     }
     pub fn new(
         no_draw: bool,
@@ -234,7 +274,7 @@ impl Workflow {
                 .as_mut()
                 .context("resident health owner absent")?;
             let corner = self.device.configure_installed_resident_output(pin)?;
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }
@@ -257,7 +297,7 @@ impl Workflow {
             .context("development output requires the supervised health owner")?;
         owner.require_development_output(plan)?;
         if let Some(corner) = self.device.configure_development_resident_output(plan)? {
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }
@@ -476,7 +516,7 @@ impl Workflow {
                 Ok(AcquiredEvidence::Development(Box::new(capture)))
             }
             AcquisitionKind::Sdk => {
-                let batch = self.device.capture_sdk()?;
+                let (batch, marked_source) = self.device.capture_sdk_with_marked_source()?;
                 self.check_request_progress()?;
                 let overview = batch
                     .images()
@@ -490,7 +530,170 @@ impl Workflow {
                     png: overview.bytes().to_vec(),
                     details: vec![],
                 };
-                Ok(AcquiredEvidence::Sdk(Box::new(batch)))
+                Ok(AcquiredEvidence::Sdk {
+                    batch: Box::new(batch),
+                    marked_source: marked_source.map(Box::new),
+                    destination: self.device.marked_question_destination(),
+                })
+            }
+        }
+    }
+
+    pub(super) fn present_marked_question(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        fresh: crate::conversation::marked_question::FreshMarkedQuestion,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+        target: exchange_history::UserPresentationTarget,
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection;
+        use exchange_history::OutcomeStatus;
+
+        let head = fresh.presentation_head();
+        let HistoricalPageAssociationInspection::HistoricalCandidate(binding) =
+            ledger.inspect_page_association(target.conversation, target.document, target.page)?
+        else {
+            anyhow::bail!("marked question presentation binding unavailable");
+        };
+        anyhow::ensure!(
+            self.device.marked_question_destination() == Some(target)
+                && target.conversation == user.conversation
+                && binding.root_revision() == head.0,
+            "marked question presentation destination unavailable"
+        );
+        self.check_request_progress()?;
+        let erase = fresh
+            .erase(ledger, &mut *self.device, source)
+            .map_err(|error| error.context("marked question erase refused before acceptance"))?;
+        self.navigate_after_marked_erase(erase)?;
+        let backend = self
+            .device
+            .exchange_page_backend()
+            .ok_or_else(|| anyhow::anyhow!("marked question Buddy page owner unavailable"))?;
+        match exchange_history::present_user(
+            ledger,
+            backend,
+            target,
+            user,
+            head,
+            binding.binding_revision(),
+        )? {
+            OutcomeStatus::Applied => Ok(()),
+            OutcomeStatus::ReconcileRequired => {
+                anyhow::bail!("marked question presentation is uncertain")
+            }
+            _ => anyhow::bail!("marked question presentation refused"),
+        }
+    }
+
+    fn navigate_after_marked_erase(
+        &mut self,
+        erase: crate::conversation::marked_question::EraseDisposition,
+    ) -> Result<()> {
+        use crate::conversation::marked_question::EraseDisposition;
+        use crate::device::backend::NavigationCompletion;
+        info!("Marked question erase: {erase:?}");
+        if erase == EraseDisposition::Uncertain {
+            self.invalidate_captured_viewport();
+            anyhow::bail!("marked question erase is uncertain");
+        }
+        self.check_request_progress()?;
+        anyhow::ensure!(
+            self.navigate_to_next_page()? == NavigationCompletion::Settled,
+            "marked question Buddy destination did not settle"
+        );
+        self.check_request_progress()
+    }
+
+    pub(super) fn marked_answer_binding(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        target: exchange_history::UserPresentationTarget,
+        root: crate::storage::Uuid,
+    ) -> Result<Option<crate::storage::Uuid>> {
+        if self.device.marked_answer_destination() != Some(target) {
+            return Ok(None);
+        }
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+        match ledger.inspect_page_association(target.conversation, target.document, target.page)? {
+            HistoricalCandidate(binding) if binding.root_revision() == root => {
+                Ok(Some(binding.binding_revision()))
+            }
+            _ => anyhow::bail!("marked answer binding changed"),
+        }
+    }
+
+    pub(super) fn present_marked_answer(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        prepared: crate::conversation::marked_question::MarkedAnswer,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<()> {
+        use crate::conversation::{AttemptReason, Outcome};
+        use exchange_history::PairPresentation;
+
+        self.check_request_progress()?;
+        if self.device.marked_answer_destination() != Some(prepared.target()) {
+            return prepared.refuse_output(ledger);
+        }
+        let (erase, output) = prepared.erase(ledger, &mut *self.device, source)?;
+        self.navigate_after_marked_erase(erase)?;
+        let mut output =
+            output.ok_or_else(|| anyhow::anyhow!("marked answer output unavailable"))?;
+        let Some(backend) = self.device.exchange_page_backend() else {
+            return output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            );
+        };
+        match exchange_history::present_answer(ledger, backend, &mut output, user)
+            .map_err(|error| error.context("marked answer pair refused before acceptance"))?
+        {
+            PairPresentation::Refused => output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            ),
+            PairPresentation::Uncertain => {
+                self.input_failed = true;
+                output.record_uncompleted(
+                    ledger,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                )?;
+                anyhow::bail!("marked answer presentation is uncertain")
+            }
+            PairPresentation::Verified(receipt) => {
+                let page = receipt.page().clone();
+                let operation = receipt.operation();
+                let draft = output.revisions().draft;
+                if !backend.observe().is_ok_and(|current| current == page) {
+                    self.input_failed = true;
+                    output.record_uncompleted(
+                        ledger,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::DeviceUncertain,
+                    )?;
+                    anyhow::bail!("marked answer presentation changed before completion");
+                }
+                let completed = match output.complete_answer(ledger, receipt) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        self.input_failed = true;
+                        return Err(error.context("marked answer completion is uncertain"));
+                    }
+                };
+                if !completed.bind_metadata(ledger, |revision| {
+                    backend.bind_completed_answer(operation, &page, draft, revision)
+                }) {
+                    log::warn!(
+                        "Marked answer completed without current presentation revision metadata"
+                    );
+                }
+                Ok(())
             }
         }
     }

@@ -17,6 +17,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(target_os = "linux")]
+mod isolated_stage;
+
 pub const MAX_INPUT: usize = 16_384;
 pub const MAX_OUTPUT: usize = 16_384;
 
@@ -24,9 +27,22 @@ pub const MAX_OUTPUT: usize = 16_384;
 #[serde(rename_all = "kebab-case")]
 pub enum Operation {
     Inspect,
+    InspectIsolated,
     ExportSelected,
     InspectNotebook,
     ExportNotebook,
+    ReceiveIsolatedStage,
+    CheckIsolatedStage,
+    ReleaseIsolatedStage,
+}
+
+impl Operation {
+    fn is_stage(self) -> bool {
+        matches!(
+            self,
+            Self::ReceiveIsolatedStage | Self::CheckIsolatedStage | Self::ReleaseIsolatedStage
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -46,9 +62,24 @@ struct Request {
     path: PathBuf,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IsolatedRequest {
+    path: PathBuf,
+    marker_sha256: String,
+}
+
 #[derive(Serialize)]
-struct Data {
-    inspection: BackupInspection,
+#[serde(untagged)]
+enum Data {
+    Archive {
+        inspection: BackupInspection,
+    },
+    Isolated {
+        isolated_package: serde_json::Value,
+    },
+    #[cfg(target_os = "linux")]
+    Stage(isolated_stage::StageData),
 }
 
 struct Custody {
@@ -115,7 +146,7 @@ impl Report {
     fn completed(operation: Operation, inspection: BackupInspection) -> Self {
         let mut report = Self::new(operation, Status::Ok);
         report.incomplete = !inspection.complete_media;
-        report.data = Some(Data { inspection });
+        report.data = Some(Data::Archive { inspection });
         report
     }
     /// Owns source custody until this one consuming write completes or fails.
@@ -140,15 +171,22 @@ impl Report {
     }
 }
 
-fn request(input: &Path, stdin: &mut impl Read) -> Result<Request> {
-    let request: Request = if input.as_os_str() == std::ffi::OsStr::new("-") {
+fn decode_request<T: serde::de::DeserializeOwned>(
+    input: &Path,
+    stdin: &mut impl Read,
+) -> Result<T> {
+    if input.as_os_str() == std::ffi::OsStr::new("-") {
         let mut bytes = Vec::new();
         stdin.take((MAX_INPUT + 1) as u64).read_to_end(&mut bytes)?;
         ensure!(bytes.len() <= MAX_INPUT, "archive input exceeds bound");
-        serde_json::from_slice(&bytes)?
+        Ok(serde_json::from_slice(&bytes)?)
     } else {
-        files::json(input, MAX_INPUT as u64)?
-    };
+        files::json(input, MAX_INPUT as u64)
+    }
+}
+
+fn request(input: &Path, stdin: &mut impl Read) -> Result<Request> {
+    let request: Request = decode_request(input, stdin)?;
     files::safe_path(&request.path)?;
     Ok(request)
 }
@@ -169,6 +207,47 @@ fn inspect(path: &Path) -> Report {
     match Store::inspect_backup(path) {
         Ok(inspection) => Report::completed(Operation::Inspect, inspection),
         Err(_) => Report::new(Operation::Inspect, Status::Unsupported),
+    }
+}
+
+fn inspect_isolated(input: &Path, stdin: &mut impl Read) -> Report {
+    let operation = Operation::InspectIsolated;
+    let request = (|| -> Result<IsolatedRequest> {
+        let request: IsolatedRequest = decode_request(input, stdin)?;
+        files::safe_path(&request.path)?;
+        ensure!(
+            crate::storage::valid_digest(&request.marker_sha256),
+            "invalid marker digest"
+        );
+        Ok(request)
+    })();
+    let Ok(request) = request else {
+        return Report::new(operation, Status::InvalidInput);
+    };
+    // Refuse absent/nonregular markers before opening, just like Inspect.
+    match std::fs::symlink_metadata(request.path.join("isolated-backup.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Report::new(operation, Status::Unavailable)
+        }
+        Ok(metadata) if metadata.is_file() => (),
+        _ => return Report::new(operation, Status::Unsupported),
+    }
+    match Store::inspect_isolated_package(&request.path, Some(&request.marker_sha256)) {
+        Ok(inspection) => {
+            let incomplete = !inspection.data.complete_media;
+            // Serialize the existing redacted oracle type without widening its
+            // module visibility or introducing another package interpretation.
+            match serde_json::to_value(inspection) {
+                Ok(isolated_package) => {
+                    let mut report = Report::new(operation, Status::Ok);
+                    report.incomplete = incomplete;
+                    report.data = Some(Data::Isolated { isolated_package });
+                    report
+                }
+                Err(_) => Report::new(operation, Status::Failed),
+            }
+        }
+        Err(_) => Report::new(operation, Status::Unsupported),
     }
 }
 
@@ -233,12 +312,40 @@ fn export_notebook(config: Config, destination: &Path) -> Report {
     report
 }
 
+/// Dispatch the real CLI stdin without routing stage streams through blocking Read.
+pub fn run_cli(
+    operation: Operation,
+    input: &Path,
+    config_path: Option<PathBuf>,
+    stdin: &mut std::io::StdinLock<'_>,
+) -> Report {
+    if !operation.is_stage() {
+        return run(operation, input, config_path, stdin);
+    }
+    if input.as_os_str() != "-" {
+        return Report::new(operation, Status::InvalidInput);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        isolated_stage::run(operation, config_path, stdin.as_raw_fd())
+    }
+    #[cfg(not(target_os = "linux"))]
+    Report::new(operation, Status::Unsupported)
+}
+
 pub fn run(
     operation: Operation,
     input: &Path,
     config_path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
+    if operation.is_stage() {
+        return Report::new(operation, Status::Unsupported);
+    }
+    if operation == Operation::InspectIsolated {
+        return inspect_isolated(input, stdin);
+    }
     let request = match request(input, stdin) {
         Ok(value) => value,
         Err(_) => return Report::new(operation, Status::InvalidInput),
@@ -247,6 +354,10 @@ pub fn run(
         Operation::Inspect => return inspect(&request.path),
         Operation::InspectNotebook => return inspect_notebook(&request.path),
         Operation::ExportSelected | Operation::ExportNotebook => (),
+        Operation::InspectIsolated
+        | Operation::ReceiveIsolatedStage
+        | Operation::CheckIsolatedStage
+        | Operation::ReleaseIsolatedStage => unreachable!("handled before ordinary archive input"),
     }
     let config = match Config::load(config_path) {
         Ok(config) if !config.sync.enabled => config,

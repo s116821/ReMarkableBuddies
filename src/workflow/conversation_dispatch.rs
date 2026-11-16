@@ -1,14 +1,24 @@
+// Typed native image/intent ingress remains an explicit integration gap.
+mod followup_research;
+#[allow(dead_code)]
+pub(crate) mod handwriting;
 use crate::{
     config::Config,
     conversation::{
+        evidence::FollowupEvidence, receiving::ReceivingBudget, resolution::SourceDirective,
         ContextBudget, ExpectedHeads, Ledger, Mode, Outcome, Role, SourceObservation, Turn,
         TurnRange,
     },
     device::interaction::Interaction,
+    retrieval::{
+        notebook::{NotebookText, PageImage, SuppliedNotebook},
+        IndexKey, Provider,
+    },
     storage::{Namespace, Uuid},
     writer, LLMEngine,
 };
 use anyhow::{ensure, Result};
+pub(crate) use followup_research::FollowupResearch;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +46,7 @@ pub struct Dispatch<'a> {
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
-    blank_events: std::collections::BTreeSet<Uuid>,
+    input_events: std::collections::BTreeSet<Uuid>,
 }
 
 impl<'a> Dispatch<'a> {
@@ -47,9 +57,13 @@ impl<'a> Dispatch<'a> {
             "unified dispatch requires ordinary local configuration"
         );
         config.memory.validate()?;
-        let local = Arc::new(crate::mode_maintenance::admit_local_dispatch(
-            ledger.store(),
-        )?);
+        let store = ledger.store();
+        let local = Arc::new(match store.sync_mode_snapshot()?.mode {
+            Some(crate::storage::sync::mode::SyncMode::IsolatedBackup { .. }) => {
+                crate::mode_maintenance::admit_isolated_local_dispatch(store, config)?
+            }
+            _ => crate::mode_maintenance::admit_local_dispatch(store)?,
+        });
         let memory = if config.memory.enabled {
             Some(Arc::new(crate::memory::LocalMemory::admitted_local(
                 ledger.store().clone(),
@@ -67,8 +81,20 @@ impl<'a> Dispatch<'a> {
             store: ledger.store().clone(),
             _local: local,
             memory,
-            blank_events: Default::default(),
+            input_events: Default::default(),
         })
+    }
+
+    pub(crate) fn handwriting_runtime(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<Option<crate::handwriting::runtime::Runtime>> {
+        self.require_ledger(ledger)?;
+        crate::handwriting::runtime::Runtime::new(
+            self.config,
+            self.store.clone(),
+            self._local.clone(),
+        )
     }
 
     pub fn local_memory(&self) -> Option<Arc<crate::memory::LocalMemory>> {
@@ -120,7 +146,7 @@ impl<'a> Dispatch<'a> {
             "conversation revision changed"
         );
         ensure!(
-            self.blank_events.len() < 4096 && self.blank_events.insert(admitted.operation),
+            self.input_events.len() < 4096 && self.input_events.insert(admitted.operation),
             "blank start event unavailable or already consumed"
         );
         open()
@@ -229,6 +255,7 @@ impl<'a> Dispatch<'a> {
                 conversation: admitted.conversation,
                 root: selection.root,
                 source: admitted.source.clone(),
+                followup: None,
             });
         Ok((report, output))
     }
@@ -386,6 +413,244 @@ impl<'a> Dispatch<'a> {
                     .collect(),
             ),
             source: admitted.source.clone(),
+            followup: None,
+        })
+    }
+
+    /// The trusted owner supplies the independently observed PDF or EPUB
+    /// separately from the input visit and a deadline-aware, single-request
+    /// answering engine. The observer must refuse revoked input or configuration.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn reader_with_source(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        original: Option<FollowupSource<'_>>,
+        research: FollowupResearch<'_>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.reader_with_original(
+            ledger,
+            engine,
+            request,
+            history_range,
+            admitted,
+            source,
+            original,
+            None,
+            research,
+            observe,
+        )
+    }
+
+    /// Admit a bounded, independently supplied historical OCR page set.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn reader_with_notebook(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        notebook: NotebookFollowupSource<'_>,
+        research: FollowupResearch<'_>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Reader, false), "Reader disabled");
+        admitted.check(ledger, observe)?;
+        let mut check = |_| {
+            research.check(admitted, request)?;
+            (notebook.check)()
+        };
+        check(crate::retrieval::notebook::Progress::BeforeReturn)?;
+        let original = notebook
+            .ocr
+            .admit_supplied(notebook.input, notebook.pages, &mut check)?;
+        let retrieval = FollowupSource {
+            key: original.index().key().clone(),
+            provider: original.index(),
+            check: notebook.check,
+        };
+        self.reader_with_original(
+            ledger,
+            engine,
+            request,
+            history_range,
+            admitted,
+            source,
+            Some(retrieval),
+            Some(&original),
+            research,
+            observe,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reader_with_original(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut dyn LLMEngine,
+        request: &str,
+        history_range: Option<TurnRange>,
+        admitted: &RequestScope,
+        source: SourceDirective,
+        original: Option<FollowupSource<'_>>,
+        notebook: Option<&SuppliedNotebook<'_>>,
+        research: FollowupResearch<'_>,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<PendingOutput> {
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Reader, false), "Reader disabled");
+        ensure!(
+            !request.trim().is_empty() && request.len() <= 4096 && !request.contains('\0'),
+            "invalid Reader request"
+        );
+        research.check(admitted, request)?;
+        let policy = self.config.research_policy_snapshot()?.policy();
+        let expected = match &source {
+            SourceDirective::Explicit(
+                crate::conversation::receiving::RequestSource::Original { expected, .. },
+            ) => Some(expected),
+            SourceDirective::Explicit(
+                crate::conversation::receiving::RequestSource::NoDocument,
+            ) => None,
+            SourceDirective::Inherit { expected, .. } => expected.as_ref(),
+        };
+        ensure!(
+            original.as_ref().map(|original| &original.key) == expected,
+            "Reader source admission changed"
+        );
+        ensure!(
+            expected.is_some_and(|key| key.format == crate::retrieval::SourceFormat::Notebook)
+                == notebook.is_some(),
+            "Reader notebook requires independent supplied OCR admission"
+        );
+        let source_check = original.as_ref().map(|original| original.check.clone());
+        let check_source = || verify_followup_source(&source_check);
+        let visit = std::cell::RefCell::new(observe);
+        let check_visit = || admitted.check_source(&mut **visit.borrow_mut());
+        check_visit()?;
+        check_source()?;
+        research.check(admitted, request)?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        let user = Turn {
+            id: writer::stage(admitted.operation, "reader-user"),
+            conversation: admitted.conversation,
+            exchange: admitted.operation,
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Interpreted,
+            text: Some(request.to_owned()),
+            sources: vec![],
+            correction_of: None,
+            created_ms: timestamp,
+            updated_ms: timestamp,
+            completion: None,
+        };
+        let head =
+            ledger.append_followup_user(admitted.operation, admitted.root.clone(), user.clone())?;
+        let check_retrieval = || {
+            check_visit()?;
+            check_source()?;
+            research.check(admitted, request)
+        };
+        let retrieval = original.as_ref().map(|original| CheckedFollowupProvider {
+            provider: original.provider,
+            check: &check_retrieval,
+        });
+        let prepared = ledger.prepare_declared_evidence(
+            admitted.conversation,
+            user.id,
+            history_range,
+            source,
+            ReceivingBudget {
+                context: ContextBudget {
+                    max_text_bytes: 16 * 1024,
+                    max_turns: 64,
+                    provider_token_limit: Some(96 * 1024),
+                },
+                max_encoded_bytes: 96 * 1024,
+                max_passages: 8,
+                max_passage_bytes: 16 * 1024,
+                neighbors: true,
+            },
+            retrieval.as_ref().map(|provider| provider as &dyn Provider),
+            |text| Ok(text.len()),
+            Some(head),
+            notebook,
+        )?;
+        check_visit()?;
+        check_source()?;
+        research.check(admitted, request)?;
+        let (context, mut evidence) = ledger.persist_followup_evidence(
+            writer::stage(admitted.operation, "reader-source-evidence"),
+            timestamp,
+            prepared,
+        )?;
+        let check = || {
+            check_visit()?;
+            check_source()?;
+            research.check(admitted, request)?;
+            evidence.with_current(ledger, || Ok(()))
+        };
+        let submit = |submit: &mut dyn FnMut() -> Result<()>| {
+            check_visit()?;
+            check_source()?;
+            research.check(admitted, request)?;
+            evidence.with_current(ledger, || {
+                research.check(admitted, request)?;
+                submit()
+            })
+        };
+        let answer = followup_research::answer(
+            ledger,
+            engine,
+            context,
+            self.config,
+            self.memory.as_deref(),
+            timestamp,
+            policy,
+            &research,
+            &check,
+            submit,
+        )?;
+        check()?;
+        let draft = Turn {
+            id: writer::stage(admitted.operation, "reader-draft"),
+            role: Role::Assistant,
+            outcome: Outcome::Generated,
+            text: Some(answer),
+            ..user
+        };
+        let revision = evidence.generated(
+            ledger,
+            writer::stage(admitted.operation, "reader-answer"),
+            draft.clone(),
+        )?;
+        Ok(PendingOutput {
+            id: draft.id,
+            revision,
+            mode: Mode::Reader,
+            conversation: draft.conversation,
+            root: evidence.root(),
+            source: admitted.source.clone(),
+            followup: Some(FollowupOutput {
+                evidence,
+                source_check,
+                operation: admitted.operation,
+                attempted: std::cell::Cell::new(false),
+                submitted: std::cell::Cell::new(false),
+            }),
         })
     }
 
@@ -431,6 +696,7 @@ impl<'a> Dispatch<'a> {
                 .root()
                 .revision_id])),
             source: admitted.source.clone(),
+            followup: None,
         });
         Ok((result.report, output))
     }
@@ -457,14 +723,26 @@ impl<'a> Dispatch<'a> {
             "draft ownership changed"
         );
         admitted.check(ledger, observe)?;
-        let mut turn = ledger
-            .inspect(admitted.conversation, false)?
-            .into_iter()
-            .find_map(|record| match record {
-                crate::conversation::Record::Turn(turn) if turn.id == draft.id => Some(turn),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("draft unavailable"))?;
+        if let Some(followup) = &draft.followup {
+            ensure!(
+                followup.submitted.get() && followup.operation == admitted.operation,
+                "Reader output submission is unverified"
+            );
+            verify_followup_source(&followup.source_check)?;
+            followup.evidence.with_current(ledger, || Ok(()))?;
+        }
+        let mut turn = if let Some(followup) = &draft.followup {
+            followup.evidence.draft(draft.id)?
+        } else {
+            ledger
+                .inspect(admitted.conversation, false)?
+                .into_iter()
+                .find_map(|record| match record {
+                    crate::conversation::Record::Turn(turn) if turn.id == draft.id => Some(turn),
+                    _ => None,
+                })
+                .ok_or_else(|| anyhow::anyhow!("draft unavailable"))?
+        };
         ensure!(
             turn.mode == draft.mode
                 && turn.role == Role::Assistant
@@ -486,7 +764,15 @@ impl<'a> Dispatch<'a> {
             ledger.expected(Namespace::Conversation, draft.id)? == expected_turn,
             "draft revision changed"
         );
-        if draft.mode == Mode::Writer {
+        if let Some(followup) = &draft.followup {
+            verify_followup_source(&followup.source_check)?;
+            followup.evidence.complete(
+                ledger,
+                writer::stage(admitted.operation, "reader-output"),
+                expected_turn,
+                turn,
+            )?;
+        } else if draft.mode == Mode::Writer {
             // Draft selection for refine/export continues to refer to Generated.
             // Record the verified visible response separately in its exchange.
             turn.id = writer::stage(draft.id, "visible-output");
@@ -511,6 +797,105 @@ pub(crate) struct PendingOutput {
     conversation: Uuid,
     root: ExpectedHeads,
     source: SourceObservation,
+    followup: Option<FollowupOutput>,
+}
+
+type SourceCurrent = Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
+/// Host-only material from independent source observation. `check` must
+/// revalidate that original observation, not just assert a cache key.
+pub(crate) struct FollowupSource<'a> {
+    pub(crate) key: IndexKey,
+    pub(crate) provider: &'a dyn Provider,
+    pub(crate) check: SourceCurrent,
+}
+
+/// Fresh observation of the supplied notebook for this Reader operation.
+/// `check` samples that observation only and must not reopen the Store.
+pub(crate) struct NotebookFollowupSource<'a> {
+    pub(crate) input: &'a writer::notebook::ValidatedNotebook,
+    pub(crate) ocr: &'a NotebookText,
+    pub(crate) pages: &'a [PageImage<'a>],
+    pub(crate) check: SourceCurrent,
+}
+
+struct FollowupOutput {
+    evidence: FollowupEvidence,
+    source_check: Option<SourceCurrent>,
+    operation: Uuid,
+    attempted: std::cell::Cell<bool>,
+    submitted: std::cell::Cell<bool>,
+}
+
+impl PendingOutput {
+    #[allow(dead_code)]
+    pub(crate) fn admit_followup_output(
+        &self,
+        ledger: &Ledger,
+        admitted: &RequestScope,
+        visit: &mut dyn FnMut() -> Result<SourceObservation>,
+        submit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let followup = self
+            .followup
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("source-aware Reader draft required"))?;
+        ensure!(
+            admitted.conversation == self.conversation
+                && admitted.operation == followup.operation
+                && admitted.root == self.root
+                && admitted.source == self.source,
+            "Reader output ownership changed"
+        );
+        admitted.check_source(visit)?;
+        verify_followup_source(&followup.source_check)?;
+        // This callback only submits the original effect. It cannot reenter
+        // this Store or wait for native completion while the guard is held.
+        followup.evidence.with_current(ledger, || {
+            ensure!(
+                !followup.attempted.replace(true),
+                "Reader output already attempted"
+            );
+            submit()?;
+            followup.submitted.set(true);
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn root(&self) -> &ExpectedHeads {
+        &self.root
+    }
+}
+
+fn verify_followup_source(check: &Option<SourceCurrent>) -> Result<()> {
+    if let Some(check) = check {
+        check()?;
+    }
+    Ok(())
+}
+
+struct CheckedFollowupProvider<'a> {
+    provider: &'a dyn Provider,
+    check: &'a dyn Fn() -> Result<()>,
+}
+
+impl Provider for CheckedFollowupProvider<'_> {
+    fn query(
+        &self,
+        key: &IndexKey,
+        question: &str,
+        max_passages: usize,
+        max_bytes: usize,
+        neighbors: bool,
+    ) -> Result<crate::retrieval::Retrieved> {
+        (self.check)()?;
+        let result = self
+            .provider
+            .query(key, question, max_passages, max_bytes, neighbors)?;
+        (self.check)()?;
+        Ok(result)
+    }
 }
 
 pub(crate) enum ExportDecision {

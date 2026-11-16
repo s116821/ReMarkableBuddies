@@ -6,7 +6,9 @@ use super::{
 use crate::{
     conversation::{Ledger, Record},
     storage::{
-        inspection::{InspectionStatus, StorageKind},
+        inspection::{
+            isolated_backup_directory, isolated_checkpoint_kind, InspectionStatus, StorageKind,
+        },
         *,
     },
 };
@@ -142,6 +144,36 @@ impl Scan {
             } else {
                 self.issue("unsafe-entry");
             }
+        }
+    }
+    fn isolated_checkpoints(&mut self, root: &Path) {
+        if !self.isolated_directory(root) {
+            return;
+        }
+        for backup in self.entries(root) {
+            if !isolated_backup_directory(&backup) {
+                self.issue("unexpected-entry");
+                continue;
+            }
+            if !self.isolated_directory(&backup) {
+                continue;
+            }
+            for child in self.entries(&backup) {
+                match isolated_checkpoint_kind(&child) {
+                    Some(kind) => self.file(&child, kind),
+                    None => self.issue("unexpected-entry"),
+                }
+            }
+        }
+    }
+    fn isolated_directory(&mut self, path: &Path) -> bool {
+        match self.meta(path) {
+            Some(metadata) if metadata.is_dir() => true,
+            Some(_) => {
+                self.issue("unsafe-entry");
+                false
+            }
+            None => false,
         }
     }
     fn opaque(&mut self, root: &Path, kind: StorageKind) {
@@ -819,6 +851,7 @@ pub(super) fn inspect(paths: &StorePaths) -> Inspection {
                         "state.json" | "health.json" | "mode.json" => {
                             scan.file(&child, StorageKind::Structural)
                         }
+                        "isolated" => scan.isolated_checkpoints(&child),
                         "incoming" => scan.opaque(&child, StorageKind::Staging),
                         _ if stage(&child) => scan.file(&child, StorageKind::Staging),
                         _ => scan.issue("unexpected-entry"),

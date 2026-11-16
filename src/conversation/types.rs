@@ -288,6 +288,8 @@ pub struct Receipt {
     pub acknowledgment: Acknowledgment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_intent: Option<super::AdmittedIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked_question: Option<Box<super::MarkedQuestion>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(
@@ -298,6 +300,10 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    SourceTarget(Box<super::target::SourceTarget>),
+    RegionSource(Box<super::target::RegionSource>),
+    TargetUse(Box<super::target::TargetUse>),
+    TargetState(Box<super::target::TargetState>),
     RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),
@@ -348,6 +354,9 @@ pub struct ContextBudget {
 }
 #[derive(Clone, Debug)]
 pub struct ContextView {
+    pub target_uses: Vec<super::target::TargetUse>,
+    pub region_sources: Vec<super::target::RegionSource>,
+    pub targets: Vec<super::target::TargetView>,
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,

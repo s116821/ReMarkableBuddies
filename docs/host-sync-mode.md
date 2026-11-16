@@ -24,7 +24,7 @@ they do not initialize/repair its structure or clean staging. Selected format2
 is supported by a dedicated maintenance path; unrelated legacy maintenance keeps
 its prior selected-format refusal.
 
-Only choose accepts input. It is one strict UTF8 JSON object with exactly
+`choose` accepts one strict UTF8 JSON object with exactly
 `operation`, `expected` and `choice`. Supply a new nonnil UUID for a new operation,
 and copy the original `data.current_snapshot.token` object unchanged from inspect
 or initialize into `expected` (its fields are `actor` and `sha256`). The choices are:
@@ -80,8 +80,10 @@ report and reject unsupported versions, malformed/oversized or partial output.
 The command holds the Store/process and current-mode leases through a single
 consuming write. A prefix-write failure never appends another report or retries
 the mutation. The normal ordinary Reader separately holds ordinary-mode and
-legacy-data guards through its run loop. It refuses shared/isolated mode or
-selected data before config snapshots and model/device/domain construction;
+legacy-data guards through its run loop. It refuses shared mode or selected
+data before config snapshots and model/device/domain construction.
+Ordinary format-1 isolated mode admits local use with legacy sync disabled
+and no shared Reader or memory selection;
 LocalOnly with a legacy publisher enabled also refuses. Choosing LocalOnly does
 not convert selected history into ordinary history or erase it.
 
@@ -89,3 +91,28 @@ This delivery does not activate the separate selected Reader integration or waiv
 live-model/native requirements. Older binaries may reject these flags; that is an
 unsupported capability, not an unconfigured mode or permission to inspect private
 mode files through a fallback protocol. App versions do not imply wire compatibility.
+
+## Isolated backup root control
+
+After choosing isolated backup, an operator can explicitly invoke:
+
+```text
+reader-buddy --sync-mode-operation provision-isolated-backup --sync-mode-input -
+```
+
+Send one bounded JSON object with `control_version` set to `1`, a nonnil
+`operation` UUID, and `expected` copied from the original inspect token.
+Use exact-dash stdin. Provider credentials and remote IDs stay outside stdin.
+The production control reports `provider-binding-unqualified` until the
+installed application and protected grant qualify. Choosing the mode keeps
+local Reader and Writer available while the provider is unavailable.
+
+The provision report uses the same bounded envelope. Its optional
+`data.isolated_root` carries the original operation, device, backup and epoch,
+an outcome, and `current` or `historical` currency. The outcomes are
+`root-verified`, `outcome-unknown`, `authorization-required`, `retry-later`,
+`recovery-required`, and `provider-binding-unqualified`. The existing
+mode receipt fields are null. Root verification is distinct from package
+publication and runtime health. For an ambiguous result, retain and retry the
+exact original operation and token. An old epoch can only observe its original
+root, and a new backup identity requires separate provisioning.

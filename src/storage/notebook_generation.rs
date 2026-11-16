@@ -42,18 +42,24 @@ pub(super) fn create(
     files::atomic_json(&root.join("format.json"), &VERSION)
 }
 
-pub(crate) fn validate_version(
+pub(super) fn validate_version(
     root: &Path,
     actor: Uuid,
     generation: Uuid,
     version: u32,
     preparing: bool,
+    mut budget: Option<&mut selection::SelectedReadBudget>,
 ) -> Result<()> {
+    let version = if version == target_generation::VERSION {
+        target_generation::base_version_with_budget(root, budget.as_deref_mut())?
+    } else {
+        version
+    };
     let path = root.join(MARKER);
     files::safe_path(&path)?;
-    if version == VERSION || path.exists() {
+    if version == VERSION || version == compound_generation::VERSION || path.exists() {
         ensure!(
-            files::json::<Feature>(&path, MAX_RECORD as u64)?
+            files::json_with_budget::<Feature>(&path, MAX_RECORD as u64, budget.as_deref_mut())?
                 == Feature {
                     format: 1,
                     actor,
@@ -62,11 +68,29 @@ pub(crate) fn validate_version(
             "unsupported notebook feature"
         );
         ensure!(
-            version == VERSION || preparing,
+            version == VERSION
+                || preparing
+                || (version == compound_generation::VERSION
+                    && compound_generation::validate_feature_with_budget(
+                        root, actor, generation, budget
+                    )
+                    .is_ok()),
             "interrupted notebook preparation"
         );
     }
     Ok(())
+}
+
+pub(super) fn stage_compound_feature(root: &Path, actor: Uuid, generation: Uuid) -> Result<()> {
+    compound_generation::validate_owned_staging(root, actor, generation)?;
+    files::atomic_json(
+        &root.join(MARKER),
+        &Feature {
+            format: 1,
+            actor,
+            generation,
+        },
+    )
 }
 
 pub(crate) fn capabilities(paths: &StorePaths, actor: Uuid, generation: Uuid) -> serde_json::Value {
@@ -120,6 +144,10 @@ pub(crate) fn publish_capabilities(store: &Store, generation: Uuid) -> Result<()
 }
 
 pub(crate) fn validate_ready(paths: &StorePaths, actor: Uuid, generation: Uuid) -> Result<()> {
+    let target_root = paths.data.join("generations").join(generation.to_string());
+    if target_generation::is_target(&target_root)? {
+        return target_generation::validate_ready(paths, actor, generation);
+    }
     ensure!(
         files::json::<Uuid>(&paths.data.join("CURRENT"), 128)? == generation,
         "notebook current changed"
@@ -176,6 +204,13 @@ pub(crate) fn prepare(
         "notebook current changed"
     );
     let root = store.generation(generation);
+    ensure!(
+        matches!(
+            feedback_generation::version(&root)?,
+            FORMAT | selection::SELECTED_STORE_FORMAT | feedback_generation::VERSION | VERSION
+        ),
+        "ordinary notebook preparation does not support compound storage"
+    );
     selection::validate_generation_preparing_notebook(&root, store.actor_id, generation)?;
     selection::refuse_selected_maintenance(&root)?;
     let retained = root.join("selection-history");

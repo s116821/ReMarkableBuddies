@@ -1,5 +1,118 @@
 use super::*;
+use crate::storage::drive::slot::{AgreedSlotObservation, SlotInvalid};
+
+#[test]
+fn agreed_read_expired_or_canceled_step_cannot_refresh_or_request() {
+    for refresh in [false, true] {
+        for canceled in [false, true] {
+            let mut f = Fixture::new(|_| vec![]);
+            if refresh {
+                f.client.credentials.expires_at = 0;
+            }
+            let deadline = if canceled {
+                std::time::Instant::now() + Duration::from_secs(60)
+            } else {
+                std::time::Instant::now()
+            };
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(canceled));
+            f.client.set_request_window(Some(deadline), Some(cancel));
+            assert!(f.client.observe_agreed_slot(&binding()).is_err());
+            assert!(f.finish().is_empty());
+        }
+    }
+}
 use crate::storage::drive::slot::{PointerMatch, SlotBinding, SlotPointer};
+
+#[test]
+fn agreed_read_needs_no_candidate_or_staging_and_only_gets() {
+    let bytes = b"winner-not-uploaded-by-this-client";
+    let winner = pointer("foreign-descriptor", bytes);
+    let mut f = Fixture::new(|_| {
+        vec![
+            reply(200, json!({"user":{"permissionId":"fixture-account"}})),
+            reply(200, slot_metadata(&winner)),
+            reply(200, metadata("foreign-descriptor", &tag(bytes))),
+            raw(bytes),
+        ]
+    });
+    let AgreedSlotObservation::Present(value) = f.client.observe_agreed_slot(&binding()).unwrap()
+    else {
+        panic!("expected validated agreed pointer")
+    };
+    assert_eq!(value.pointer, winner);
+    assert_eq!(value.descriptor, bytes);
+    let requests = f.finish();
+    assert_eq!(requests.len(), 4);
+    assert!(requests
+        .iter()
+        .all(|r| r.starts_with("GET ") && !r.contains("generateIds")));
+}
+
+#[test]
+fn agreed_read_distinguishes_absent_invalid_and_authorization() {
+    for (response, expected) in [
+        (reply(404, json!({})), None),
+        (
+            reply(200, json!({"id":"agreed-slot","appProperties":{}})),
+            Some(SlotInvalid::Metadata),
+        ),
+        (raw(b"invalid-json"), Some(SlotInvalid::Metadata)),
+    ] {
+        let mut f = Fixture::new(|_| {
+            vec![
+                reply(200, json!({"user":{"permissionId":"fixture-account"}})),
+                response,
+            ]
+        });
+        match (f.client.observe_agreed_slot(&binding()).unwrap(), expected) {
+            (AgreedSlotObservation::Absent, None) => {}
+            (AgreedSlotObservation::Invalid(actual), Some(expected)) => {
+                assert_eq!(actual, expected)
+            }
+            _ => panic!("agreed absence/invalid distinction lost"),
+        }
+        assert!(f.finish().iter().all(|r| r.starts_with("GET ")));
+    }
+    let mut f = Fixture::new(|_| vec![reply(401, json!({}))]);
+    let error = f.client.observe_agreed_slot(&binding()).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<TransportFailure>()
+            .unwrap()
+            .authorization_required
+    );
+    assert_eq!(f.finish().len(), 1);
+}
+
+#[test]
+fn occupied_agreed_slot_with_unavailable_or_corrupt_descriptor_is_invalid() {
+    let bytes = b"winner";
+    let p = pointer("winner-descriptor", bytes);
+    for responses in [
+        vec![reply(404, json!({}))],
+        vec![
+            reply(200, metadata("winner-descriptor", &tag(bytes))),
+            raw(b"corrupt"),
+        ],
+    ] {
+        let mut f = Fixture::new(|_| {
+            let mut r = vec![
+                reply(200, json!({"user":{"permissionId":"fixture-account"}})),
+                reply(200, slot_metadata(&p)),
+            ];
+            r.extend(responses);
+            r
+        });
+        assert!(matches!(
+            f.client.observe_agreed_slot(&binding()).unwrap(),
+            AgreedSlotObservation::Invalid(SlotInvalid::Descriptor)
+        ));
+        assert!(f
+            .finish()
+            .iter()
+            .all(|r| r.starts_with("GET ") && !r.contains("generateIds")));
+    }
+}
 
 fn binding() -> SlotBinding {
     SlotBinding {

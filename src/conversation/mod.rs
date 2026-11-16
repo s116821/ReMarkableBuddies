@@ -16,17 +16,22 @@ pub mod evidence;
 mod export;
 pub mod feedback;
 mod historical_association;
+pub(crate) mod marked_question;
 mod pending;
 #[cfg(test)]
-mod reader_dispatch;
-mod reader_plan;
+pub(crate) use pending::tests::{fixture_defer_pending_for_worker, fixture_pending_for_worker};
 #[cfg(test)]
-mod reader_uncertainty;
+mod reader_dispatch;
+pub(crate) mod reader_plan;
+pub(crate) mod reader_uncertainty;
 pub mod receiving;
 pub mod resolution;
 mod selected;
+#[cfg(any(target_os = "linux", test))]
+pub(crate) mod selected_reader_prepare;
 mod selected_reader_write;
 mod selected_writer;
+pub(crate) mod shared;
 pub use selected_reader_write::{
     SelectedReaderAcknowledgment, SelectedReaderPublication, SelectedReaderText,
     SelectedReaderWrite,
@@ -35,6 +40,10 @@ pub use selected_writer::*;
 #[cfg(test)]
 mod selected_context_tests;
 mod settlement;
+pub mod target;
+pub mod target_command;
+pub(crate) mod target_source;
+pub use target_source::TargetChange;
 mod types;
 mod writer;
 mod writer_flow;
@@ -52,6 +61,7 @@ pub use historical_association::{
     HistoricalPageAssociationUnresolved,
 };
 pub use intent::*;
+pub use marked_question::MarkedQuestion;
 pub use notebook::ArchivedNormalizedSource;
 pub use pending::{
     PendingIntentPublication, PendingIntentRequest, PendingRequestConflict, SourceAdmission,
@@ -129,6 +139,13 @@ impl Ledger {
             envelope_version: FORMAT,
             namespace,
             domain_schema_version: match &record {
+                Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_) => target::SCHEMA,
+                Record::Receipt(receipt) if receipt.marked_question.is_some() => {
+                    marked_question::SCHEMA
+                }
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
                 Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
@@ -160,12 +177,27 @@ impl Ledger {
         ensure!(
             matches!(
                 envelope.domain_schema_version,
-                SCHEMA | INTENT_SCHEMA | notebook::NOTEBOOK_SOURCE_SCHEMA
+                SCHEMA
+                    | INTENT_SCHEMA
+                    | notebook::NOTEBOOK_SOURCE_SCHEMA
+                    | target::SCHEMA
+                    | marked_question::SCHEMA
             ),
             "unsupported conversation schema"
         );
         ensure!(envelope.kind == Kind::Value, "deleted conversation record");
         let record: Record = serde_json::from_value(envelope.payload.clone())?;
+        let target_record = matches!(
+            &record,
+            Record::SourceTarget(_)
+                | Record::RegionSource(_)
+                | Record::TargetUse(_)
+                | Record::TargetState(_)
+        );
+        ensure!(
+            (envelope.domain_schema_version == target::SCHEMA) == target_record,
+            "target schema/shape mismatch"
+        );
         if envelope.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA {
             ensure!(
                 matches!(
@@ -228,6 +260,22 @@ impl Ledger {
         }
         let (id, namespace, conversation) = match &record {
             Record::Root(root) => (root.id, Namespace::Conversation, root.id),
+            Record::SourceTarget(value) => {
+                value.validate()?;
+                (value.id, Namespace::Source, value.conversation)
+            }
+            Record::RegionSource(value) => {
+                value.validate()?;
+                (value.id, Namespace::Source, value.conversation)
+            }
+            Record::TargetUse(value) => {
+                value.validate()?;
+                (value.id, Namespace::Conversation, value.conversation)
+            }
+            Record::TargetState(value) => {
+                value.validate()?;
+                (value.id, Namespace::Conversation, value.conversation)
+            }
             Record::RequestEvidence(fact) => {
                 fact.validate_shape()?;
                 (fact.id, Namespace::Conversation, fact.conversation)
@@ -311,7 +359,7 @@ impl Ledger {
                 (export.id, Namespace::ExportAssociation, export.conversation)
             }
             Record::Receipt(receipt) => {
-                intent::validate_receipt_schema(envelope.domain_schema_version, receipt)?;
+                marked_question::validate_receipt_shape(envelope, receipt)?;
                 ensure!(
                     crate::storage::valid_digest(&receipt.fingerprint)
                         && !receipt.acknowledgment.applied_root_revision.is_nil()
@@ -330,6 +378,8 @@ impl Ledger {
             "domain envelope identity mismatch"
         );
         let mut media = match &record {
+            Record::SourceTarget(value) => value.media(),
+            Record::RegionSource(value) => value.media(),
             Record::ArchivedNormalizedSource(source) => vec![source.media.clone()],
             Record::Source(source) => vec![source.image.clone()],
             Record::Capture(capture) => capture.facts.media()?,
@@ -438,15 +488,76 @@ impl Ledger {
         operation: Uuid,
         fingerprint: String,
         root: Envelope,
-        mut records: Vec<Envelope>,
+        records: Vec<Envelope>,
         binding: Option<Uuid>,
     ) -> Result<(WriteResult, bool)> {
+        self.publish_with_capture(
+            operation,
+            fingerprint,
+            root,
+            records,
+            binding,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_with_capture(
+        &self,
+        operation: Uuid,
+        fingerprint: String,
+        root: Envelope,
+        mut records: Vec<Envelope>,
+        binding: Option<Uuid>,
+        captured: Option<&crate::storage::captured::Captured>,
+        published: Option<&mut Vec<Envelope>>,
+        marked_question: Option<marked_question::MarkedQuestion>,
+    ) -> Result<(WriteResult, bool)> {
+        if self.store.source_target_generation()?.is_some() {
+            let users = records
+                .iter()
+                .filter_map(|e| match Self::decode(e) {
+                    Ok(Record::Turn(user))
+                        if e.parents.is_empty()
+                            && user.role == Role::User
+                            && matches!(user.outcome, Outcome::Prepared | Outcome::Interpreted) =>
+                    {
+                        Some(user)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for user in users {
+                if records
+                    .iter()
+                    .any(|e| e.record_id == target::TargetUse::id(user.id))
+                {
+                    continue;
+                }
+                if user.mode == Mode::Reader
+                    && user.outcome == Outcome::Prepared
+                    && !user.sources.is_empty()
+                {
+                    records.extend(self.target_pending_records(&user)?);
+                } else {
+                    records.extend(self.target_inherited_records(&user)?);
+                }
+            }
+        }
         let ack = Acknowledgment {
             operation,
             conversation: root.record_id,
             records: records.iter().map(|e| e.record_id).collect(),
             applied_root_revision: root.revision_id,
             binding,
+        };
+        let root_revision = root.revision_id;
+        let fingerprint = if let Some(marked) = &marked_question {
+            marked.fingerprint(&ack)?
+        } else {
+            fingerprint
         };
         let receipt = self.envelope(
             Namespace::Conversation,
@@ -456,19 +567,39 @@ impl Ledger {
                 fingerprint: fingerprint.clone(),
                 acknowledgment: ack,
                 admitted_intent: None,
+                marked_question: marked_question.map(Box::new),
             }),
             vec![],
         )?;
         records.push(root);
         records.push(receipt);
-        let result = self.store.commit(records, BTreeMap::new());
+        if let Some(captured) = captured {
+            let (_, fresh) = self
+                .store
+                .commit_captured(captured, records.clone(), true)?;
+            ensure!(fresh, "Reader follow-up publication is historical");
+            let result = self
+                .replay(operation, &fingerprint)?
+                .context("publication receipt unavailable")?;
+            ensure!(
+                result.historical.applied_root_revision == root_revision,
+                "Reader follow-up publication receipt changed"
+            );
+            if let Some(published) = published {
+                *published = records;
+            }
+            return Ok((result, true));
+        }
+        let result = self.store.commit_with_disposition(records, BTreeMap::new());
         // A committed-but-lost acknowledgment, or a concurrent identical winner,
         // is recognized before propagating stale-head/injected-error outcomes.
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             // Ledger envelopes have fresh random revision/operation IDs above.
             // Only this call's successful commit is Fresh; an error after a
             // durable commit or a concurrent winner remains historical.
-            return Ok((prior, result.is_ok()));
+            let fresh = result.is_ok_and(|(_, changed)| changed)
+                && prior.historical.applied_root_revision == root_revision;
+            return Ok((prior, fresh));
         }
         result?;
         bail!("committed operation receipt unavailable")
@@ -527,9 +658,71 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+    ) -> Result<WriteResult> {
+        self.append_unreplayed_target(operation, expected, turn, sources, fingerprint, None)
+    }
+    fn append_unreplayed_target(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+        fingerprint: String,
+        about_user: Option<Uuid>,
+    ) -> Result<WriteResult> {
+        self.append_with_capture(
+            operation,
+            expected,
+            turn,
+            sources,
+            fingerprint,
+            about_user,
+            None,
+            false,
+        )
+    }
+
+    pub(super) fn append_followup(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        turn: Turn,
+        captured: Option<&mut crate::storage::captured::Captured>,
+    ) -> Result<WriteResult> {
+        ensure!(
+            self.expected(Namespace::Conversation, Self::receipt_id(operation))?
+                .0
+                .is_empty(),
+            "Reader follow-up append is historical"
+        );
+        let sources: Vec<ImageUse> = vec![];
+        let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
+        self.append_with_capture(
+            operation,
+            expected,
+            turn,
+            sources,
+            fingerprint,
+            None,
+            captured,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_with_capture(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
         mut turn: Turn,
         sources: Vec<ImageUse>,
         fingerprint: String,
+        about_user: Option<Uuid>,
+        captured: Option<&mut crate::storage::captured::Captured>,
+        fresh_only: bool,
     ) -> Result<WriteResult> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
@@ -538,6 +731,7 @@ impl Ledger {
         ensure!(sources.len() <= MAX_ITEMS, "too many source uses");
         ensure!(turn.sequence == 0, "caller must not allocate chronology");
         Self::validate_turn(&turn)?;
+        let turn_text = turn.text.clone();
         let (_, mut root) = match self.live_root(turn.conversation, Some(&expected)) {
             Ok(root) => root,
             Err(error) => {
@@ -545,6 +739,7 @@ impl Ledger {
                 // but before this root read. Recover only its exact receipt;
                 // changed operations and unrelated stale heads still refuse.
                 if let Some(prior) = self.replay(operation, &fingerprint)? {
+                    ensure!(!fresh_only, "Reader follow-up append is historical");
                     return Ok(prior);
                 }
                 return Err(error);
@@ -584,6 +779,7 @@ impl Ledger {
                 Record::Source(source) => source.conversation,
                 Record::Capture(capture) => capture.conversation,
                 Record::NormalizedText(source) => source.conversation,
+                Record::RegionSource(source) => source.conversation,
                 Record::ArchivedNormalizedSource(source) => source.conversation,
                 Record::LegacyCapture(capture) => capture.conversation,
                 Record::DevelopmentCapture(capture) => capture.conversation,
@@ -628,7 +824,31 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, envelope, records, binding)
+        if let Some(user) = about_user {
+            records.extend(self.target_presentation_records(
+                user,
+                turn_text.as_deref().context("target answer text absent")?,
+            )?);
+        }
+        let mut published = Vec::new();
+        let (result, fresh) = self.publish_with_capture(
+            operation,
+            fingerprint,
+            envelope,
+            records,
+            binding,
+            captured.as_deref(),
+            Some(&mut published),
+            None,
+        )?;
+        ensure!(
+            !fresh_only || fresh,
+            "Reader follow-up append is historical or uncertain"
+        );
+        if let Some(capture) = captured {
+            capture.advance(published)?;
+        }
+        Ok(result)
     }
     /// Prepare explicitly synthetic SDK fixture evidence; never grants native authority.
     pub fn prepare_sdk_fixture(
@@ -1112,13 +1332,92 @@ impl Ledger {
         turn: Turn,
         reason: Option<AttemptReason>,
     ) -> Result<WriteResult> {
-        let fingerprint = if let Some(reason) = &reason {
+        self.advance_fact_target(operation, expected_root, expected_turn, turn, reason, None)
+    }
+    fn advance_fact_target(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: Option<AttemptReason>,
+        target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+    ) -> Result<WriteResult> {
+        self.advance_with_capture(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            reason,
+            target,
+            None,
+            None,
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    pub(super) fn complete_followup(
+        &self,
+        operation: Uuid,
+        root: ExpectedHeads,
+        draft: ExpectedHeads,
+        turn: Turn,
+        captured: &crate::storage::captured::Captured,
+    ) -> Result<WriteResult> {
+        self.advance_with_capture(
+            operation,
+            root,
+            draft,
+            turn,
+            None,
+            None,
+            Some(captured),
+            None,
+            None,
+        )
+        .map(|(result, _)| result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_with_capture(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        reason: Option<AttemptReason>,
+        target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+        captured: Option<&crate::storage::captured::Captured>,
+        marked: Option<marked_question::PreparedMark>,
+        published: Option<&mut Vec<Envelope>>,
+    ) -> Result<(WriteResult, Option<marked_question::FreshMarkedQuestion>)> {
+        let fingerprint = if let Some((frame, candidate)) = target {
+            frame.check(self)?;
+            Self::fingerprint(&(
+                "interpret-source-target-v1",
+                &turn,
+                frame.source(),
+                candidate,
+            ))?
+        } else if let Some(reason) = &reason {
             Self::fingerprint(&("attempt-outcome", &turn, reason))?
         } else {
             Self::fingerprint(&("advance", &turn))?
         };
-        if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
+        if marked.is_some() {
+            ensure!(
+                self.store
+                    .value(Namespace::Conversation, Self::receipt_id(operation))?
+                    .is_none(),
+                "marked question interpretation is historical"
+            );
+        } else if let Some(prior) = self.replay(operation, &fingerprint)? {
+            ensure!(
+                captured.is_none(),
+                "Reader follow-up completion is historical"
+            );
+            return Ok((prior, None));
         }
         Self::validate_turn(&turn)?;
         let (_, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
@@ -1194,6 +1493,9 @@ impl Ledger {
         ) {
             ensure!(original.text == turn.text, "generated draft text changed");
         }
+        let target_records = target
+            .map(|(frame, candidate)| self.target_interpretation_records(&turn, frame, candidate))
+            .transpose()?;
         let outcome = turn.outcome.clone();
         let turn_id = turn.id;
         root.updated_ms = turn.updated_ms;
@@ -1205,6 +1507,7 @@ impl Ledger {
             Record::Turn(turn),
             vec![],
         )?;
+        let marked_question = marked.map(|mark| mark.bind(&updated)).transpose()?;
         let root = self.envelope(
             Namespace::Conversation,
             root.id,
@@ -1213,6 +1516,9 @@ impl Ledger {
             vec![],
         )?;
         let mut records = vec![updated];
+        if let Some(target_records) = target_records {
+            records.extend(target_records);
+        }
         if let Some(reason) = reason {
             let id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
@@ -1233,7 +1539,69 @@ impl Ledger {
                 vec![],
             )?);
         }
-        self.publish(operation, fingerprint, root, records, binding)
+        if let Some((marked_question, ordinary)) = marked_question {
+            let mut published = Vec::new();
+            let (result, fresh) = self.publish_with_capture(
+                operation,
+                fingerprint,
+                root,
+                records,
+                binding,
+                captured,
+                Some(&mut published),
+                Some(marked_question),
+            )?;
+            ensure!(fresh, "marked question interpretation is historical");
+            let mut current = captured
+                .context("marked question lost captured ownership")?
+                .clone();
+            current.advance(published)?;
+            let receipt = current
+                .records
+                .iter()
+                .find(|(envelope, _)| {
+                    envelope.namespace == Namespace::Conversation
+                        && envelope.record_id == Self::receipt_id(operation)
+                })
+                .context("marked question receipt absent")?;
+            let mark = self.validate_marked_question(
+                &receipt.0,
+                result.historical.conversation,
+                &mut crate::storage::captured::ReadBudget::default(),
+            )?;
+            current.with_current(&self.store, || Ok(()))?;
+            let fresh = marked_question::FreshMarkedQuestion {
+                current,
+                operation,
+                root_revision: result.historical.applied_root_revision,
+                mark,
+                ordinary,
+            };
+            Ok((result, Some(fresh)))
+        } else if target.is_some() {
+            let (result, fresh) =
+                self.publish_observed(operation, fingerprint, root, records, binding)?;
+            ensure!(
+                fresh,
+                "target interpretation is historical; no continuation admitted"
+            );
+            Ok((result, None))
+        } else if let Some(captured) = captured {
+            self.publish_with_capture(
+                operation,
+                fingerprint,
+                root,
+                records,
+                binding,
+                Some(captured),
+                published,
+                None,
+            )
+            .map(|(result, _)| (result, None))
+        } else {
+            self.publish(operation, fingerprint, root, records, binding)
+                .map(|result| (result, None))
+        }
     }
     /// Historical receipt semantics shared by writes and selected inspection.
     /// Successful validation never reconstructs native qualification.
@@ -1660,15 +2028,61 @@ impl Ledger {
     ) -> Result<ContextView> {
         Self::context_token_limit(selection, budget)?;
         let records = self.inspect(conversation, false)?;
-        Self::context_from_records(records, selection, budget, token_count, |media| {
-            self.store
-                .open_object(&ObjectRef {
-                    sha256: media.sha256.clone(),
-                    bytes: media.bytes,
-                })
-                .is_ok()
-        })
+        let mut context =
+            Self::context_from_records(records, selection, budget, token_count, |media| {
+                self.store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_ok()
+            })?;
+        self.complete_target_view(&mut context)?;
+        Ok(context)
     }
+    /// Read-only history includes Generated Writer bodies; model context keeps
+    /// its existing Completed/Interpreted filter and cannot select this recipe.
+    pub(crate) fn presentation_context(
+        &self,
+        conversation: Uuid,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
+        self.presentation_context_for(
+            conversation,
+            budget,
+            token_count,
+            ContextPurpose::Presentation,
+        )
+    }
+
+    fn presentation_context_for(
+        &self,
+        conversation: Uuid,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+        purpose: ContextPurpose<'_>,
+    ) -> Result<ContextView> {
+        let records = self.inspect(conversation, false)?;
+        let mut context = Self::context_records_for(
+            records,
+            None,
+            budget,
+            Some(&token_count),
+            |media| {
+                self.store
+                    .open_object(&ObjectRef {
+                        sha256: media.sha256.clone(),
+                        bytes: media.bytes,
+                    })
+                    .is_ok()
+            },
+            purpose,
+        )?;
+        self.complete_target_view(&mut context)?;
+        Ok(context)
+    }
+
     pub(super) fn context_token_limit(
         selection: Option<TurnRange>,
         budget: &ContextBudget,
@@ -1706,12 +2120,38 @@ impl Ledger {
         token_count: Option<&TurnCounter<'_>>,
         media_available: impl Fn(&Media) -> bool,
     ) -> Result<ContextView> {
+        Self::context_records_for(
+            records,
+            selection,
+            budget,
+            token_count,
+            media_available,
+            ContextPurpose::Model,
+        )
+    }
+
+    fn context_records_for(
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: Option<&TurnCounter<'_>>,
+        media_available: impl Fn(&Media) -> bool,
+        purpose: ContextPurpose<'_>,
+    ) -> Result<ContextView> {
         let token_limit = Self::context_token_limit(selection, budget)?;
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
                 Record::Turn(t)
-                    if (t.outcome == Outcome::Completed || t.outcome == Outcome::Interpreted)
+                    if (t.outcome == Outcome::Completed
+                        || t.outcome == Outcome::Interpreted
+                        || (matches!(
+                            purpose,
+                            ContextPurpose::Presentation | ContextPurpose::Pair(_)
+                        ) && t.mode == Mode::Writer
+                            && t.role == Role::Assistant
+                            && t.outcome == Outcome::Generated)
+                        || matches!(purpose, ContextPurpose::Pair(draft) if t.eq(draft)))
                         && selection.is_none_or(|range| {
                             t.sequence >= range.start && t.sequence < range.end_exclusive
                         }) =>
@@ -1744,6 +2184,22 @@ impl Ledger {
                 .into());
             }
         }
+        let turn_ids = turns.iter().map(|turn| turn.id).collect::<BTreeSet<_>>();
+        let target_uses = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::TargetUse(used) if turn_ids.contains(&used.turn) => Some((**used).clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let about_bytes = target_uses.iter().try_fold(bytes, |sum, used| {
+            sum.checked_add(used.about.as_ref().map_or(0, String::len))
+                .context("target context text overflow")
+        })?;
+        ensure!(
+            target_uses.len() <= budget.max_turns && about_bytes <= budget.max_text_bytes,
+            "target context budget exhausted"
+        );
         let source_ids = turns
             .iter()
             .flat_map(|t| t.sources.iter())
@@ -1751,6 +2207,7 @@ impl Ledger {
         let mut sources = Vec::new();
         let mut captures = Vec::new();
         let mut normalized_text = Vec::new();
+        let mut region_sources = Vec::new();
         let mut archived_sources = Vec::new();
         let mut legacy_captures = Vec::new();
         let mut development_captures = Vec::new();
@@ -1763,6 +2220,9 @@ impl Ledger {
                 }
                 Record::NormalizedText(source) if source_ids.contains(&source.id) => {
                     normalized_text.push(*source)
+                }
+                Record::RegionSource(source) if source_ids.contains(&source.id) => {
+                    region_sources.push(*source);
                 }
                 Record::ArchivedNormalizedSource(source) if source_ids.contains(&source.id) => {
                     archived_sources.push(*source)
@@ -1786,6 +2246,7 @@ impl Ledger {
                 + development_captures.len()
                 + resident_captures.len()
                 + normalized_text.len()
+                + region_sources.len()
                 + archived_sources.len()
                 == source_ids.len(),
             "source reference absent"
@@ -1803,6 +2264,9 @@ impl Ledger {
         }
         for capture in &legacy_captures {
             capture_media.extend(capture.media()?);
+        }
+        for region in &region_sources {
+            capture_media.extend(region.media());
         }
         for media in &capture_media {
             if !media_available(media) && !missing_media.contains(media) {
@@ -1822,6 +2286,9 @@ impl Ledger {
             }
         }
         Ok(ContextView {
+            targets: vec![],
+            target_uses,
+            region_sources,
             turns,
             sources,
             captures,
@@ -1920,3 +2387,10 @@ impl Ledger {
 
 #[cfg(test)]
 mod append_replay_tests;
+
+#[derive(Clone, Copy)]
+enum ContextPurpose<'a> {
+    Model,
+    Presentation,
+    Pair(&'a Turn),
+}

@@ -1,4 +1,6 @@
 use super::{raster, scenario::*};
+#[cfg(test)]
+use crate::workflow::exchange_history::PageBackend;
 use crate::{
     device::{
         backend::{DeviceBackend, Frame},
@@ -96,6 +98,10 @@ pub struct State {
     #[cfg(test)]
     pub acquisition_kind: crate::device::backend::AcquisitionKind,
     #[cfg(test)]
+    pub sdk_capture: Option<remarkable_open_sdk::capture::CapturedBatch>,
+    #[cfg(test)]
+    pub(super) marked_question: Option<super::marked_question::MarkedQuestion>,
+    #[cfg(test)]
     pub detail_queries: usize,
     #[cfg(test)]
     pub refuse_repeated_details: bool,
@@ -127,6 +133,17 @@ pub struct State {
 }
 
 impl State {
+    #[cfg(test)]
+    fn marked_page_is_active(&self) -> bool {
+        self.active == 1
+            && !self.request_lost
+            && self.request_pin == Some((self.active, self.visit, self.session))
+            && self.marked_question.as_ref().is_some_and(|model| {
+                model.has_destination
+                    && model.page.state.owner.visit == self.visit.to_string()
+                    && model.page.state.owner.session == self.session.to_string()
+            })
+    }
     fn interrupt_request(&mut self, effect: Option<Effect>) {
         match effect {
             Some(Effect::OwnerChange) => self.visit += 1,
@@ -238,6 +255,10 @@ impl State {
         Ok(Self {
             #[cfg(test)]
             acquisition_kind: crate::device::backend::AcquisitionKind::LegacyUnqualified,
+            #[cfg(test)]
+            sdk_capture: None,
+            #[cfg(test)]
+            marked_question: None,
             #[cfg(test)]
             detail_queries: 0,
             #[cfg(test)]
@@ -354,6 +375,78 @@ impl State {
 
 pub struct SimDevice(pub Shared);
 
+#[cfg(test)]
+impl PageBackend for SimDevice {
+    fn take_presentation(
+        &mut self,
+    ) -> Option<crate::workflow::exchange_history::PresentationReceipt> {
+        let mut state = self.0.borrow_mut();
+        if !state.marked_page_is_active() {
+            return None;
+        }
+        state.marked_question.as_mut()?.page.take_presentation()
+    }
+    fn observe(&mut self) -> Result<crate::workflow::exchange_history::PageState> {
+        let after_pair = {
+            let mut state = self.0.borrow_mut();
+            state.marked_question.as_mut().and_then(|model| {
+                model
+                    .page
+                    .pair_operation
+                    .and_then(|_| model.after_pair.take())
+            })
+        };
+        if let Some(after_pair) = after_pair {
+            after_pair();
+        }
+        let mut state = self.0.borrow_mut();
+        anyhow::ensure!(
+            state.marked_page_is_active(),
+            "modeled Buddy page is inactive"
+        );
+        state
+            .marked_question
+            .as_mut()
+            .context("modeled Buddy page absent")?
+            .page
+            .observe()
+    }
+    fn apply(
+        &mut self,
+        edit: &crate::workflow::exchange_history::Edit,
+    ) -> crate::workflow::exchange_history::Effect {
+        use crate::workflow::exchange_history::{EditAction, Effect};
+        let mut state = self.0.borrow_mut();
+        if !state.marked_page_is_active() {
+            return Effect::Refused;
+        }
+        match state.marked_question.as_mut() {
+            Some(model)
+                if edit.action != EditAction::PresentAnswer || model.has_answer_destination =>
+            {
+                model.page.apply(edit)
+            }
+            _ => Effect::Refused,
+        }
+    }
+
+    fn bind_completed_answer(
+        &mut self,
+        operation: crate::storage::Uuid,
+        verified: &crate::workflow::exchange_history::PageState,
+        draft: crate::storage::Uuid,
+        completed: crate::storage::Uuid,
+    ) -> bool {
+        let mut state = self.0.borrow_mut();
+        state.marked_page_is_active()
+            && state.marked_question.as_mut().is_some_and(|model| {
+                model
+                    .page
+                    .bind_completed_answer(operation, verified, draft, completed)
+            })
+    }
+}
+
 fn png(image: &DynamicImage) -> Result<Vec<u8>> {
     let mut out = std::io::Cursor::new(Vec::new());
     image.write_to(&mut out, image::ImageFormat::Png)?;
@@ -368,6 +461,100 @@ impl DeviceBackend for SimDevice {
         }
         #[cfg(not(test))]
         crate::device::backend::AcquisitionKind::LegacyUnqualified
+    }
+    #[cfg(test)]
+    fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
+        self.0
+            .borrow_mut()
+            .sdk_capture
+            .take()
+            .context("SDK fixture capture absent")
+    }
+    #[cfg(test)]
+    fn capture_sdk_with_marked_source(
+        &mut self,
+    ) -> Result<(
+        remarkable_open_sdk::capture::CapturedBatch,
+        Option<crate::device::backend::MarkedSourceBinding>,
+    )> {
+        let mut state = self.0.borrow_mut();
+        let Some(model) = state.marked_question.as_ref() else {
+            drop(state);
+            return Ok((self.capture_sdk()?, None));
+        };
+        anyhow::ensure!(
+            state.active == 0 && model.capture.is_none() && !state.request_lost,
+            "modeled marked SDK capture already consumed or source unavailable"
+        );
+        let (batch, binding) = model.capture(state.session, state.visit)?;
+        let exposed = model.has_source_binding;
+        state.request_pin = Some((state.active, state.visit, state.session));
+        state.verified_navigation = true;
+        state
+            .marked_question
+            .as_mut()
+            .expect("modeled source")
+            .remember_capture(binding.clone());
+        Ok((batch, exposed.then_some(binding)))
+    }
+
+    #[cfg(test)]
+    fn prepare_marked_question_erase(
+        &mut self,
+        binding: &crate::device::backend::MarkedSourceBinding,
+        operation: crate::storage::Uuid,
+        region: [i32; 4],
+    ) -> Option<crate::device::backend::PreparedMarkedErase<'_>> {
+        super::marked_question::prepare_effect(self.0.clone(), binding, operation, region)
+    }
+
+    #[cfg(test)]
+    fn marked_question_destination(
+        &self,
+    ) -> Option<crate::workflow::exchange_history::UserPresentationTarget> {
+        let state = self.0.borrow();
+        let model = state.marked_question.as_ref()?;
+        (state.active == 0
+            && state.pages.len() > 1
+            && model.has_destination
+            && model.document == model.target.document
+            && model.page.state.owner.document == model.target.document
+            && model.page.state.owner.page == model.target.page)
+            .then_some(model.target)
+    }
+
+    #[cfg(test)]
+    fn marked_answer_destination(
+        &self,
+    ) -> Option<crate::workflow::exchange_history::UserPresentationTarget> {
+        let hook = self
+            .0
+            .borrow_mut()
+            .marked_question
+            .as_mut()
+            .and_then(|model| model.before_pair_draft.take());
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.marked_question_destination().filter(|_| {
+            self.0
+                .borrow()
+                .marked_question
+                .as_ref()
+                .is_some_and(|model| model.has_answer_destination)
+        })
+    }
+
+    #[cfg(test)]
+    fn exchange_page_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::exchange_history::PageBackend> {
+        let eligible = self.0.borrow().marked_page_is_active();
+        if eligible {
+            Some(self)
+        } else {
+            None
+        }
     }
     #[cfg(test)]
     fn wait_for_interactions(
@@ -659,6 +846,15 @@ impl DeviceBackend for SimDevice {
             }
             // Transfer the exact modeled destination before a boundary fault.
             state.request_pin = Some((state.active, state.visit, state.session));
+            #[cfg(test)]
+            if state.active == 1 && before == 0 {
+                let visit = state.visit.to_string();
+                let session = state.session.to_string();
+                if let Some(model) = state.marked_question.as_mut() {
+                    model.page.state.owner.visit = visit;
+                    model.page.state.owner.session = session;
+                }
+            }
             state.interrupt_request(effect);
             state.clock += 700;
             state.event("navigation_settled", "");

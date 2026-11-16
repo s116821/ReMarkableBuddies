@@ -333,7 +333,26 @@ impl Inspection {
         self.admission.is_some()
     }
 }
+/// Only the selected notebook's positively observed document token may advance.
+pub struct NotebookMemorySelection<'a> {
+    pub(crate) original: &'a crate::storage::selection::SelectionToken,
+    pub(crate) current: &'a crate::storage::selection::SelectionToken,
+}
+
 pub trait Provider: Send + Sync {
+    fn query_selected_notebook(&self, _query: &Query, _calls: usize) -> Result<QueryResult> {
+        anyhow::bail!("memory provider does not support selected notebook")
+    }
+    fn with_selected_notebook_phase(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _selection: NotebookMemorySelection<'_>,
+        _consume: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support guarded notebook phases")
+    }
     fn require_selected_writer(
         &self,
         _writer: &crate::conversation::SelectedAdmission,
@@ -354,6 +373,28 @@ pub trait Provider: Send + Sync {
         _finish: crate::conversation::SelectedWriterFinish,
     ) -> Result<crate::conversation::SelectedWriterPublication> {
         anyhow::bail!("memory provider does not support selected Writer publication")
+    }
+    /// Join every participating domain at the actual owned model submission.
+    /// The callback does not wait for a model response or reacquire these gates.
+    fn with_selected_writer_handoff(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+        _submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support joined Writer handoff")
+    }
+    fn publish_selected_writer_joined(
+        &self,
+        _result: &QueryResult,
+        _writer: &crate::conversation::SelectedAdmission,
+        _finish: crate::conversation::SelectedWriterFinish,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedWriterPublication> {
+        anyhow::bail!("memory provider does not support joined Writer publication")
     }
     /// Opt in to ordinary Writer snapshots from this exact receiving Store.
     /// Selected providers need a separate consuming publication contract.
@@ -377,10 +418,47 @@ pub trait Provider: Send + Sync {
     ) -> Result<crate::conversation::SelectedReaderPublication> {
         anyhow::bail!("subject memory provider does not support selected Reader publication")
     }
+    #[cfg(any(target_os = "linux", test))]
+    fn with_selected_reader_handoff(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _additional: &[&crate::conversation::SelectedAdmission],
+        _verify: &mut dyn FnMut(&Store) -> Result<()>,
+        _submit: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        anyhow::bail!("memory provider does not support guarded Reader submission")
+    }
+    #[cfg(any(target_os = "linux", test))]
+    fn publish_selected_reader_text_joined(
+        &self,
+        _result: &QueryResult,
+        _reader: &crate::conversation::SelectedAdmission,
+        _accepted: &crate::storage::selection::SelectionToken,
+        _request: crate::conversation::SelectedReaderWrite,
+        _admission: (
+            &[&crate::conversation::SelectedAdmission],
+            &mut crate::storage::selection::SelectedReadBudget,
+        ),
+        _verify: &mut dyn FnMut(
+            &Store,
+            &mut crate::storage::selection::SelectedReadBudget,
+        ) -> Result<()>,
+    ) -> Result<crate::conversation::SelectedReaderPublication> {
+        anyhow::bail!("memory provider does not support guarded Reader publication")
+    }
     fn put(&self, mutation: Mutation) -> Result<Uuid>;
     fn forget(&self, mutation: Forget) -> Result<Uuid>;
     fn inspect(&self, key: &Key) -> Result<Vec<Envelope>>;
     fn query(&self, query: &Query) -> Result<QueryResult>;
+    #[cfg(any(target_os = "linux", test))]
+    fn query_selected_reader(
+        &self,
+        _query: &Query,
+        _reads: crate::storage::selection::SelectedReadBudget,
+    ) -> Result<QueryResult> {
+        anyhow::bail!("memory provider does not support guarded Reader query")
+    }
     /// Current CLI inspection keeps its admission through the consuming writer.
     /// Plain inspect returns a historical read and does not grant handoff authority.
     fn inspect_for_handoff(&self, key: &Key) -> Result<Inspection> {

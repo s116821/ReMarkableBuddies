@@ -50,7 +50,7 @@ impl WriterSelection {
         value.values()?;
         Ok(value)
     }
-    pub(crate) fn values(&self) -> Result<(Turn, NormalizedTextSource)> {
+    pub(crate) fn values(&self) -> Result<(Turn, WriterSource)> {
         ensure!(
             self.notebook.is_none(),
             "notebook selection requires its typed export path"
@@ -58,9 +58,7 @@ impl WriterSelection {
         let Record::Turn(draft) = Ledger::decode(&self.draft)? else {
             bail!("not a Writer draft")
         };
-        let Record::NormalizedText(source) = Ledger::decode(&self.source)? else {
-            bail!("not a text source")
-        };
+        let source = WriterSource::decode(Ledger::decode(&self.source)?)?;
         ensure!(
             draft.mode == Mode::Writer
                 && draft.role == Role::Assistant
@@ -70,7 +68,7 @@ impl WriterSelection {
             "invalid Writer selection"
         );
         crate::writer::parse_draft(draft.text.as_deref().context("draft text missing")?)?;
-        Ok((draft, *source))
+        Ok((draft, source))
     }
     pub(crate) fn published_notebook(
         ledger: &Ledger,
@@ -305,6 +303,10 @@ impl WriterExportInput {
 pub(crate) struct WriterExportGuard {
     heads: Vec<(Namespace, Uuid, Uuid)>,
     archive: Option<Box<ArchivedNormalizedSource>>,
+    regional_media: Vec<Media>,
+    ready_pin: Option<String>,
+    mode_pin: crate::storage::sync::mode::SyncModeToken,
+    regional_reads: std::sync::Mutex<crate::storage::selection::SelectedReadBudget>,
     live: Arc<Store>,
 }
 impl WriterExportGuard {
@@ -314,7 +316,11 @@ impl WriterExportGuard {
         live: Arc<Store>,
     ) -> Result<Self> {
         let mut archive = None;
+        let mut regional_media = Vec::new();
         for record in records {
+            if let Record::RegionSource(region) = Ledger::decode(record)? {
+                regional_media.extend(region.media());
+            }
             if record.namespace == Namespace::Source
                 && record.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA
             {
@@ -325,12 +331,25 @@ impl WriterExportGuard {
                 archive = Some(source);
             }
         }
+        let mut reads = crate::storage::selection::SelectedReadBudget::new(
+            0,
+            4096,
+            crate::storage::MAX_RECORD as u64 * 1024,
+            256 * 1024 * 1024,
+        );
+        live.check_runtime_policy(&mut reads)?;
+        let ready_pin = live.target_runtime_pin(&mut reads)?;
+        let mode_pin = live.sync_mode_snapshot()?.token;
         Ok(Self {
             heads: std::iter::once(root)
                 .chain(records)
                 .map(|e| (e.namespace, e.record_id, e.revision_id))
                 .collect(),
             archive,
+            regional_media,
+            regional_reads: std::sync::Mutex::new(reads),
+            ready_pin,
+            mode_pin,
             live,
         })
     }
@@ -346,6 +365,30 @@ impl WriterExportGuard {
         {
             return Ok(false);
         }
+        let mut reads = self
+            .regional_reads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("regional export media allowance unavailable"))?;
+        self.live.check_runtime_policy(&mut reads)?;
+        if self.live.target_runtime_pin(&mut reads)? != self.ready_pin
+            || self.live.sync_mode_snapshot()?.token != self.mode_pin
+        {
+            return Ok(false);
+        }
+        for media in &self.regional_media {
+            reads.charge(0, 1, 0, media.bytes)?;
+            if ledger
+                .store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        drop(reads);
         let heads = ledger.store.snapshot_heads_matching(
             &[
                 Namespace::Conversation,
@@ -453,6 +496,9 @@ impl Ledger {
             .filter(|e| e.namespace == Namespace::Source && e.record_id == turn.sources[0])
             .collect();
         ensure!(sources.len() == 1, "source absent or conflicted");
+        if let Record::RegionSource(region) = Self::decode(sources[0])? {
+            self.regional_source_proof(&region, &mut || Ok(()))?;
+        }
         let mut selected = WriterSelection {
             root: expected,
             draft: drafts[0].clone(),
@@ -577,5 +623,11 @@ impl Ledger {
             "foreign Writer selection"
         );
         Ok(selected)
+    }
+}
+
+impl Ledger {
+    pub(crate) fn original_writer_flow(&self, operation: Uuid, fingerprint: &str) -> Result<bool> {
+        Ok(self.replay(operation, fingerprint)?.is_some())
     }
 }

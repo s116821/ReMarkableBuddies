@@ -8,6 +8,10 @@ use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
+#[cfg(target_os = "linux")]
+mod researched;
+#[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+pub(crate) use researched::fixture as researched_fixture;
 
 /// Shared by the live workflow and bounded vision-comparison helper.
 pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
@@ -51,6 +55,8 @@ pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on t
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
+const MARKED_QUESTION_PROMPT: &str = "For this handwritten source request, add exactly one header field HANDWRITTEN_QUESTION_MARK: present, absent, or unclear. Use present only when a visible handwritten question mark belongs to the same fragment in QUESTION, anywhere within that fragment. Keep its written text, punctuation, and shorthand, and give one tight QUESTION_BOX for the fragment in the overview. Ignore printed question marks and marks in other writing. If you can read a marked fragment and localize it but cannot answer, retain QUESTION and QUESTION_BOX with the mark field and write ANSWER: NONE after the separator. For all other cases follow the original answer instructions.";
+
 /// Result from LLM analysis containing question, answer, question bounds and selected-content center
 struct AnalysisResult {
     question: String,
@@ -58,6 +64,14 @@ struct AnalysisResult {
     _question_box: Option<BoundingBox>,
     selection_center: SelectionCenter,
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
+    target: Option<crate::conversation::target::Candidate>,
+    about: Option<String>,
+}
+
+struct MarkedFragment {
+    text: String,
+    region: [i32; 4],
+    target: Option<crate::conversation::target::Candidate>,
 }
 
 /// High-level orchestrator for the complete workflow
@@ -68,13 +82,39 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     ledger: Ledger,
     memory: Option<std::sync::Arc<dyn crate::memory::Provider>>,
     personalization: crate::config::PersonalizationSnapshot,
+    handwriting: Option<crate::handwriting::runtime::Runtime>,
+    handwriting_operation: Option<crate::handwriting::runtime::Capture>,
 }
+struct ModelContent<'a, M: LLMEngine>(&'a mut M);
+impl<M: LLMEngine> Drop for ModelContent<'_, M> {
+    fn drop(&mut self) {
+        self.0.clear_content();
+    }
+}
+
 enum RenderOutcome {
     NoOutput(AttemptReason),
     SubmittedUnverified,
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn receive_resident_prepared(
+        &mut self,
+        token: crate::storage::selection::SelectionToken,
+        acknowledgment: crate::conversation::selected_reader_prepare::ResidentPreparedAcknowledgment,
+        policy: crate::storage::sync::selected::ReaderPreferences,
+    ) -> Result<()> {
+        let mut attempt =
+            Attempt::prepare_resident(&self.ledger, &self.workflow, token, acknowledgment, policy)?;
+        self.run_prepared(&mut attempt)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn into_workflow(self) -> Workflow {
+        self.workflow
+    }
+
     /// Continue an explicitly acknowledged selected input. This consumes current
     /// stored data only; installed acquisition and native output remain separate.
     pub fn run_selected_prepared(
@@ -84,6 +124,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         user: crate::conversation::IntentRecordRef,
         capture: crate::storage::Uuid,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting.is_none(),
+            "confirmed handwriting requires ordinary local Reader"
+        );
         if let Some(memory) = &self.memory {
             let admission = self.workflow.selected_admission()?;
             memory.require_selected_reader(admission.as_ref())?;
@@ -101,6 +145,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             trigger_enabled: true,
             ledger,
             memory: None,
+            handwriting: None,
+            handwriting_operation: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),
@@ -152,22 +198,31 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
-        let _timing = crate::measurement::Span::new("reader.iteration");
-        self.workflow.begin_iteration()?;
-        let result = self.run_iteration_inner(wait_for_trigger);
-        // A failed input guard or service health cannot be cleared by cleanup.
-        if self.workflow.runtime_failed() {
-            return result.and(Err(anyhow::anyhow!(
-                "Runtime health or input lost; further activity stopped"
-            )));
-        }
-        if let Err(error) = self.workflow.finish_request() {
-            log::warn!("Request finalization failed: {error:#}");
-            return result.and(Err(error));
-        }
-        if result.is_err() {
-            self.workflow.report_failure(Failure::Device)?;
-        }
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "prior handwriting operation unsettled"
+        );
+        let result = (|| -> Result<()> {
+            let _timing = crate::measurement::Span::new("reader.iteration");
+            self.workflow.begin_iteration()?;
+            let result = self.run_iteration_inner(wait_for_trigger);
+            // A failed input guard or service health cannot be cleared by cleanup.
+            if self.workflow.runtime_failed() {
+                return result.and(Err(anyhow::anyhow!(
+                    "Runtime health or input lost; further activity stopped"
+                )));
+            }
+            if let Err(error) = self.workflow.finish_request() {
+                log::warn!("Request finalization failed: {error:#}");
+                return result.and(Err(error));
+            }
+            if result.is_err() {
+                self.workflow.report_failure(Failure::Device)?;
+            }
+            result
+        })();
+        // Keep successful/refused capture ownership through finalization and failure output.
+        self.handwriting_operation = None;
         result
     }
 
@@ -199,6 +254,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 anyhow::bail!("selected conversation requires the retained native source");
             };
             return match request {
+                SelectedConversationRequest::UnsupportedRegionalWriter => {
+                    anyhow::bail!("fresh regional Writer requires the selected receiver")
+                }
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
                 }
@@ -420,6 +478,10 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "handwriting context already captured for this operation"
+        );
         let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
@@ -428,6 +490,38 @@ impl<M: LLMEngine> Orchestrator<M> {
             .clone();
         let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
         let screenshot_base64 = &encoded[0];
+        #[cfg(any(target_os = "linux", test))]
+        if attempt.selected_resident() {
+            let targets = images
+                .iter()
+                .map(|image| crate::storage::digest(image))
+                .collect();
+            attempt.capture_selected_handwriting(&targets)?;
+        }
+        let handwriting = self.handwriting.as_ref().map(|runtime| {
+            let targets = images
+                .iter()
+                .map(|image| crate::storage::digest(image))
+                .collect();
+            runtime.capture(self.ledger.store(), &targets, &mut || {
+                attempt
+                    .check_selected()
+                    .and_then(|_| self.workflow.check_request_progress())
+                    .map_err(|_| crate::handwriting::ContextFailure::Canceled)
+            })
+        });
+
+        if let Some(capture) = &handwriting {
+            log::debug!("Handwriting selection {}", capture.diagnostic());
+        }
+        let confirmed_context = handwriting.as_ref().and_then(|c| c.context.clone());
+        self.handwriting_operation = handwriting;
+        anyhow::ensure!(
+            self.handwriting_operation
+                .as_ref()
+                .is_none_or(|c| c.failure.is_none()),
+            "handwriting context unavailable"
+        );
 
         self.workflow.check_request_progress()?;
 
@@ -436,15 +530,37 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let result = self.analyze_and_answer(
+        let (result, marked) = self.analyze_and_answer(
             attempt,
             screenshot_base64,
             screenshot_png_data,
             &encoded[1..],
+            confirmed_context.as_deref(),
         )?;
 
         match result {
             None => {
+                if let Some(marked) = marked {
+                    self.workflow.check_request_progress()?;
+                    let fresh = attempt.interpret_marked_question(
+                        &self.ledger,
+                        &marked.text,
+                        marked.region,
+                        marked.target.as_ref(),
+                    )?;
+                    if let (Some(fresh), Some(destination)) = (fresh, attempt.marked_destination) {
+                        return self.workflow.present_marked_question(
+                            &self.ledger,
+                            &attempt.user,
+                            fresh,
+                            attempt.marked_source.as_deref(),
+                            destination,
+                        );
+                    }
+                    info!("Marked question retained. User-only presentation unavailable");
+                    self.workflow.report_failure(Failure::Selection)?;
+                    return Ok(());
+                }
                 info!("No clear selected region or readable question detected");
                 // Record a non-ink diagnostic (no text output)
                 self.workflow.report_failure(Failure::Selection)?;
@@ -463,7 +579,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .iter()
                     .map(|bytes| STANDARD.encode(bytes))
                     .collect();
-                if let Some(failure) = self.verify_question(attempt, &result, &verification)? {
+                if let Some(failure) = self.verify_question(
+                    attempt,
+                    &result,
+                    &verification,
+                    confirmed_context.as_deref(),
+                )? {
                     info!(
                         "Independent question reading disagreed or was uncertain; no answer written"
                     );
@@ -482,7 +603,30 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                attempt.interpret(&self.ledger, &result.question)?;
+                let mut fresh =
+                    if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
+                        self.workflow.check_request_progress()?;
+                        attempt.interpret_marked_question(
+                            &self.ledger,
+                            &result.question,
+                            marked.region,
+                            result.target.as_ref(),
+                        )?
+                    } else {
+                        attempt.interpret_source_target(
+                            &self.ledger,
+                            &result.question,
+                            result.target.as_ref(),
+                        )?;
+                        None
+                    };
+                if attempt.source_target_enabled() {
+                    result.about = Some(match result.target.as_ref() {
+                        Some(candidate) => candidate.about()?,
+                        None => "About: Uncertain - Selected source could not be localized".into(),
+                    });
+                }
+                let preserve_marked_user = fresh.is_some();
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     let enriched =
@@ -490,6 +634,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     if let Err(error) = enriched {
                         log::warn!("Contextual answer was not completed");
                         self.workflow.report_failure(Failure::Provider)?;
+                        if preserve_marked_user {
+                            return Err(error);
+                        }
                         let canceled = self.workflow.input_failed();
                         attempt.outcome(
                             &self.ledger,
@@ -511,16 +658,33 @@ impl<M: LLMEngine> Orchestrator<M> {
                     info!("Got verified Q&A with optional subject memory");
                 }
                 let memory = self.memory.clone();
+                let mut prepared = None;
+                let mut publication_called = false;
                 if let (Some(memory), Some(view)) = (memory, memory_view.as_ref()) {
                     let published = if attempt.is_selected() {
                         self.publish_answer(attempt, &result, false, Some((memory.as_ref(), view)))
                     } else {
                         memory.with_current(view, &mut || {
+                            if preserve_marked_user {
+                                anyhow::ensure!(
+                                    !std::mem::replace(&mut publication_called, true),
+                                    "marked answer publication callback already consumed"
+                                );
+                            }
+                            prepared = self.prepare_marked_answer(
+                                attempt,
+                                &result,
+                                fresh.take(),
+                                !view.selected(),
+                            )?;
+                            if prepared.is_some() {
+                                return Ok(());
+                            }
                             self.publish_answer(attempt, &result, !view.selected(), None)
                         })
                     };
                     if let Err(error) = published {
-                        if attempt.assistant.is_none() {
+                        if attempt.assistant.is_none() && !preserve_marked_user {
                             let canceled = self.workflow.input_failed();
                             attempt.outcome(
                                 &self.ledger,
@@ -540,7 +704,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return Err(error);
                     }
                 } else {
-                    self.publish_answer(attempt, &result, true, None)?;
+                    prepared = self.prepare_marked_answer(attempt, &result, fresh.take(), true)?;
+                    if prepared.is_none() {
+                        self.publish_answer(attempt, &result, true, None)?;
+                    }
+                }
+                if let Some(prepared) = prepared {
+                    self.workflow.present_marked_answer(
+                        &self.ledger,
+                        &attempt.user,
+                        prepared,
+                        attempt.marked_source.as_deref(),
+                    )?;
                 }
             }
         }
@@ -549,6 +724,47 @@ impl<M: LLMEngine> Orchestrator<M> {
         Ok(())
     }
 
+    fn compose_result(result: &AnalysisResult) -> String {
+        let body = Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+        result
+            .about
+            .as_ref()
+            .map_or(body.clone(), |about| format!("{about}\n{body}"))
+    }
+
+    fn prepare_marked_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        fresh: Option<crate::conversation::marked_question::FreshMarkedQuestion>,
+        allow_native: bool,
+    ) -> Result<Option<crate::conversation::marked_question::MarkedAnswer>> {
+        let (Some(fresh), Some(target)) = (fresh, attempt.marked_destination) else {
+            return Ok(None);
+        };
+        if !allow_native || attempt.is_selected() {
+            return Ok(None);
+        }
+        self.workflow.check_request_progress()?;
+        let Some(binding) = self.workflow.marked_answer_binding(
+            &self.ledger,
+            target,
+            fresh.presentation_head().0,
+        )?
+        else {
+            info!("Marked question erase refused: pair presentation unavailable");
+            return Ok(None);
+        };
+        attempt
+            .prepare_marked_answer(
+                &self.ledger,
+                fresh,
+                Self::compose_result(result),
+                target,
+                binding,
+            )
+            .map(Some)
+    }
     fn publish_answer(
         &mut self,
         attempt: &mut Attempt,
@@ -558,12 +774,11 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated_with_memory(
-            &self.ledger,
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-            memory,
-        )?;
+        attempt.generated_with_memory(&self.ledger, Self::compose_result(result), memory)?;
         if attempt.is_selected() {
+            if attempt.selected_resident() {
+                return Ok(());
+            }
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
         }
         if !allow_native {
@@ -577,8 +792,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
-            let text =
-                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let text = Self::compose_result(result);
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
             let mut output_started = false;
@@ -720,25 +934,54 @@ impl<M: LLMEngine> Orchestrator<M> {
         screenshot_base64: &str,
         screenshot_png_data: Vec<u8>,
         details: &[String],
-    ) -> Result<Option<AnalysisResult>> {
+        context: Option<&crate::handwriting::ConfirmedContext>,
+    ) -> Result<(Option<AnalysisResult>, Option<MarkedFragment>)> {
+        #[cfg(any(target_os = "linux", test))]
+        let context = context.or_else(|| attempt.selected_handwriting());
         attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
-        self.llm.clear_content();
-        self.llm.add_text_content(ANALYSIS_PROMPT);
-        self.llm.add_image_content(screenshot_base64);
-        for detail in details {
-            self.llm.add_image_content(detail);
+        let payload = context
+            .map(|context| {
+                let targets = std::iter::once(screenshot_base64.to_owned())
+                    .chain(details.iter().cloned())
+                    .collect::<Vec<_>>();
+                crate::handwriting::runtime::reader_payload(
+                    ANALYSIS_PROMPT,
+                    false,
+                    &targets,
+                    context,
+                )
+            })
+            .transpose()?;
+        let owned = ModelContent(&mut self.llm);
+        owned.0.clear_content();
+        if let Some(parts) = payload {
+            crate::handwriting::runtime::send_parts(owned.0, &parts);
+        } else {
+            owned.0.add_text_content(ANALYSIS_PROMPT);
+            owned.0.add_image_content(screenshot_base64);
+            for detail in details {
+                owned.0.add_image_content(detail);
+            }
         }
 
+        if attempt.source_target_enabled() {
+            owned
+                .0
+                .add_text_content(crate::conversation::target::GEOMETRY_CONTRACT);
+        }
+        if !attempt.is_selected() {
+            owned.0.add_text_content(MARKED_QUESTION_PROMPT);
+        }
         let mut progress_failed = false;
         // Stored source readback, recipe verification, base64 encoding and model
         // payload assembly all consume the original acquisition budget. Retire
         // that deadline only at the actual first provider-admission boundary.
         self.workflow.deliver_reader_acquisition()?;
-        let response = match self.llm.execute_with_progress(&mut || {
+        let response = match attempt.execute_model(&mut *owned.0, &mut || {
             let result = attempt
-                .check_selected()
+                .model_progress()
                 .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
@@ -754,10 +997,65 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.workflow.check_request_progress()?;
         info!("Analysis response received ({} bytes)", response.len());
         attempt.check_selected()?;
-        Ok(Self::parse_analysis_response(
-            &response,
-            screenshot_png_data,
+        let marked = if attempt.is_selected() {
+            None
+        } else {
+            Self::parse_marked_fragment(&response)
+        };
+        Ok((
+            Self::parse_analysis_response(&response, screenshot_png_data),
+            marked,
         ))
+    }
+
+    fn analysis_separator(response: &str) -> Option<usize> {
+        response.match_indices("---").find_map(|(i, _)| {
+            let before = response[..i].rsplit('\n').next().unwrap_or("");
+            let after = response[i + 3..].split('\n').next().unwrap_or("");
+            (before.trim().is_empty() && after.trim().is_empty()).then_some(i)
+        })
+    }
+
+    fn parse_marked_fragment(response: &str) -> Option<MarkedFragment> {
+        let separator = Self::analysis_separator(response)?;
+        let answer = response[separator + 3..]
+            .trim()
+            .strip_prefix("ANSWER:")?
+            .trim();
+        if answer.is_empty() {
+            return None;
+        }
+        let header = &response[..separator];
+        let field = |prefix: &str| {
+            let mut values = header
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix(prefix));
+            let value = values.next()?.trim();
+            values.next().is_none().then_some(value)
+        };
+        if field("HANDWRITTEN_QUESTION_MARK:")? != "present" {
+            return None;
+        }
+        let question = field("QUESTION:")?;
+        if question.trim().is_empty()
+            || question.len() > 4096
+            || question.eq_ignore_ascii_case("NONE")
+            || question.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let bounds = Self::parse_bounding_box(field("QUESTION_BOX:")?)?;
+        let region = [bounds.x, bounds.y, bounds.width, bounds.height];
+        crate::conversation::reader_plan::checked_region(region).ok()?;
+        Some(MarkedFragment {
+            text: question.to_owned(),
+            region,
+            target: field("TARGET_JSON:").and_then(Self::parse_target_candidate),
+        })
+    }
+
+    fn parse_target_candidate(raw: &str) -> Option<crate::conversation::target::Candidate> {
+        crate::conversation::target::parse_candidate(raw)
     }
 
     fn parse_analysis_response(
@@ -771,7 +1069,8 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let (header, body) = response.split_once("---")?;
+        let separator = Self::analysis_separator(response)?;
+        let (header, body) = (&response[..separator], &response[separator + 3..]);
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
         // Extract question text
@@ -813,6 +1112,19 @@ impl<M: LLMEngine> Orchestrator<M> {
             _question_box: question_box,
             selection_center,
             _screenshot_data: screenshot_png_data,
+            target: {
+                let mut fields = header
+                    .lines()
+                    .filter_map(|line| line.trim().strip_prefix("TARGET_JSON:"));
+                fields.next().and_then(|value| {
+                    if fields.next().is_none() {
+                        Self::parse_target_candidate(value.trim())
+                    } else {
+                        None
+                    }
+                })
+            },
+            about: None,
         })
     }
 
@@ -821,7 +1133,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &Attempt,
         result: &AnalysisResult,
         images: &[String],
+        context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<Option<Failure>> {
+        #[cfg(any(target_os = "linux", test))]
+        let context = context.or_else(|| attempt.selected_handwriting());
         attempt.check_selected()?;
         let Some(bounds) = &result._question_box else {
             return Ok(Some(Failure::Transcription));
@@ -829,8 +1144,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         if !(0..1024).contains(&bounds.y) || bounds.height <= 0 {
             return Ok(Some(Failure::Transcription));
         }
-        self.llm.clear_content();
-        self.llm.add_text_content(
+        let prompt =
             "Transcribe only the handwritten question annotation in these images of the same page. Typeset \
              document text is not a handwritten question. Preserve the visible words and \
              abbreviations; shorthand and fragments are valid annotations and need not form \
@@ -838,15 +1152,24 @@ impl<M: LLMEngine> Orchestrator<M> {
              meaning. Do not expand or guess them from printed context. Do not answer \
              the question. If an essential handwritten word is uncertain, overstruck or \
              unreadable, or there is no handwritten question, return only NONE. Otherwise \
-             return one line: TRANSCRIPTION: [exact handwritten text].",
-        );
-        for image in images {
-            self.llm.add_image_content(image);
+             return one line: TRANSCRIPTION: [exact handwritten text].";
+        let payload = context
+            .map(|c| crate::handwriting::runtime::reader_payload(prompt, true, images, c))
+            .transpose()?;
+        let owned = ModelContent(&mut self.llm);
+        owned.0.clear_content();
+        if let Some(parts) = payload {
+            crate::handwriting::runtime::send_parts(owned.0, &parts);
+        } else {
+            owned.0.add_text_content(prompt);
+            for image in images {
+                owned.0.add_image_content(image);
+            }
         }
         let mut progress_failed = false;
-        let reading = match self.llm.execute_with_progress(&mut || {
+        let reading = match attempt.execute_model(&mut *owned.0, &mut || {
             let result = attempt
-                .check_selected()
+                .model_progress()
                 .and_then(|_| self.workflow.check_request_progress());
             progress_failed |= result.is_err();
             result
@@ -950,8 +1273,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 // native authority. Ordinary capture supplies no association.
                 let mut query = crate::memory::Query::new(result.question.clone(), now);
                 query.document = attempt.memory_document()?;
-                memory
-                    .query(&query)
+                attempt
+                    .query_memory(memory.as_ref(), &query)
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
             })
             .transpose()?;
@@ -977,6 +1300,26 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && !view.context.facts.is_empty()
         });
         let workflow = &mut self.workflow;
+        #[cfg(any(target_os = "linux", test))]
+        if attempt.selected_resident() {
+            let joined = self.memory.as_deref().zip(retrieved.as_ref());
+            result.answer = crate::memory::context::answer_with_resident_handoff(
+                &mut self.llm,
+                &result.question,
+                images,
+                usable,
+                preference,
+                &mut || {
+                    attempt
+                        .model_progress()
+                        .and_then(|_| workflow.check_request_progress())
+                },
+                &mut |engine, progress| attempt.execute_enrichment(engine, progress, joined),
+            )?;
+            attempt.check_selected()?;
+            self.workflow.check_request_progress()?;
+            return Ok(retrieved);
+        }
         result.answer = if let Some(view) = usable.filter(|view| view.selected()) {
             crate::memory::context::answer_with_selected_view(
                 &mut self.llm,
@@ -1113,13 +1456,24 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
 
         // Render the Q&A
-        let formatted_output =
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+        let formatted_output = Self::compose_result(result);
 
         self.workflow.render_qa(&formatted_output)?;
 
         info!("Q&A rendered successfully");
         Ok(RenderOutcome::SubmittedUnverified)
+    }
+
+    pub(crate) fn set_local_handwriting(
+        &mut self,
+        dispatch: &super::conversation_dispatch::Dispatch<'_>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.handwriting_operation.is_none(),
+            "handwriting operation still active"
+        );
+        self.handwriting = dispatch.handwriting_runtime(&self.ledger)?;
+        Ok(())
     }
 
     /// Run the main loop
@@ -1132,6 +1486,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         dispatch: super::conversation_dispatch::Dispatch<'_>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
+        self.set_local_handwriting(&dispatch)?;
         self.run_loop_with_dispatch(Some(dispatch))
     }
 
@@ -1177,6 +1532,47 @@ mod tests {
     use super::Orchestrator;
     use crate::OpenAI;
 
+    #[test]
+    fn marked_fragment_preserves_nonterminal_shorthand_even_without_an_answer() {
+        let response = "QUESTION: G? unc. here\nQUESTION_BOX: 12,24,48,16\nHANDWRITTEN_QUESTION_MARK: present\n---\nANSWER: NONE";
+        let marked = Orchestrator::<OpenAI>::parse_marked_fragment(response).unwrap();
+        assert_eq!(marked.text, "G? unc. here");
+        assert_eq!(marked.region, [12, 24, 48, 16]);
+        assert!(Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).is_none());
+        for (old, new) in [
+            ("present", "absent"), // Printed punctuation alone remains absent.
+            ("present", "unclear"),
+            ("HANDWRITTEN_QUESTION_MARK: present\n", ""),
+            ("present", "present\nHANDWRITTEN_QUESTION_MARK: present"),
+            ("12,24,48,16", "12,24,48,16\nQUESTION_BOX: 12,24,48,16"),
+            ("12,24,48,16", "-1,24,48,16"),
+            ("12,24,48,16", "12,24,0,16"),
+            ("12,24,48,16", "762,24,48,16"),
+            ("12,24,48,16", "12,1020,48,16"),
+            ("12,24,48,16", "2147483647,24,48,16"),
+        ] {
+            assert!(
+                Orchestrator::<OpenAI>::parse_marked_fragment(&response.replace(old, new))
+                    .is_none(),
+                "{new}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_target_header_preserves_subject_dashes_and_refuses_duplicate_candidates() {
+        let candidate = serde_json::json!({"subject":"A---B relation","geometry":{"components":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},"understanding":{"status":"interpreted"}});
+        let response=format!("QUESTION: Why?\nQUESTION_BOX: 1,2,3,4\nSELECTION_CENTER: 100,100\nTARGET_JSON: {candidate}\n---\nANSWER: Because.");
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+        assert_eq!(result.target.unwrap().subject, "A---B relation");
+        let duplicate = response.replace("\n---", &format!("\nTARGET_JSON: {candidate}\n---"));
+        assert!(
+            Orchestrator::<OpenAI>::parse_analysis_response(&duplicate, vec![])
+                .unwrap()
+                .target
+                .is_none()
+        );
+    }
     #[test]
     fn independent_transcription_requires_the_same_words() {
         assert!(Orchestrator::<OpenAI>::transcriptions_agree(

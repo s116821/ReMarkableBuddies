@@ -225,13 +225,7 @@ pub(crate) struct NavigationMetadata {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn navigation_metadata(
-    document: String,
-    session: String,
-    metadata: &Value,
-    content: &Value,
-) -> Result<NavigationMetadata> {
-    ensure!(uuid(&document), "Invalid navigation document ID");
+fn ordered_pages(content: &Value) -> Result<Vec<OrderedPage>> {
     let entries = content["cPages"]["pages"]
         .as_array()
         .context("Missing navigation page order")?;
@@ -284,6 +278,73 @@ fn navigation_metadata(
         !order.is_empty() && !order.windows(2).any(|p| p[0].key == p[1].key),
         "Ambiguous navigation page order"
     );
+    Ok(order)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn original_pdf_mapping(
+    raw: &[u8],
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+) -> Result<(u32, u32)> {
+    let content =
+        crate::config::inspection::strict_json(raw).context("Invalid original PDF page table")?;
+    ensure!(
+        content["fileType"] == "pdf",
+        "Unsupported original document type"
+    );
+    let count = content["cPages"]["original"]["value"]
+        .as_u64()
+        .filter(|count| (1..=256).contains(count))
+        .context("Invalid original PDF page count")?;
+    let order = ordered_pages(&content)?;
+    // The general navigation parser accepts an absent/null redirect for a
+    // note page. A declared original redirect must carry an integer here.
+    ensure!(
+        content["cPages"]["pages"]
+            .as_array()
+            .is_some_and(|pages| pages.iter().all(|page| {
+                page.get("redir").is_none_or(|redirect| {
+                    redirect["value"]
+                        .as_u64()
+                        .is_some_and(|index| index < count)
+                })
+            })),
+        "Invalid original PDF redirect table"
+    );
+    ensure!(
+        order.len() == observed.order().len()
+            && order
+                .iter()
+                .zip(observed.order())
+                .all(|(row, id)| row.id == id.to_string()),
+        "Original PDF page order changed"
+    );
+    let mut redirects = std::collections::BTreeSet::new();
+    ensure!(
+        order
+            .iter()
+            .filter_map(|page| page.redirect)
+            .all(|index| redirects.insert(index)),
+        "Ambiguous original PDF redirects"
+    );
+    let page = observed.page().page.to_string();
+    let redirect = order
+        .iter()
+        .find(|row| row.id == page)
+        .and_then(|row| row.redirect)
+        .context("Reader page has no original PDF redirect")?;
+    Ok((count.try_into()?, redirect.try_into()?))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn navigation_metadata(
+    document: String,
+    session: String,
+    metadata: &Value,
+    content: &Value,
+) -> Result<NavigationMetadata> {
+    ensure!(uuid(&document), "Invalid navigation document ID");
+    let order = ordered_pages(content)?;
     let page = content["cPages"]["lastOpened"]["value"]
         .as_str()
         .context("Missing navigation current page")?;

@@ -26,6 +26,7 @@ pub use payload::{FrozenNotebookPayloads, NotebookMapOutput, PayloadContext};
 pub mod command;
 pub mod flow;
 pub mod runner;
+pub(crate) mod selected;
 
 /// Validated observed buffer, not an atomic concurrent-filesystem snapshot.
 /// Includes unselected units; raw presentation is represented by hash and size.

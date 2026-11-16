@@ -1,4 +1,8 @@
 //! Real selected Workflow source route. Historical pixels confer no output lease.
+// The researched route is deliberately disabled pending intent admission.
+#[allow(dead_code)]
+pub(super) mod original_pdf;
+
 #[cfg(test)]
 use super::resident_runtime::ReadOnlyAdmission;
 use super::{
@@ -16,7 +20,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use remarkable_open_sdk::{
-    native_adapter::{Reply, RuntimeIdentity},
+    native_adapter::{ReaderFacts, Reply, RuntimeIdentity},
     OperationId, Uuid,
 };
 use std::{
@@ -25,6 +29,17 @@ use std::{
 };
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
+
+#[derive(Debug)]
+pub(super) struct FinalizedCancellation;
+
+impl std::fmt::Display for FinalizedCancellation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Resident source request canceled")
+    }
+}
+
+impl std::error::Error for FinalizedCancellation {}
 fn operation() -> OperationId {
     OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("OS UUID"))
 }
@@ -54,7 +69,16 @@ trait SourceSession {
         &self,
         _document: crate::storage::Uuid,
         _page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
+        Ok(None)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
         Ok(None)
     }
     fn reconnect(
@@ -115,8 +139,17 @@ impl SourceSession for Session {
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
         Session::take_writer_request(self, document, page)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        Session::peek_regional_writer(self)
     }
     fn reconnect(
         &mut self,
@@ -255,20 +288,45 @@ impl ResidentSourceOwner {
         &mut self,
         corner: crate::device::touch::TriggerCorner,
         health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.activate_at_startup_with_input(
+            health,
+            deadline,
+            || RequestInput::new(corner, None),
+            check,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn activate_at_startup_with_input(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        input: impl FnOnce() -> Result<RequestInput>,
+        check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         ensure!(
             !self.fatal && self.session.is_none() && self.input.is_none(),
             "resident startup activation requires an unused owner"
         );
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
         // Startup observes quiet input without creating a released Reader request.
-        let mut input = RequestInput::new(corner, None)?;
+        let mut input = input()?;
         input.require_quiet()?;
+        check()?;
         let mut session = self.factory.activate(
             &self.selection,
             self.store.clone(),
             health,
             &mut input,
-            Instant::now() + ACQUISITION,
+            deadline.unwrap_or_else(|| Instant::now() + ACQUISITION),
         )?;
         session.finish();
         self.session = Some(session);
@@ -307,28 +365,73 @@ impl ResidentSourceOwner {
             .context("resident Writer session absent")?;
         Ok(session
             .take_writer_request(capture.document(), capture.page())?
-            .map(
-                |request| super::resident_output::SelectedConversationRequest::WriterRefinement {
-                    request,
-                    require_current_draft: true,
-                },
-            ))
+            .map(|request| match request {
+                super::resident_supervisor::writer_request::InstalledRequest::Refine(request) => {
+                    super::resident_output::SelectedConversationRequest::WriterRefinement {
+                        request,
+                        require_current_draft: true,
+                    }
+                }
+                super::resident_supervisor::writer_request::InstalledRequest::GenerateRegion(_) => {
+                    super::resident_output::SelectedConversationRequest::UnsupportedRegionalWriter
+                }
+            }))
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        if !self.selection.has_installed_output() {
+            return Ok(None);
+        }
+        self.session
+            .as_ref()
+            .map(|session| session.peek_regional_writer())
+            .transpose()
+            .map(Option::flatten)
     }
     pub(super) fn begin(
         &mut self,
         released: ReleasedReaderInput,
         health: &mut ServiceHealth,
     ) -> Result<()> {
+        self.begin_with_check(released, health, || Ok(()))
+    }
+
+    pub(super) fn begin_with_check(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.begin_until(released, health, ACQUISITION, check)
+    }
+
+    pub(super) fn begin_until(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        acquisition: Duration,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            acquisition <= ACQUISITION,
+            "resident acquisition may only be clamped"
+        );
         ensure!(
             !self.fatal && self.input.is_none(),
             "Resident source request cannot restart"
         );
-        self.deadline = Some(released.released_at + ACQUISITION);
+        self.deadline = Some(released.released_at + acquisition);
         self.input = Some(released.input);
         self.gesture = Some(released.gesture);
         self.canceled = false;
         self.captured_source = None;
         self.progress(health)?;
+        check()?;
         let deadline = self.deadline.unwrap();
         before(deadline)?;
         let input = self.input.as_mut().unwrap();
@@ -400,8 +503,138 @@ impl ResidentSourceOwner {
         admitted_progress(deadline, || self.progress(health))
     }
     pub(super) fn acquire(&mut self, health: &mut ServiceHealth) -> Result<ResidentSourceCapture> {
+        self.acquire_with_check(health, |_| Ok(()))
+    }
+
+    pub(super) fn acquire_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+    ) -> Result<ResidentSourceCapture> {
+        self.acquire_with_source(health, None, check, |_, _, _| Ok(()))
+            .map(|(capture, ())| capture)
+    }
+
+    /// Acquire the original PDF under the existing released-input owner. The
+    /// caller supplies short selected boundaries and a separate progress check.
+    /// Neither callback may retain a gate across source I/O or worker waits.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(super) fn acquire_original_pdf_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        admitted_document: crate::storage::Uuid,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<(ResidentSourceCapture, original_pdf::CapturedOriginalPdf)> {
+        let deadline = self.original_pdf_deadline(acquisition_deadline, request_deadline)?;
+        self.acquire_original_pdf_using(
+            health,
+            deadline,
+            request_deadline,
+            check,
+            |facts, pulse| {
+                original_pdf::ObservedOriginalPdf::observe(
+                    facts,
+                    admitted_document,
+                    deadline,
+                    pulse,
+                )
+            },
+            &mut progress,
+            original_pdf::ObservedOriginalPdf::captured_by_owner,
+        )
+    }
+
+    fn original_pdf_deadline(
+        &self,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+    ) -> Result<Instant> {
+        ensure!(
+            !self.reconnect
+                && self.captured_source.is_none()
+                && self.gesture == Some(ResidentGesture::Reader)
+                && acquisition_deadline <= request_deadline,
+            "Original PDF capture is unavailable for this release"
+        );
+        let owner_deadline = self
+            .deadline
+            .context("Resident source requires a released gesture")?;
+        Ok(owner_deadline.min(acquisition_deadline))
+    }
+
+    fn original_pdf_progress(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        admitted_progress(deadline, || {
+            self.progress(health)?;
+            progress()
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_original_pdf_using<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observe: impl FnOnce(
+            &ReaderFacts,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<original_pdf::ObservedOriginalPdf>,
+        progress: &mut dyn FnMut() -> Result<()>,
+        complete: impl FnOnce(
+            original_pdf::ObservedOriginalPdf,
+            &ReaderFacts,
+            Instant,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
+        let result =
+            self.acquire_with_source(health, Some(deadline), check, |owner, health, facts| {
+                let mut pulse = || owner.original_pdf_progress(health, deadline, progress);
+                observe(facts, &mut pulse)
+            });
+        if result.is_err() && !self.reconnect {
+            // Refuse any retry against this release, even if local PDF
+            // admission failed before the capture request reached the SDK.
+            if let Some(session) = self.session.as_mut() {
+                session.finish();
+            }
+            self.reconnect = true;
+        }
+        let (capture, pdf) = result?;
+        let verified = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        let mut pulse = || self.original_pdf_progress(health, deadline, progress);
+        Ok((
+            capture,
+            complete(pdf, &verified, request_deadline, &mut pulse)?,
+        ))
+    }
+
+    fn acquire_with_source<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        mut check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observed_source: impl FnOnce(&mut Self, &mut ServiceHealth, &ReaderFacts) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
         self.acquisition_current(health)?;
-        let deadline = self.deadline.unwrap();
+        let prepare_source = deadline.is_some();
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
+        check(None)?;
+        let deadline = deadline.unwrap_or_else(|| self.deadline.unwrap());
         let observation = operation();
         let capture = operation();
         let session = self.session.as_mut().context("Resident Session absent")?;
@@ -421,7 +654,11 @@ impl ResidentSourceOwner {
                     feature = "development-resident-bootstrap",
                     feature = "development-input-diagnostics"
                 ))]
-                if let Some(directory) = &self.development_diagnostics {
+                if let Some(directory) = self
+                    .development_diagnostics
+                    .as_ref()
+                    .filter(|_| !prepare_source)
+                {
                     // Explicit installed development profile only. A visual sample
                     // permits fixture setup inspection, never page authority.
                     let visual = session.request(
@@ -457,7 +694,14 @@ impl ResidentSourceOwner {
                 return self.failure(health, error);
             }
         };
+        check(Some(&facts))?;
+        let source = observed_source(self, health, &facts)?;
+        if prepare_source {
+            check(Some(&facts))?;
+        }
         before(deadline)?;
+        let session = self.session.as_mut().context("Resident Session absent")?;
+        let input = self.input.as_mut().unwrap();
         let reply = session.request(
             health,
             input,
@@ -478,7 +722,7 @@ impl ResidentSourceOwner {
         // Retain only information actually supplied/validated by this route.
         match ResidentSourceCapture::from_session(&runtime, observation, capture, facts, historical)
         {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok((value, source)),
             Err(error) => {
                 self.fatal = true;
                 Err(error)
@@ -508,6 +752,7 @@ impl ResidentSourceOwner {
     }
     pub(super) fn finish(&mut self, health: &mut ServiceHealth) -> Result<()> {
         let result = self.progress(health);
+        let canceled = result.is_err() && self.canceled && !self.fatal && !health.failed();
         if let Some(session) = &mut self.session {
             session.finish();
             self.reconnect = true;
@@ -519,7 +764,11 @@ impl ResidentSourceOwner {
         self.canceled = false;
         // The old guard is gone, never renewed. Cancellation stayed sticky
         // throughout its request; only a distinct release can begin another.
-        result
+        if canceled {
+            Err(FinalizedCancellation.into())
+        } else {
+            result
+        }
     }
 }
 
@@ -1046,7 +1295,7 @@ impl DevelopmentTargetLease<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::workflow::resident_runtime::{tests::Fixture, ResidentRuntime};
     use crate::workflow::{
@@ -1180,6 +1429,7 @@ mod tests {
         }
     }
     struct OwnedFactory {
+        source: Option<(ConversationId, ConversationId)>,
         events: Events,
         mode: &'static str,
         delay: Duration,
@@ -1200,6 +1450,9 @@ mod tests {
             std::thread::sleep(self.delay);
             before(deadline)?;
             let fixture = Fixture::new();
+            if let Some((document, page)) = self.source {
+                fixture.declare_source(document, page);
+            }
             let runtime = if self.mode == "source-handoff-companion" {
                 fixture.start_source_companion_with_store(
                     store,
@@ -1260,11 +1513,220 @@ mod tests {
             .configure_resident_source(InstalledReaderSelection::fixture(), store.clone())
             .unwrap();
         workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: None,
             events: events.clone(),
             mode,
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    #[test]
+    fn resident_owner_brackets_original_pdf_source_and_refuses_same_release_retry() {
+        use std::{fs, os::unix::fs::DirBuilderExt};
+
+        for refusal in [None, Some("before"), Some("after")] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let document = ConversationId::from_u128(81);
+            let page = ConversationId::from_u128(82);
+            let root = base.join("original-pdf");
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let pdf_path = root.join(format!("{document}.pdf"));
+            if refusal != Some("before") {
+                fs::write(&pdf_path, b"synthetic original source").unwrap();
+            }
+            fs::write(
+                root.join(format!("{document}.content")),
+                serde_json::to_vec(&serde_json::json!({
+                    "fileType": "pdf",
+                    "cPages": {"original": {"value": 2}, "pages": [
+                        {"id": page, "idx": {"value": "a"}, "redir": {"value": 1}}
+                    ]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.factory = Box::new(OwnedFactory {
+                source: Some((document, page)),
+                events: events.clone(),
+                mode: "reconnect-source-handoff",
+                delay: Duration::ZERO,
+            });
+            let started = Instant::now();
+            owner.begin(released(started), health).unwrap();
+            let requested = started + Duration::from_secs(20);
+            let deadline = owner.original_pdf_deadline(requested, requested).unwrap();
+            assert_eq!(deadline, requested);
+            let checks = RefCell::new(Vec::new());
+            let result = owner.acquire_original_pdf_using(
+                health,
+                deadline,
+                requested,
+                |facts| {
+                    checks.borrow_mut().push(facts.is_some());
+                    Ok(())
+                },
+                |facts, pulse| {
+                    assert_eq!(&*events.borrow(), &["activate", "spawn", "observe"]);
+                    original_pdf::ObservedOriginalPdf::observe_at(
+                        &root,
+                        (unsafe { libc::geteuid() }, None),
+                        true,
+                        facts,
+                        document,
+                        deadline,
+                        pulse,
+                    )
+                },
+                &mut || Ok(()),
+                |pdf, verified, _, pulse| {
+                    assert_eq!(
+                        &*events.borrow(),
+                        &["activate", "spawn", "observe", "capture"]
+                    );
+                    if refusal == Some("after") {
+                        fs::write(&pdf_path, b"changed after capture")?;
+                    }
+                    pdf.verify_fixture_capture(verified, pulse)
+                },
+            );
+            let expected_checks: &[bool] = if refusal == Some("before") {
+                &[false, true]
+            } else {
+                &[false, true, true]
+            };
+            assert_eq!(checks.borrow().as_slice(), expected_checks);
+            if refusal.is_some() {
+                assert!(result.is_err());
+            } else {
+                let (capture, original_page) = result.unwrap();
+                assert_eq!(capture.document(), document);
+                assert_eq!(capture.page(), page);
+                assert_eq!(original_page, 2);
+            }
+            assert!(owner.original_pdf_deadline(requested, requested).is_err());
+            owner.finish(health).unwrap();
+            let expected_events: &[&str] = if refusal == Some("before") {
+                &["activate", "spawn", "observe"]
+            } else {
+                &["activate", "spawn", "observe", "capture"]
+            };
+            assert_eq!(events.borrow().as_slice(), expected_events);
+            drop((workflow, store));
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    /// Actual installed receiver body with a declared protocol peer, live input
+    /// guard/health owner and normal finalization. This is not native authority.
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn fresh_receiver_fixture<E: crate::LLMEngine>(
+        store: Arc<Store>,
+        writer: &crate::conversation::SelectedAdmission,
+        pin: &crate::workflow::resident_supervisor::writer_request::RegionalPin,
+        preferences: crate::storage::sync::selected::RequestPreferences,
+        engine: &mut E,
+    ) -> Result<()> {
+        let events = Rc::new(RefCell::new(vec![]));
+        let backend =
+            super::super::selected_backend::RefusingBackend::with_resident_releases(vec![]);
+        let mut workflow = Workflow::with_device(Box::new(backend), false);
+        let (socket, _receiver) = UnixDatagram::pair()?;
+        workflow.enable_service_health(ServiceHealth::fixture(socket))?;
+        workflow.configure_resident_source(InstalledReaderSelection::fixture(), store)?;
+        workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: Some((pin.request().document, pin.request().page)),
+            events: events.clone(),
+            mode: "reconnect-source-handoff",
+            delay: Duration::ZERO,
+        });
+        let started = preferences.regional_cutoff(60)? - Duration::from_secs(60);
+        let result = super::super::selected_resident_reader::receive_fresh_request(
+            &mut workflow,
+            writer,
+            released(started),
+            pin,
+            preferences,
+            engine,
+            None,
+            "fixture-model",
+        );
+        assert!(!workflow.runtime_failed());
+        let owner = workflow.resident_source.as_ref().unwrap();
+        assert!(
+            owner.input.is_none() && owner.deadline.is_none(),
+            "normal Workflow finalization retired source/input guard"
+        );
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "spawn", "observe", "capture"]
+        );
+        assert!(
+            !writer
+                .writer_store()
+                .writer_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            "original Writer owner released only after finalization"
+        );
+        result
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn assert_selected_policy_boundaries(mut verify: impl FnMut(bool) -> Result<()>) {
+        let expected: [&[&str]; 4] = [
+            &[],
+            &[],
+            &["activate", "spawn"],
+            &["activate", "spawn", "observe"],
+        ];
+        for (boundary, events_expected) in expected.into_iter().enumerate() {
+            verify(false).unwrap();
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            let result = match boundary {
+                0 => owner.activate_at_startup_with_input(
+                    health,
+                    Some(Instant::now() + Duration::from_secs(10)),
+                    || Ok(quiet_guard()),
+                    || verify(true),
+                ),
+                1 => owner.begin_with_check(released(Instant::now()), health, || verify(true)),
+                _ => {
+                    owner
+                        .begin_with_check(released(Instant::now()), health, || verify(false))
+                        .unwrap();
+                    owner
+                        .acquire_with_check(health, |observed| {
+                            verify((boundary == 3) == observed.is_some())
+                        })
+                        .map(|_| ())
+                }
+            };
+            assert!(result.is_err(), "policy boundary {boundary} accepted");
+            assert_eq!(
+                &*events.borrow(),
+                events_expected,
+                "policy boundary {boundary}"
+            );
+            if boundary > 0 {
+                crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                    .unwrap();
+            }
+            drop((workflow, store));
+            std::fs::remove_dir_all(base).unwrap();
+        }
+        verify(false).unwrap();
     }
     struct Provider {
         calls: Rc<Cell<usize>>,
@@ -1678,8 +2140,7 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
-    fn selected_workflow_canceled_request_then_new_release_reconnects_same_child_without_reactivation(
-    ) {
+    fn selected_service_finalization_allows_new_release_after_clean_cancellation() {
         use crate::device::interaction::Interaction;
         let mut polls = (0..5).map(|_| Ok(vec![])).collect::<Vec<_>>();
         polls.push(Ok(vec![Interaction::Invalidated]));
@@ -1707,7 +2168,7 @@ mod tests {
         assert!(workflow.acquire_reader_evidence().is_err());
         assert!(workflow.input_failed());
         assert!(!workflow.runtime_failed());
-        assert!(workflow.finish_request().is_err());
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         workflow.wait_for_reader().unwrap();
         let acquisition = workflow.acquire_reader_evidence().unwrap();
         let ledger = Ledger::new(store.clone());
@@ -1716,7 +2177,7 @@ mod tests {
         let images = attempt.images(&ledger).unwrap();
         assert_eq!(images.len(), 4);
         workflow.deliver_reader_acquisition().unwrap();
-        workflow.finish_request().unwrap();
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         assert_eq!(
             workflow
                 .resident_source
@@ -1747,6 +2208,28 @@ mod tests {
         drop(ledger);
         drop(workflow);
         drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn selected_service_finalization_stops_when_input_is_lost_during_cleanup() {
+        let (mut workflow, store, base, _, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.wait_for_reader().unwrap();
+        assert!(!workflow.runtime_failed());
+        workflow.resident_source.as_mut().unwrap().input = Some(RequestInput::scripted(vec![Err(
+            anyhow::anyhow!("fixture input lost"),
+        )]));
+        let error =
+            crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                .unwrap_err();
+        assert!(!error.is::<FinalizedCancellation>());
+        assert!(workflow.runtime_failed());
+        assert!(workflow.resident_source.as_ref().unwrap().input.is_none());
+        drop((workflow, store));
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]

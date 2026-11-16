@@ -10,6 +10,7 @@ pub struct RecordRef {
     pub revision: Uuid,
     pub object: ObjectRef,
 }
+#[derive(Clone)]
 pub(crate) struct Captured {
     store: Weak<Store>,
     pub generation: Uuid,
@@ -23,6 +24,73 @@ impl Captured {
         Ok(digest(&serde_json::to_vec(
             &self.records.iter().map(|(_, r)| r).collect::<Vec<_>>(),
         )?))
+    }
+
+    pub(crate) fn with_current<T>(
+        &self,
+        store: &Arc<Store>,
+        consume: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        ensure!(
+            Weak::ptr_eq(&self.store, &Arc::downgrade(store)),
+            "preparation belongs to another Store"
+        );
+        let inner = store
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        ensure!(
+            inner.generation == self.generation && inner.index.unavailable == 0,
+            "captured generation unavailable"
+        );
+        for (_, reference) in &self.records {
+            let heads = inner
+                .index
+                .heads
+                .get(&(reference.namespace, reference.record));
+            ensure!(
+                heads.is_some_and(|heads| heads.len() == 1 && heads.contains(&reference.revision))
+                    && inner
+                        .index
+                        .records
+                        .get(&reference.revision)
+                        .is_some_and(|(_, hash)| hash == &reference.object.sha256)
+                    && inner.index.record_refs.get(&reference.object.sha256)
+                        == Some(&reference.object),
+                "captured reference changed"
+            );
+        }
+        consume()
+    }
+
+    // Only advance with the exact envelopes of a definite fresh commit.
+    pub(crate) fn advance(&mut self, records: Vec<Envelope>) -> Result<()> {
+        for envelope in records {
+            let bytes = serde_json::to_vec(&envelope)?;
+            let reference = RecordRef {
+                namespace: envelope.namespace,
+                record: envelope.record_id,
+                revision: envelope.revision_id,
+                object: ObjectRef {
+                    sha256: digest(&bytes),
+                    bytes: bytes.len() as u64,
+                },
+            };
+            self.records.retain(|(_, old)| {
+                old.namespace != reference.namespace || old.record != reference.record
+            });
+            self.records.push((envelope, reference));
+        }
+        self.records.sort_by_key(|(_, reference)| {
+            (reference.namespace, reference.record, reference.revision)
+        });
+        ensure!(self.records.len() <= MAX_ITEMS, "captured head bound");
+        let bytes = self.records.iter().try_fold(0u64, |sum, (_, reference)| {
+            sum.checked_add(reference.object.bytes)
+                .context("capture byte overflow")
+        })?;
+        ensure!(bytes <= MAX_METADATA as u64, "captured metadata bound");
+        Ok(())
     }
 }
 #[derive(Default)]
@@ -196,7 +264,8 @@ impl Store {
         self: &Arc<Self>,
         captured: &Captured,
         records: Vec<Envelope>,
-    ) -> Result<Uuid> {
+        require_complete: bool,
+    ) -> Result<(Uuid, bool)> {
         ensure!(
             Weak::ptr_eq(&captured.store, &Arc::downgrade(self)),
             "preparation belongs to another Store"
@@ -208,7 +277,8 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         ensure!(
-            inner.generation == captured.generation,
+            inner.generation == captured.generation
+                && (!require_complete || inner.index.unavailable == 0),
             "stale captured generation"
         );
         let current = capture_records(&inner, captured.conversation, captured.matches)?;
@@ -228,7 +298,7 @@ impl Store {
         if changed {
             self.notify_commit();
         }
-        Ok(receipt)
+        Ok((receipt, changed))
     }
     fn resolve_locked(
         &self,
@@ -311,6 +381,7 @@ impl Store {
     pub(crate) fn original_transaction(
         &self,
         revision: Uuid,
+        member_limit: usize,
         budget: &mut ReadBudget,
     ) -> Result<Vec<Envelope>> {
         let inner = self
@@ -333,7 +404,10 @@ impl Store {
             .manifests
             .get(transactions.first().unwrap())
             .context("transaction absent")?;
-        ensure!(manifest.records.len() == 3, "evidence transaction size");
+        ensure!(
+            (3..=member_limit).contains(&manifest.records.len()),
+            "evidence transaction size"
+        );
         let members = manifest.records.clone();
         let mut result = Vec::new();
         for r in members {

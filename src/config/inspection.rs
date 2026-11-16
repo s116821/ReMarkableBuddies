@@ -19,6 +19,32 @@ pub const MAX_OUTPUT: usize = 128 * 1024;
 pub enum Operation {
     Inspect,
 }
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum CliOperation {
+    Inspect,
+    CheckInitial,
+    CreateInitial,
+}
+
+pub fn write_cli(
+    operation: CliOperation,
+    path: Option<PathBuf>,
+    output: &mut impl Write,
+) -> Result<()> {
+    use super::initial::{self, Action};
+
+    match operation {
+        CliOperation::Inspect => run(Operation::Inspect, path).write_to(output),
+        CliOperation::CheckInitial => {
+            initial::write_report(Action::CheckInitial, path.as_deref(), output)
+        }
+        CliOperation::CreateInitial => {
+            initial::write_report(Action::CreateInitial, path.as_deref(), output)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
@@ -105,12 +131,16 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
         || ["paths", "memory", "reader", "sync", "personalization"]
             .iter()
             .any(|key| raw.get(key).is_some_and(|v| !v.is_object()))
-        || ["/memory/selection", "/reader/selection"]
-            .into_iter()
-            .any(|path| {
-                raw.pointer(path)
-                    .is_some_and(|v| !v.is_null() && !v.is_object())
-            })
+        || [
+            "/memory/selection",
+            "/reader/selection",
+            "/reader/researched_pdf",
+        ]
+        .into_iter()
+        .any(|path| {
+            raw.pointer(path)
+                .is_some_and(|v| !v.is_null() && !v.is_object())
+        })
     {
         return Err(Status::InvalidInput);
     }
@@ -193,6 +223,18 @@ fn inspect_bytes(bytes: &[u8]) -> Report {
         "memory.selection",
         json!(config.memory.selection.is_some()),
     );
+    if raw.get("handwriting").is_some() {
+        add(
+            "handwriting.enabled",
+            "handwriting.enabled",
+            json!(config.handwriting.enabled),
+        );
+        add(
+            "handwriting.profile",
+            "handwriting.profile",
+            json!(config.handwriting.profile.is_some()),
+        );
+    }
     add("sync.enabled", "sync.enabled", json!(config.sync.enabled));
     add("sync.media", "sync.media", json!(config.sync.media));
     add(
@@ -443,5 +485,25 @@ mod tests {
         ] {
             assert_eq!(inspect_bytes(raw.as_bytes()).status, Status::InvalidInput);
         }
+    }
+    #[test]
+    fn handwriting_declaration_is_projected_without_profile_identifier_or_activation_claim() {
+        let profile = "00000000-0000-4000-8000-000000000010";
+        let bytes =
+            serde_json::to_vec(&json!({"handwriting":{"enabled":true,"profile":profile}})).unwrap();
+        let mut output = Vec::new();
+        inspect_bytes(&bytes).write_to(&mut output).unwrap();
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["runtime_activation"], "unverified");
+        assert_eq!(
+            value["snapshot"]["fields"]["handwriting.enabled"]["value"],
+            true
+        );
+        assert_eq!(
+            value["snapshot"]["fields"]["handwriting.profile"]["value"],
+            true
+        );
+        assert!(!String::from_utf8(output).unwrap().contains(profile));
     }
 }
