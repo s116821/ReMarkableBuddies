@@ -166,7 +166,7 @@ impl RetainedUser {
         require_range(ledger.store(), user.conversation, &draft.state.identity)?;
         let conversation = user.conversation;
         let turn = user.id;
-        ledger.append(user.exchange, expected_root, user, vec![])?;
+        ledger.append_fresh(user.exchange, expected_root, user, vec![])?;
         Self::from_new_turn(ledger, conversation, turn, draft)
     }
 
