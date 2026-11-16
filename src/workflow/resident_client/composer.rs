@@ -2,7 +2,7 @@
 //! owner must independently check its live visit and compare before any edit.
 use super::{attempts, HistoricalAttempt};
 use crate::{
-    conversation::{Ledger, Record, Role},
+    conversation::{ExpectedHeads, Ledger, Record, Role, Turn},
     storage::{Namespace, Store, Uuid},
 };
 use anyhow::{ensure, Result};
@@ -55,6 +55,20 @@ pub(super) fn refused(reply: Option<&Reply>) -> bool {
 
 pub(super) fn permits_followup(prior: &HistoricalAttempt, next: &Frame) -> Option<bool> {
     use remarkable_open_sdk::native_adapter::Command as NativeCommand;
+    if matches!(
+        prior.reply.as_ref(),
+        Some(Reply::Composer(
+            ComposerReply::Provisioned(Outcome::Verified { .. })
+                | ComposerReply::Cleared(Outcome::Verified { .. })
+        ))
+    ) {
+        // A settled composer effect is not a permanent page-navigation lock.
+        // Each fresh command retains its own native/product admission, while
+        // reserve still rejects every reused operation ID and unresolved prior.
+        return Some(
+            matches!(&next.message, Message::Request(command) if super::journal_effect(command)),
+        );
+    }
     let Message::Request(NativeCommand::Composer(next)) = &next.message else {
         return None;
     };
@@ -66,10 +80,6 @@ pub(super) fn permits_followup(prior: &HistoricalAttempt, next: &Frame) -> Optio
     Some(match prior.reply.as_ref() {
         Some(Reply::InsertionObserved { target, .. }) => *target == page,
         Some(Reply::TargetObserved(facts)) => facts.page() == page,
-        Some(Reply::Composer(
-            ComposerReply::Provisioned(Outcome::Verified { .. })
-            | ComposerReply::Cleared(Outcome::Verified { .. }),
-        )) => true,
         _ => false,
     })
 }
@@ -125,10 +135,12 @@ pub struct RetainedUser {
 }
 
 impl RetainedUser {
-    pub fn from_turn(
+    /// Append this submission before issuing its clear proof. An existing turn,
+    /// even with identical text, cannot stand in for a new user interaction.
+    pub fn append_user(
         ledger: &Ledger,
-        conversation: Uuid,
-        turn: Uuid,
+        expected_root: ExpectedHeads,
+        user: Turn,
         draft: Draft,
     ) -> Result<Self> {
         let text = draft.text()?;
@@ -136,6 +148,35 @@ impl RetainedUser {
             !text.trim().is_empty() && !text.contains('\0'),
             "invalid submitted composer text"
         );
+        ensure!(
+            user.role == Role::User && user.text.as_deref() == Some(text.as_str()),
+            "submitted composer text differs"
+        );
+        ensure!(
+            user.id == crate::writer::stage(user.exchange, "composer-user"),
+            "composer submission identity differs"
+        );
+        ensure!(
+            ledger
+                .expected(Namespace::Conversation, user.id)?
+                .0
+                .is_empty(),
+            "composer submission already retained"
+        );
+        require_range(ledger.store(), user.conversation, &draft.state.identity)?;
+        let conversation = user.conversation;
+        let turn = user.id;
+        ledger.append(user.exchange, expected_root, user, vec![])?;
+        Self::from_new_turn(ledger, conversation, turn, draft)
+    }
+
+    fn from_new_turn(
+        ledger: &Ledger,
+        conversation: Uuid,
+        turn: Uuid,
+        draft: Draft,
+    ) -> Result<Self> {
+        let text = draft.text()?;
         let user = ledger
             .inspect(conversation, false)?
             .into_iter()

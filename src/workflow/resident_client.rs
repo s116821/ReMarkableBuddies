@@ -913,7 +913,7 @@ mod linux {
                 ),
                 deadline,
                 progress,
-                &mut || composer::require_page(&store, conversation, &expected),
+                &|| composer::require_page(&store, conversation, &expected),
             )
             .map_err(anyhow::Error::new)
         }
@@ -967,7 +967,7 @@ mod linux {
                 ),
                 deadline,
                 progress,
-                &mut || retained.check(&store, operation),
+                &|| retained.check(&store, operation),
             )
             .map_err(anyhow::Error::new)
         }
@@ -986,7 +986,7 @@ mod linux {
                 command,
                 deadline,
                 progress,
-                &mut || Ok(()),
+                &|| Ok(()),
             )
         }
 
@@ -998,7 +998,7 @@ mod linux {
             command: Command,
             deadline: Instant,
             progress: &mut dyn FnMut() -> Result<()>,
-            admit: &mut dyn FnMut() -> Result<()>,
+            admit: &dyn Fn() -> Result<()>,
         ) -> std::result::Result<Reply, EffectFailure> {
             #[cfg(feature = "development-native-close")]
             if let Err(error) = ordinary_close::require_unused(&self.store) {
@@ -1029,7 +1029,13 @@ mod linux {
                     original = Some(frame.clone());
                     Ok(())
                 },
-                &mut || progress().map_err(progress_error),
+                &mut || {
+                    progress().map_err(progress_error)?;
+                    // SDK calls progress after reservation and at every IO
+                    // boundary. Recheck after caller code has run, including
+                    // the final pre-write check; reservation is not a lease.
+                    admit().map_err(progress_error)
+                },
             );
             match result {
                 Ok(reply) => {
