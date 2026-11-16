@@ -627,7 +627,7 @@ fn execute(
         "trial.json",
         serde_json::json!({"schema":1,"conversation":conversation.to_string(),
         "candidate_sha256":setup.candidate_sha256,"text":TEXT,"native_selection_qualified":false,
-        "instructions":"On composer.seed-ready, type seed then Return on the disposable selected page and release all input; copy its exact message to composer.seed-complete. Keep this input focused. On typing-ready.json, put the caret between the two appended empty paragraphs, type exactly composer trial, press Return once, then stop typing. A Reader/Undo/Redo gesture or composer-store/cancel aborts.",
+        "instructions":"Use composer.seed-ready only while the target CLOCK_MONOTONIC is before its expires_monotonic_ns; host receipt time never starts a new window. Type seed then Return on the disposable selected page and release all input; copy the whole exact fresh cue, including newline, to composer.seed-complete before expiry. Keep this input focused. On typing-ready.json, put the caret between the two appended empty paragraphs, type exactly composer trial, press Return once, then stop typing. A Reader/Undo/Redo gesture or composer-store/cancel aborts.",
         "owned_persistent_path":root,"product_submit_selected":false,"effects":"one provision and at most one conditional clear; no replay"}),
     )?;
     let handoff = overall.min(Instant::now() + Duration::from_secs(5));

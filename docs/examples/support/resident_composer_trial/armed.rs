@@ -198,7 +198,10 @@ impl Witness {
             self.expected.is_none()
                 && frame.operation == self.operation
                 && frame.scope.runtime == self.runtime
-                && frame.fingerprint()? == digest,
+                && frame
+                    .fingerprint()
+                    .map_err(|_| anyhow::anyhow!("prepared AwaitKey fingerprint refused"))?
+                    == digest,
             "wrong or repeated prepared AwaitKey frame"
         );
         ensure!(
@@ -206,7 +209,9 @@ impl Witness {
             if *identity==self.range && *keys==self.keys),
             "diagnosed command differs"
         );
-        let bytes = frame.encode()?;
+        let bytes = frame
+            .encode()
+            .map_err(|_| anyhow::anyhow!("prepared AwaitKey encoding refused"))?;
         // Existing v4 envelope: length(4), magic(4), version(2), runtime(140).
         ensure!(
             bytes.get(4..10) == Some(b"RSDK\0\x04".as_slice()),

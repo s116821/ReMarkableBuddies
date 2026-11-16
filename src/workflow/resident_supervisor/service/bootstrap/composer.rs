@@ -2,7 +2,9 @@
 //! bootstrap input/preservation and never claims native selection qualification.
 use super::*;
 use crate::device::{input_observer::InputObserver, interaction::Interaction};
+use nix::libc;
 use remarkable_open_sdk::native_adapter::{ReaderFacts, RuntimeIdentity};
+use std::os::fd::AsRawFd;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +200,86 @@ struct Message {
     selection_sha256: String,
     binding: setup::Binding,
 }
+
+/// This seed-only envelope is not the ordinary two-party handoff message and
+/// grants no native text proof. The operator must use the target monotonic clock.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SeedCue {
+    schema: u8,
+    phase: String,
+    cue_nonce: String,
+    message: Message,
+    expires_monotonic_ns: u64,
+}
+fn monotonic_ns() -> Result<u64> {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: initialized by successful CLOCK_MONOTONIC output into sized storage.
+    ensure!(
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, time.as_mut_ptr()) } == 0,
+        "seed monotonic sample failed"
+    );
+    let time = unsafe { time.assume_init() };
+    ensure!(
+        time.tv_sec >= 0 && (0..1_000_000_000).contains(&time.tv_nsec),
+        "invalid seed monotonic sample"
+    );
+    u64::try_from(time.tv_sec)?
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(time.tv_nsec as u64))
+        .context("seed monotonic overflow")
+}
+fn seed_expiry(sample: u64, remaining: Duration) -> Result<u64> {
+    ensure!(
+        !remaining.is_zero() && remaining <= Duration::from_secs(20),
+        "seed original budget expired or invalid"
+    );
+    sample
+        .checked_add(u64::try_from(remaining.as_nanos())?)
+        .context("seed expiry overflow")
+}
+impl SeedCue {
+    fn new(message: Message, deadline: Instant) -> Result<Self> {
+        // Explicit target clock FIRST, then remaining original Instant budget.
+        // The later sample can only shorten the conservative expiry.
+        let sample = monotonic_ns()?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .context("seed deadline expired")?;
+        Ok(Self {
+            schema: 1,
+            phase: "composer-seed-v1".into(),
+            cue_nonce: uuid::Uuid::new_v4().to_string(),
+            message,
+            expires_monotonic_ns: seed_expiry(sample, remaining)?,
+        })
+    }
+    fn current(&self, now: u64, minimum: u64) -> Result<()> {
+        let remaining = self
+            .expires_monotonic_ns
+            .checked_sub(now)
+            .context("seed cue expired")?;
+        ensure!(
+            remaining >= minimum && remaining > 0 && remaining <= 20_000_000_000,
+            "seed cue has insufficient or invalid budget"
+        );
+        Ok(())
+    }
+    fn bytes(&self) -> Result<Vec<u8>> {
+        let mut bytes = serde_json::to_vec(self)?;
+        bytes.push(b'\n');
+        ensure!(bytes.len() <= 4096, "seed cue exceeds bound");
+        Ok(bytes)
+    }
+    fn acknowledge(&self, bytes: &[u8], now: u64) -> Result<()> {
+        self.current(now, 1)?;
+        ensure!(
+            bytes.len() <= 4096 && bytes == self.bytes()?,
+            "partial, stale or foreign seed acknowledgment"
+        );
+        Ok(())
+    }
+}
 pub struct ObserverPermit {
     root: PathBuf,
     message: Message,
@@ -277,19 +359,55 @@ impl ObserverPermit {
             pulse,
         )
     }
-    /// Operator copies the exact ready message only after ordinary seed typing
-    /// and release. This acknowledgment grants no native text/currentness proof.
+    /// Operator checks the target CLOCK_MONOTONIC expiry, then copies the whole
+    /// fresh seed cue only after ordinary seed typing and release. No host-side
+    /// receipt time renews this window, and acknowledgment grants no text proof.
     pub fn seed_ready(
         &self,
         deadline: Instant,
         pulse: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
-        self.exchange(
-            "composer.seed-ready",
-            "composer.seed-complete",
-            deadline,
-            pulse,
-        )
+        self.selection.pin.current()?;
+        pulse()?;
+        check(deadline)?;
+        let cue = SeedCue::new(self.message.clone(), deadline)?;
+        write_new(&self.root, "composer.seed-staged", &cue.bytes()?)?;
+        let directory = private_root(&self.root)?;
+        pulse()?;
+        self.selection.pin.current()?;
+        check(deadline)?;
+        cue.current(monotonic_ns()?, 5_000_000_000)?;
+        // SAFETY: fixed NUL-terminated leaf names and a live pinned private
+        // directory descriptor. linkat atomically refuses an existing ready cue.
+        ensure!(
+            unsafe {
+                libc::linkat(
+                    directory.as_raw_fd(),
+                    c"composer.seed-staged".as_ptr(),
+                    directory.as_raw_fd(),
+                    c"composer.seed-ready".as_ptr(),
+                    0,
+                )
+            } == 0,
+            "seed cue publication failed"
+        );
+        directory.sync_all()?;
+        loop {
+            check(deadline)?;
+            pulse()?;
+            self.selection.pin.current()?;
+            cue.current(monotonic_ns()?, 1)?;
+            let path = self.root.join("composer.seed-complete");
+            if present(&path)? {
+                let (pin, bytes) = read_pin(&path, deadline)?;
+                cue.acknowledge(&bytes, monotonic_ns()?)?;
+                pin.current()?;
+                check(deadline)?;
+                cue.current(monotonic_ns()?, 1)?;
+                return Ok(());
+            }
+            pace(deadline);
+        }
     }
     pub fn finish(&self, deadline: Instant, pulse: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         if !self.typing_requested {
@@ -431,5 +549,71 @@ impl ActorHandoff {
             "composer.typing-admitted",
             &serde_json::to_vec(message)?,
         )
+    }
+}
+
+#[cfg(test)]
+mod composer_controls {
+    use super::*;
+    fn cue() -> SeedCue {
+        let binding=serde_json::from_value(serde_json::json!({
+            "nonce":"1".repeat(32),"candidate_sha256":"2".repeat(64),
+            "observer":{"pid":100,"start_ticks":10},"runtime":{"pid":101,"start_ticks":11},
+            "boot":"00000000-0000-0000-0000-000000000001","activation":"00000000-0000-0000-0000-000000000002",
+            "profile_sha256":"3".repeat(64),"executable_sha256":"4".repeat(64),"adapter_sha256":"5".repeat(64)
+        })).unwrap();
+        SeedCue {
+            schema: 1,
+            phase: "composer-seed-v1".into(),
+            cue_nonce: uuid::Uuid::new_v4().to_string(),
+            message: Message {
+                schema: 1,
+                selection_sha256: "6".repeat(64),
+                binding,
+            },
+            expires_monotonic_ns: 20_000_000_100,
+        }
+    }
+    #[test]
+    fn seed_expiry_uses_remaining_original_budget() {
+        assert_eq!(
+            seed_expiry(100, Duration::from_secs(12)).unwrap(),
+            12_000_000_100
+        );
+        assert!(seed_expiry(100, Duration::ZERO).is_err());
+        assert!(seed_expiry(100, Duration::from_secs(21)).is_err());
+        assert!(seed_expiry(u64::MAX, Duration::from_nanos(1)).is_err());
+        let cue = cue();
+        assert!(cue.current(15_000_000_100, 5_000_000_000).is_ok());
+        assert!(cue.current(15_000_000_101, 5_000_000_000).is_err());
+        assert!(cue.current(cue.expires_monotonic_ns, 1).is_err());
+    }
+    #[test]
+    fn seed_ack_requires_whole_fresh_bound_cue_before_expiry() {
+        let cue = cue();
+        let bytes = cue.bytes().unwrap();
+        assert!(cue.acknowledge(&bytes, 1_000_000_100).is_ok());
+        assert!(cue
+            .acknowledge(&bytes[..bytes.len() - 1], 1_000_000_100)
+            .is_err());
+        let mut foreign = cue.clone();
+        foreign.cue_nonce = uuid::Uuid::new_v4().to_string();
+        assert!(cue
+            .acknowledge(&foreign.bytes().unwrap(), 1_000_000_100)
+            .is_err());
+        foreign = cue.clone();
+        foreign.message.selection_sha256 = "7".repeat(64);
+        assert!(cue
+            .acknowledge(&foreign.bytes().unwrap(), 1_000_000_100)
+            .is_err());
+        foreign = cue.clone();
+        foreign.expires_monotonic_ns += 1;
+        assert!(cue
+            .acknowledge(&foreign.bytes().unwrap(), 1_000_000_100)
+            .is_err());
+        assert!(cue.acknowledge(&bytes, cue.expires_monotonic_ns).is_err());
+        assert!(cue
+            .acknowledge(&[bytes, b"\n".to_vec()].concat(), 1_000_000_100)
+            .is_err());
     }
 }
