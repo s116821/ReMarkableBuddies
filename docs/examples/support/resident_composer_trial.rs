@@ -131,11 +131,58 @@ struct Trial<'a> {
     store: &'a Arc<Store>,
     conversation: Uuid,
     overall: Instant,
+    input: &'a mut TrialInput,
+}
+struct TrialInput {
     quiet: Option<RequestInput>,
     typing: Option<InputObserver>,
+    canceled: bool,
+}
+impl TrialInput {
+    fn finish_typing(&mut self) -> Result<()> {
+        ensure!(!self.canceled, "composer input ownership was canceled");
+        let result = self.finish_typing_inner();
+        self.canceled |= result.is_err();
+        result
+    }
+    fn finish_typing_inner(&mut self) -> Result<()> {
+        if let Some(quiet) = &mut self.quiet {
+            ensure!(
+                quiet.poll()? == InputProgress::Quiet,
+                "composer quiet ownership was canceled"
+            );
+            return Ok(());
+        }
+        // The old observer stays alive through creation and both polls of its
+        // replacement. Reopening cannot erase a queued gesture or input loss.
+        let mut fresh = RequestInput::new(TriggerCorner::LowerLeft, None)?;
+        let typing = self
+            .typing
+            .as_mut()
+            .context("missing composer typing ownership")?;
+        let drained = typing.poll()?;
+        ensure!(
+            drained
+                .iter()
+                .all(|event| *event == Interaction::Invalidated)
+                && typing.quiescent()
+                && fresh.poll()? == InputProgress::Quiet
+                && typing.poll()?.is_empty()
+                && typing.quiescent()
+                && fresh.poll()? == InputProgress::Quiet,
+            "composer observer readmission lost input or queued cancellation"
+        );
+        self.quiet = Some(fresh);
+        drop(self.typing.take());
+        Ok(())
+    }
 }
 impl Trial<'_> {
     fn check(&mut self, deadline: Instant) -> Result<()> {
+        ensure!(
+            !self.input.canceled,
+            "composer input ownership was canceled"
+        );
         ensure!(
             Instant::now() < deadline && Instant::now() < self.overall,
             "composer trial deadline expired"
@@ -146,13 +193,14 @@ impl Trial<'_> {
             !self.root.join("cancel").try_exists()?,
             "composer trial canceled"
         );
-        if let Some(input) = &mut self.quiet {
+        if let Some(input) = &mut self.input.quiet {
             ensure!(
                 input.poll()? == InputProgress::Quiet,
                 "composer quiet phase canceled by input"
             );
         } else {
             let events = self
+                .input
                 .typing
                 .as_mut()
                 .context("composer input ownership absent")?
@@ -160,12 +208,10 @@ impl Trial<'_> {
             // Invalidated includes ordinary folio/pen activity. This one finite
             // phase is explicitly not quiet. Observer errors remain fatal; the
             // corner Reader/Undo/Redo gestures and explicit cancel file abort.
-            ensure!(
-                events
-                    .iter()
-                    .all(|event| *event == Interaction::Invalidated),
-                "composer trial canceled by gesture"
-            );
+            self.input.canceled |= events
+                .iter()
+                .any(|event| *event != Interaction::Invalidated);
+            ensure!(!self.input.canceled, "composer trial canceled by gesture");
         }
         Ok(())
     }
@@ -317,23 +363,13 @@ impl Trial<'_> {
             "input before composer typing handoff"
         );
         self.check(self.overall)?;
-        self.typing = Some(typing);
-        drop(self.quiet.take());
+        self.input.typing = Some(typing);
+        drop(self.input.quiet.take());
         Ok(())
     }
     fn require_quiet_again(&mut self) -> Result<()> {
-        let mut quiet = RequestInput::new(TriggerCorner::LowerLeft, None)?;
         self.check(self.overall)?;
-        let typing = self.typing.as_mut().context("missing typing guard")?;
-        ensure!(
-            typing.poll()?.is_empty()
-                && typing.quiescent()
-                && quiet.poll()? == InputProgress::Quiet,
-            "seed typing did not finish released/quiet"
-        );
-        self.quiet = Some(quiet);
-        self.typing.take();
-        Ok(())
+        self.input.finish_typing()
     }
 }
 
@@ -409,11 +445,16 @@ pub fn run(
         image.after(),
         overall,
     )?;
+    let mut ownership = TrialInput {
+        quiet: input.take(),
+        typing: None,
+        canceled: false,
+    };
     let result = execute(
         runtime,
         store,
         setup,
-        input,
+        &mut ownership,
         image,
         root,
         overall,
@@ -427,17 +468,26 @@ pub fn run(
         "native_qualification":false,"product_submit_selected":false}),
     );
     let end = overall.min(Instant::now() + Duration::from_secs(5));
-    let finished = permit.finish(end, &mut || {
-        setup.current()?;
-        setup.services().pulse()?;
-        runtime.pulse()
+    let finished = ownership.finish_typing().and_then(|()| {
+        permit.finish(end, &mut || {
+            setup.current()?;
+            setup.services().pulse()?;
+            ownership.finish_typing()?;
+            runtime.pulse()
+        })
     });
+    let teardown_retained = retain(
+        root,
+        "input-teardown.json",
+        serde_json::json!({"result":format!("{finished:?}")}),
+    );
     if let Err(error) = result {
         bail!(
-            "composer trial failed: {error:#}; retention: {retained:?}; actor finish: {finished:?}"
+            "composer trial failed: {error:#}; retention: {retained:?}; actor finish: {finished:?}; teardown retention: {teardown_retained:?}"
         );
     }
     retained?;
+    teardown_retained?;
     finished
 }
 
@@ -446,7 +496,7 @@ fn execute(
     runtime: &mut ResidentRuntime,
     store: &Arc<Store>,
     setup: &ObserverSetup,
-    input: &mut Option<RequestInput>,
+    input: &mut TrialInput,
     image: &HistoricalCapture,
     root: &Path,
     overall: Instant,
@@ -469,8 +519,7 @@ fn execute(
         store,
         conversation,
         overall,
-        quiet: input.take(),
-        typing: None,
+        input,
     };
     trial.check(overall)?;
     ensure!(
@@ -576,6 +625,11 @@ fn execute(
         !key.key.auto_repeat && key.key.count == 1 && key.key.modifiers == 0,
         "diagnostic key was repeated/modified"
     );
+    ensure!(
+        key.draft.state.identity == state.identity
+            && key.draft.units == TEXT.encode_utf16().collect::<Vec<_>>(),
+        "diagnostic key did not capture exactly the original same-range trial text"
+    );
     // Never clear from the historical key snapshot. Observe the actual stock
     // newline with new operation IDs and a finite polling bound, no +1 rule.
     let expected: Vec<_> = format!("{TEXT}\n").encode_utf16().collect();
@@ -589,7 +643,11 @@ fn execute(
             &state.identity,
             settle,
         )?;
-        if current.units == expected {
+        ensure!(
+            current.state.identity == key.draft.state.identity,
+            "post-key native range changed"
+        );
+        if current.units == expected && current.state.revision != key.draft.state.revision {
             draft = Some(current);
             break;
         }

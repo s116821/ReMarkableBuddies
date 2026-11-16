@@ -371,12 +371,24 @@ impl ActorHandoff {
             if let Some(ended) = self.receive(context, "composer.ended", deadline)? {
                 ensure!(&ended == message, "foreign composer completion");
                 let mut fresh = RequestInput::new(TriggerCorner::LowerLeft, None)?;
+                let typing = self
+                    .typing
+                    .as_mut()
+                    .context("composer typing observer absent")?;
+                let drained = typing.poll()?;
                 ensure!(
-                    fresh.poll()? == InputProgress::Quiet,
-                    "composer did not end with released input"
+                    drained
+                        .iter()
+                        .all(|event| *event == Interaction::Invalidated)
+                        && typing.quiescent()
+                        && fresh.poll()? == InputProgress::Quiet
+                        && typing.poll()?.is_empty()
+                        && typing.quiescent()
+                        && fresh.poll()? == InputProgress::Quiet,
+                    "composer actor readmission lost input or queued cancellation"
                 );
-                self.typing.take();
                 *input = Some(fresh);
+                drop(self.typing.take());
                 self.finished = true;
                 write_new(
                     &context.root,
