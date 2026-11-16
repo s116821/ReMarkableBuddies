@@ -228,14 +228,15 @@ impl Attempt {
 }
 impl HistoricalAttempt {
     fn known_no_effect(&self) -> bool {
-        if self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_))) {
-            return true;
-        }
+        let known = self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_)));
         #[cfg(buddy_development_native_composer)]
-        if composer::refused(self.reply.as_ref()) {
-            return true;
+        {
+            known || composer::refused(self.reply.as_ref())
         }
-        false
+        #[cfg(not(buddy_development_native_composer))]
+        {
+            known
+        }
     }
     #[cfg(target_os = "linux")]
     pub(super) fn possible_insertion(
