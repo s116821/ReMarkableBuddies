@@ -178,6 +178,8 @@ jobs:
       - name: Check the development composer consumer against the pinned SDK
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
         env:
+          # The predecessor action selects its older compiler without Clippy.
+          RUSTUP_TOOLCHAIN: stable
           RUSTFLAGS: --cfg buddy_development_native_composer
           CARGO_TARGET_DIR: ${{ runner.temp }}/native-composer-target
         run: |
@@ -196,6 +198,8 @@ jobs:
             tee "$RUNNER_TEMP/native-composer-tests.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-composer-tests.log"
           cargo clippy --locked --lib --config "$patch" --features "$features" -- -D warnings
+          cargo check --locked --example resident_bootstrap_observer --example resident_bootstrap_control \
+            --config "$patch" --features "$features"
     defaults:
       run:
         shell: bash
