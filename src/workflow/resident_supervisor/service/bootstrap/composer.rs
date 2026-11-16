@@ -614,7 +614,7 @@ impl ActorHandoff {
                     .typing
                     .as_mut()
                     .context("composer typing observer absent")?;
-                let mut admit = |full| {
+                let mut admit = |full: bool| {
                     check(end)?;
                     self.selection.pin.current()?;
                     ensure!(
