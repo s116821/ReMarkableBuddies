@@ -255,12 +255,18 @@ impl Keyboard {
         key_map
     }
 
-    #[cfg(feature = "development-resident-bootstrap")]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn supports_text(&self, text: &str) -> bool {
         self.device.is_some() && text.chars().all(|ch| self.key_map.contains_key(&ch))
     }
     /// Release only keys on this actual owned virtual descriptor, even on failure.
-    #[cfg(feature = "development-resident-bootstrap")]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn release_all(&mut self) -> Result<()> {
         let mut keys = self
             .key_map
