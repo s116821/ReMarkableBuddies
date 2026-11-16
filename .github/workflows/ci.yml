@@ -172,7 +172,7 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
         with:
           repository: s116821/ReMarkableOpenSDK
-          ref: 72087c9ff95b80ac6d0a312750f131810f5feb52
+          ref: e44ec756c1ee57e414399022affa1f829e2f42d2
           path: .native-composer-sdk
           persist-credentials: false
       - name: Check the development composer consumer against the pinned SDK
@@ -198,8 +198,11 @@ jobs:
             tee "$RUNNER_TEMP/native-composer-tests.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-composer-tests.log"
           cargo clippy --locked --lib --config "$patch" --features "$features" -- -D warnings
-          cargo check --locked --example resident_bootstrap_observer --example resident_bootstrap_control \
+          cargo check --locked --example resident_bootstrap_control \
             --config "$patch" --features "$features"
+          cargo test --locked --example resident_bootstrap_observer composer_armed_controls \
+            --config "$patch" --features "$features" | tee "$RUNNER_TEMP/native-composer-armed-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-composer-armed-tests.log"
     defaults:
       run:
         shell: bash
