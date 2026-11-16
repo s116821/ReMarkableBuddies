@@ -86,22 +86,21 @@ not actively using, use
 device coordination, realistic test inputs and evidence. Unrelated source or
 documentation edits do not require the tablet workflow. The unattended workflow
 does not apply to actively used/personal tablets or without full unattended SSH.
-Local simulator tests require neither SSH nor a tablet. Contributors without
-authorized hardware should run local checks and identify unverified native cases;
-a maintainer performs required hardware gates before merge. Never claim unavailable
-hardware evidence was verified. Skills should offer equivalent public CLI/file
-steps where feasible rather than require a particular assistant or connector.
+Contributors without authorized hardware can use the documented simulator and
+identify unverified native cases for a maintainer. Skills should offer equivalent
+public CLI/file steps where feasible.
 
-## Local development testing
+## Development validation
 
-Use [.agents/skills/reader-simulator-testing/SKILL.md](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md)
-for local scenario selection, deterministic regressions and authorized live-model
-checks. It is also a manual checklist. Offline development requires no private
-board, assistant integration, API credential or tablet. Model-facing changes still
-need representative live evidence before merge; contributors without access report
-the missing gate and a maintainer supplies it. Native-only evidence follows the
-separate unattended tablet scope above. Existing authorization does not need to be
-requested again merely because a skill is used.
+Follow the shared [development validation policy](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md#development-validation).
+Build the changed app and exercise the relevant end-to-end behavior on the authorized
+development tablet when available. Run local simulators or emulators only while
+another operator uses the tablet or when you lack authorized hardware. Use the
+[simulator checklist](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/.agents/skills/reader-simulator-testing/SKILL.md)
+to maintain regression fixtures. Run automated component and regression suites in
+existing CI. Source review and formatting may proceed locally. Model-facing changes
+require representative authorized live evidence before merge. Contributors without
+access identify the outstanding check for a maintainer.
 
 ## Predictable device interaction
 
