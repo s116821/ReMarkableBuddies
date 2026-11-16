@@ -48,9 +48,9 @@ fn monotonic_ns() -> Result<u64> {
         .and_then(|s| s.checked_add(time.tv_nsec as u64))
         .context("monotonic overflow")
 }
-fn marker(line: &[u8], expected: Option<&[u8]>, seen: bool, now: u64) -> Result<bool> {
+fn marker(line: &[u8], expected: Option<&[u8]>, seen: bool, now: u64) -> Result<Option<u64>> {
     if !line.windows(PREFIX.len()).any(|part| part == PREFIX) {
-        return Ok(false);
+        return Ok(None);
     }
     let expected = expected.context("arming marker before prepared request")?;
     ensure!(
@@ -74,7 +74,25 @@ fn marker(line: &[u8], expected: Option<&[u8]>, seen: bool, now: u64) -> Result<
         (5_000_000_000..=20_000_000_000).contains(&remaining),
         "insufficient or invalid armed budget"
     );
-    Ok(true)
+    Ok(Some(expiry))
+}
+
+pub struct Receipt {
+    pub line: String,
+    pub expiry_ns: u64,
+}
+impl Receipt {
+    pub fn current(&self) -> Result<()> {
+        let remaining = self
+            .expiry_ns
+            .checked_sub(monotonic_ns()?)
+            .context("native armed cue expired")?;
+        ensure!(
+            (5_000_000_000..=20_000_000_000).contains(&remaining),
+            "insufficient native budget to invite typing"
+        );
+        Ok(())
+    }
 }
 
 pub struct Witness {
@@ -115,7 +133,7 @@ impl Witness {
         );
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK)
             .open(format!(
                 "/proc/self/fd/{}/stderr.log",
                 directory.as_raw_fd()
@@ -130,6 +148,13 @@ impl Witness {
             "unsafe native stderr"
         );
         let start = original.len();
+        if start != 0 {
+            let mut previous = [0u8; 1];
+            ensure!(
+                file.read_at(&mut previous, start - 1)? == 1 && previous[0] == b'\n',
+                "native stderr EOF is not a complete line boundary"
+            );
+        }
         let value = Self {
             path: path.to_owned(),
             directory,
@@ -196,7 +221,7 @@ impl Witness {
     }
     /// Return the validated newly observed line once. Other complete stderr
     /// lines may be ignored; a foreign/duplicate/partial oversized marker fails.
-    pub fn poll(&mut self) -> Result<Option<String>> {
+    pub fn poll(&mut self) -> Result<Option<Receipt>> {
         let size = self.current()?;
         self.high_water = size;
         let mut ready = None;
@@ -216,13 +241,22 @@ impl Witness {
                     continue;
                 }
                 let line = std::mem::take(&mut self.partial);
-                if marker(&line, self.expected.as_deref(), self.seen, monotonic_ns()?)? {
+                if let Some(expiry_ns) =
+                    marker(&line, self.expected.as_deref(), self.seen, monotonic_ns()?)?
+                {
                     self.seen = true;
-                    ready = Some(String::from_utf8(line)?);
+                    ready = Some(Receipt {
+                        line: String::from_utf8(line)?,
+                        expiry_ns,
+                    });
                 }
             }
         }
         self.current()?;
+        ensure!(
+            ready.is_none() || self.partial.is_empty(),
+            "native arming sample contains an unterminated trailing line"
+        );
         Ok(ready)
     }
     pub fn seen(&self) -> bool {
@@ -233,11 +267,147 @@ impl Witness {
 #[cfg(test)]
 mod composer_armed_controls {
     use super::*;
+    use remarkable_open_sdk::{
+        native_adapter::{ConnectionIdentity, ReaderFacts},
+        PageKey, Uuid,
+    };
+    use std::{
+        io::{Seek, Write},
+        os::unix::fs::DirBuilderExt,
+    };
+    fn id(n: u32) -> Uuid {
+        Uuid::parse(&format!("00000000-0000-0000-0000-{n:012x}")).unwrap()
+    }
+    fn frame() -> Frame {
+        let runtime = RuntimeIdentity {
+            profile_sha256: [1; 32],
+            executable_sha256: [2; 32],
+            adapter_sha256: [3; 32],
+            boot: id(1),
+            pid: 17,
+            start_ticks: 91,
+            activation: id(2),
+        };
+        let identity = composer::RangeIdentity {
+            facts: ReaderFacts::new(
+                PageKey {
+                    document: id(10),
+                    page: id(11),
+                },
+                vec![id(11)],
+            )
+            .unwrap(),
+            visit: id(12),
+            range: id(13),
+        };
+        Frame {
+            scope: ConnectionIdentity {
+                runtime,
+                connection: id(3),
+                server_nonce: Some(id(4)),
+            },
+            sequence: 1,
+            operation: OperationId(id(5)),
+            message: Message::Request(Command::Composer(composer::Command::AwaitKey {
+                identity,
+                keys: vec![0x01000004],
+            })),
+        }
+    }
+    fn open(path: &Path, frame: &Frame) -> Result<Witness> {
+        let Message::Request(Command::Composer(composer::Command::AwaitKey { identity, keys })) =
+            &frame.message
+        else {
+            panic!("fixture")
+        };
+        Witness::open(
+            path,
+            frame.scope.runtime.clone(),
+            frame.operation,
+            identity.clone(),
+            keys.clone(),
+        )
+    }
+    #[test]
+    fn fresh_boundary_positional_partial_and_replaced_log() {
+        let path = std::env::temp_dir().join(format!(
+            "composer-armed-{}",
+            remarkable_reader_buddy::storage::Uuid::new_v4()
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        let log = path.join("stderr.log");
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&log)
+            .unwrap();
+        writer.write_all(b"unterminated").unwrap();
+        let frame = frame();
+        assert!(open(&path, &frame).is_err());
+        writer.write_all(b"\n").unwrap();
+        let mut witness = open(&path, &frame).unwrap();
+        let mut wrong = frame.clone();
+        wrong.sequence = 2;
+        assert!(witness
+            .prepare(&wrong, frame.fingerprint().unwrap())
+            .is_err());
+        witness
+            .prepare(&frame, frame.fingerprint().unwrap())
+            .unwrap();
+        assert!(witness.poll().unwrap().is_none());
+        let line = [
+            witness.expected.as_ref().unwrap().as_slice(),
+            format!("{}\n", monotonic_ns().unwrap() + 15_000_000_000).as_bytes(),
+        ]
+        .concat();
+        writer.write_all(&line[..line.len() - 1]).unwrap();
+        let position = writer.stream_position().unwrap();
+        assert!(witness.poll().unwrap().is_none());
+        assert_eq!(writer.stream_position().unwrap(), position);
+        writer
+            .write_all(b"\nRSDK_COMPOSER_ARMED_V1 partial")
+            .unwrap();
+        assert!(witness.poll().is_err()); // complete first mark never hides partial second mark
+        drop(witness);
+        writer.write_all(b"\n").unwrap();
+        let mut next = open(&path, &frame).unwrap();
+        next.prepare(&frame, frame.fingerprint().unwrap()).unwrap();
+        writer.write_all(&line).unwrap();
+        let receipt = next.poll().unwrap().unwrap();
+        receipt.current().unwrap();
+        assert!(next.seen());
+        writer.write_all(&line).unwrap();
+        assert!(next.poll().is_err());
+        fs::rename(&log, path.join("old.log")).unwrap();
+        File::create(&log).unwrap();
+        assert!(next.current().is_err());
+        drop(next);
+        drop(writer);
+        fs::remove_file(&log).unwrap();
+        fs::remove_file(path.join("old.log")).unwrap();
+        // A special file must be rejected before a potentially blocking open.
+        use std::os::unix::ffi::OsStrExt;
+        let named = std::ffi::CString::new(log.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { nix::libc::mkfifo(named.as_ptr(), 0o600) }, 0);
+        assert!(open(&path, &frame).is_err());
+        fs::remove_file(&log).unwrap();
+        fs::remove_dir(&path).unwrap();
+    }
     #[test]
     fn exact_complete_fresh_once_only() {
+        assert!(Receipt {
+            line: String::new(),
+            expiry_ns: 0
+        }
+        .current()
+        .is_err());
         let expected = b"RSDK_COMPOSER_ARMED_V1 actual-prepared-frame expiry_ns=";
         let valid = [expected.as_slice(), b"15000000000\n"].concat();
-        assert!(marker(&valid, Some(expected), false, 1_000_000_000).unwrap());
+        assert_eq!(
+            marker(&valid, Some(expected), false, 1_000_000_000).unwrap(),
+            Some(15_000_000_000)
+        );
         assert!(marker(&valid, Some(expected), true, 1_000_000_000).is_err());
         assert!(marker(&valid, None, false, 1_000_000_000).is_err());
         assert!(marker(
@@ -271,13 +441,14 @@ mod composer_armed_controls {
             )
             .is_err());
         }
-        assert!(!marker(
+        assert!(marker(
             b"ordinary diagnostic\n",
             Some(expected),
             false,
             1_000_000_000
         )
-        .unwrap());
+        .unwrap()
+        .is_none());
         assert!(marker(
             &[b"prefix ".as_slice(), valid.as_slice()].concat(),
             Some(expected),

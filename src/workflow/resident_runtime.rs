@@ -404,6 +404,11 @@ impl ResidentRuntime {
         } = self;
         let mut checked = || {
             before(deadline)?;
+            // A development progress callback may publish an operator cue.
+            // Reject an already-dead/replaced runtime before that callout too.
+            prepared.current(true).map_err(integrity)?;
+            check_children(child, prepared).map_err(integrity)?;
+            before(deadline)?;
             progress()?;
             prepared.current(true).map_err(integrity)?;
             check_children(child, prepared).map_err(integrity)?;

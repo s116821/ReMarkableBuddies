@@ -268,15 +268,11 @@ impl Trial<'_> {
             deadline,
             &mut || {
                 self.check(deadline)?;
-                if let Some(witness)=&witness {
-                    if let Some(receipt)=witness.borrow_mut().poll()? {
-                        // Both physical observers remain quiet until the exact
-                        // native attempt has actually armed with time remaining.
-                        self.allow_typing()?;
-                        retain(&evidence,"typing-ready.json",serde_json::json!({
-                            "operation":operation.0.to_string(),"native_armed_at_sample":receipt,
-                            "text":TEXT,"diagnostic_key":"Return once; ordinary newline is preserved",
-                            "live_lease_or_submit_claim":false}))?;
+                if let Some(witness) = &witness {
+                    if let Some(receipt) = witness.borrow_mut().poll()? {
+                        // The observer stays quiet until the exact attempt
+                        // armed. The actor permits the finite seed/input phase.
+                        self.invite_typing(operation, receipt, deadline)?;
                     }
                 }
                 Ok(())
@@ -300,14 +296,29 @@ impl Trial<'_> {
                     deadline,
                     pulse,
                 ),
-                Call::AwaitDiagnosed(identity,keys)=>connection.composer_await_key_diagnosed_with_progress(
-                    conversation,operation,identity,keys,deadline,
-                    &mut |frame,digest| {
-                        witness.as_ref().context("diagnostic witness absent")?.borrow_mut().prepare(frame,digest)?;
-                        retain(&evidence,&format!("{phase}.prepared.json"),serde_json::json!({
+                Call::AwaitDiagnosed(identity, keys) => connection
+                    .composer_await_key_diagnosed_with_progress(
+                        conversation,
+                        operation,
+                        identity,
+                        keys,
+                        deadline,
+                        &mut |frame, digest| {
+                            witness
+                                .as_ref()
+                                .context("diagnostic witness absent")?
+                                .borrow_mut()
+                                .prepare(frame, digest)?;
+                            retain(
+                                &evidence,
+                                &format!("{phase}.prepared.json"),
+                                serde_json::json!({
                             "operation":frame.operation.0.to_string(),"request_sha256":digest,
-                            "frame":format!("{frame:?}"),"sent_or_armed":false}))
-                    },pulse),
+                            "frame":format!("{frame:?}"),"sent_or_armed":false}),
+                            )
+                        },
+                        pulse,
+                    ),
                 Call::Clear(retained) => {
                     connection.composer_clear_with_progress(operation, retained, deadline, pulse)
                 }
@@ -411,6 +422,40 @@ impl Trial<'_> {
         self.check(self.overall)?;
         self.input.typing = Some(typing);
         drop(self.input.quiet.take());
+        Ok(())
+    }
+    fn invite_typing(
+        &mut self,
+        operation: OperationId,
+        receipt: armed::Receipt,
+        deadline: Instant,
+    ) -> Result<()> {
+        receipt.current()?;
+        self.allow_typing()?;
+        let staged = self.root.join("typing-cue.staged.json");
+        let ready = self.root.join("typing-ready.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staged)?;
+        let value = serde_json::json!({
+            "operation":operation.0.to_string(),"native_armed_at_sample":receipt.line,
+            "native_expiry_ns":receipt.expiry_ns,"text":TEXT,
+            "diagnostic_key":"Return once; ordinary newline is preserved",
+            "live_lease_or_submit_claim":false});
+        file.write_all(&serde_json::to_vec_pretty(&value)?)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        File::open(self.root)?.sync_all()?;
+        // Slow rebinding, service checks or staging fsync must not turn a valid
+        // sampled receipt into an expired operator cue. Publish one complete
+        // already-durable inode atomically without overwriting an earlier cue.
+        self.check(deadline)?;
+        receipt.current()?;
+        fs::hard_link(&staged, &ready)?;
+        File::open(self.root)?.sync_all()?;
+        println!("composer_trial_evidence={}", ready.display());
         Ok(())
     }
     fn require_quiet_again(&mut self) -> Result<()> {
