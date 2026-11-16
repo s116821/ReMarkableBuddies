@@ -67,7 +67,7 @@ fn identical_winner_between_receipt_and_root_reads_replays_without_a_second_comm
             .unwrap();
         assert_ne!(committed.0, expected.0);
         // Resume the exact production continuation with the original stale heads.
-        let replay = ledger
+        let (replay, fresh) = ledger
             .append_unreplayed(
                 operation,
                 expected.clone(),
@@ -76,7 +76,12 @@ fn identical_winner_between_receipt_and_root_reads_replays_without_a_second_comm
                 fingerprint,
             )
             .unwrap();
+        assert!(!fresh);
         assert_eq!(replay.historical, winner.historical);
+        #[cfg(buddy_development_native_composer)]
+        assert!(ledger
+            .append_fresh(operation, expected.clone(), request.clone(), vec![])
+            .is_err());
         assert_eq!(
             ledger
                 .expected(Namespace::Conversation, conversation)

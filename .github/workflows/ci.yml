@@ -168,7 +168,7 @@ jobs:
           source_head: ${{ github.event.pull_request.head.sha || github.sha }}
           cargo_messages: ${{ runner.temp }}/current-cargo-test.jsonl
       - name: Check out the pinned development composer SDK
-        uses: actions/checkout@3d3c42e5aac5ba805925da76410c181273ba90b1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
         with:
           repository: s116821/ReMarkableOpenSDK

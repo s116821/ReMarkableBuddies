@@ -115,9 +115,12 @@ fn reservation_and_typed_outcomes_survive_reopen_without_replay() {
     let unknown = Reply::Composer(wire::Reply::Provisioned(wire::Outcome::Unknown {
         attempts: wire::Attempts::from_bits(3).unwrap(),
     }));
-    for (reply, allows_new_operation) in
-        [(None, false), (Some(refused), true), (Some(unknown), false)]
-    {
+    for (reply, allows_new_operation) in [
+        (None, false),
+        (Some(refused), true),
+        (Some(unknown), false),
+        (Some(provisioned(range_state())), true),
+    ] {
         let fixture = Fixture::new();
         let store = fixture.open();
         let conversation = Uuid::new_v4();
@@ -134,8 +137,15 @@ fn reservation_and_typed_outcomes_survive_reopen_without_replay() {
         assert_eq!(saved[0].reply, reply);
         assert!(claim(&store, conversation, &original).is_err());
         assert!(claim(&store, Uuid::new_v4(), &original).is_err());
+        let select = Frame {
+            message: Message::Request(Command::SelectAdjacent(SelectAdjacent {
+                expected: facts(),
+                target: id(12),
+            })),
+            ..request(51, 13)
+        };
         assert_eq!(
-            claim(&store, conversation, &provision(51)).is_ok(),
+            claim(&store, conversation, &select).is_ok(),
             allows_new_operation
         );
         assert_eq!(
@@ -237,10 +247,11 @@ fn clear_proof_requires_a_retained_exact_user_turn_and_range() {
         state: state.clone(),
         units: text.encode_utf16().collect(),
     };
+    let exchange = Uuid::new_v4();
     let user = Turn {
-        id: Uuid::new_v4(),
+        id: crate::writer::stage(exchange, "composer-user"),
         conversation,
-        exchange: Uuid::new_v4(),
+        exchange,
         sequence: 0,
         role: Role::User,
         mode: Mode::Writer,
@@ -256,45 +267,27 @@ fn clear_proof_requires_a_retained_exact_user_turn_and_range() {
     let expected = ledger
         .expected(Namespace::Conversation, conversation)
         .unwrap();
-    store.set_fault(Fault::BeforeCommit).unwrap();
-    assert!(ledger
-        .append(Uuid::new_v4(), expected.clone(), user.clone(), vec![])
-        .is_err());
-    assert!(RetainedUser::from_turn(&ledger, conversation, user_id, draft.clone()).is_err());
-    ledger
-        .append(Uuid::new_v4(), expected, user.clone(), vec![])
-        .unwrap();
-    assert!(RetainedUser::from_turn(&ledger, conversation, user_id, draft.clone()).is_err());
+    assert!(RetainedUser::append_user(&ledger, expected, user.clone(), draft.clone()).is_err());
 
     let provision_call = provision(50);
     claim(&store, conversation, &provision_call).unwrap();
     record_reply(&store, &provision_call, provisioned(state)).unwrap();
     let assistant = Turn {
-        id: Uuid::new_v4(),
         role: Role::Assistant,
         outcome: TurnOutcome::Generated,
-        ..user
+        ..user.clone()
     };
-    let assistant_id = assistant.id;
-    ledger
-        .append(
-            Uuid::new_v4(),
-            ledger
-                .expected(Namespace::Conversation, conversation)
-                .unwrap(),
-            assistant,
-            vec![],
-        )
+    let expected = ledger
+        .expected(Namespace::Conversation, conversation)
         .unwrap();
-    drop(ledger);
-    drop(store);
-
-    let store = fixture.open();
-    let ledger = Ledger::new(store.clone());
-    assert!(RetainedUser::from_turn(&ledger, conversation, assistant_id, draft.clone()).is_err());
+    assert!(
+        RetainedUser::append_user(&ledger, expected.clone(), assistant, draft.clone()).is_err()
+    );
     let mut wrong_text = draft.clone();
     wrong_text.units.push(b' ' as u16);
-    assert!(RetainedUser::from_turn(&ledger, conversation, user_id, wrong_text).is_err());
+    assert!(
+        RetainedUser::append_user(&ledger, expected.clone(), user.clone(), wrong_text).is_err()
+    );
     let malformed = wire::Draft {
         units: text
             .encode_utf16()
@@ -302,19 +295,56 @@ fn clear_proof_requires_a_retained_exact_user_turn_and_range() {
             .collect(),
         ..draft.clone()
     };
-    assert!(RetainedUser::from_turn(&ledger, conversation, user_id, malformed).is_err());
+    assert!(RetainedUser::append_user(&ledger, expected.clone(), user.clone(), malformed).is_err());
     let mut wrong_range = draft.clone();
     wrong_range.state.identity.range = id(22);
-    assert!(RetainedUser::from_turn(&ledger, conversation, user_id, wrong_range).is_err());
+    assert!(
+        RetainedUser::append_user(&ledger, expected.clone(), user.clone(), wrong_range).is_err()
+    );
 
-    let retained = RetainedUser::from_turn(&ledger, conversation, user_id, draft).unwrap();
+    store.set_fault(Fault::BeforeCommit).unwrap();
+    assert!(
+        RetainedUser::append_user(&ledger, expected.clone(), user.clone(), draft.clone()).is_err()
+    );
+    assert!(store
+        .value(Namespace::Conversation, user_id)
+        .unwrap()
+        .is_none());
+    store.set_fault(Fault::AfterCommit).unwrap();
+    assert!(RetainedUser::append_user(&ledger, expected, user.clone(), draft.clone()).is_err());
+    drop(ledger);
+    drop(store);
+
+    let store = fixture.open();
+    let ledger = Ledger::new(store.clone());
+    assert!(store
+        .value(Namespace::Conversation, user_id)
+        .unwrap()
+        .is_some());
+    let expected = ledger
+        .expected(Namespace::Conversation, conversation)
+        .unwrap();
+    assert!(
+        RetainedUser::append_user(&ledger, expected.clone(), user.clone(), draft.clone()).is_err()
+    );
+    let exchange = Uuid::new_v4();
+    let next_user = Turn {
+        id: crate::writer::stage(exchange, "composer-user"),
+        exchange,
+        ..user
+    };
+    let next_user_id = next_user.id;
+    let retained = RetainedUser::append_user(&ledger, expected, next_user, draft).unwrap();
+    assert!(store
+        .value(Namespace::Conversation, next_user_id)
+        .unwrap()
+        .is_some());
     assert!(retained.check(&store, OperationId(id(51))).is_err());
     let operation = retained.operation();
+    let clear_id = crate::writer::stage(next_user_id, "native-composer-clear");
     assert_eq!(
-        RetainedUser::from_turn(&ledger, conversation, user_id, retained.draft().clone())
-            .unwrap()
-            .operation(),
-        operation
+        operation,
+        OperationId(SdkUuid::parse(&clear_id.to_string()).unwrap())
     );
     retained.check(&store, operation).unwrap();
     let clear = effect(operation, wire::Command::Clear(retained.draft().clone()));
