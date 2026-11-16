@@ -172,7 +172,7 @@ jobs:
         if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
         with:
           repository: s116821/ReMarkableOpenSDK
-          ref: e44ec756c1ee57e414399022affa1f829e2f42d2
+          ref: 5fd93f84ee3e77916ede0481f40fc7ef89cd18aa
           path: .native-composer-sdk
           persist-credentials: false
       - name: Check the development composer consumer against the pinned SDK
