@@ -32,15 +32,31 @@ fn semantic_tag(tag: &str) -> bool {
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rustc-check-cfg=cfg(buddy_development_native_pre_enter)");
     println!("cargo:rustc-check-cfg=cfg(buddy_development_native_pre_enter_admitted)");
+    println!("cargo:rustc-check-cfg=cfg(buddy_development_native_composer)");
+    println!("cargo:rustc-check-cfg=cfg(buddy_development_native_composer_admitted)");
     println!("cargo:rerun-if-env-changed=CARGO_CFG_BUDDY_DEVELOPMENT_NATIVE_PRE_ENTER");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_BUDDY_DEVELOPMENT_NATIVE_COMPOSER");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_RELEASE_SHA");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_CANDIDATE_TAG");
     println!("cargo:rerun-if-env-changed=READER_BUDDY_CANDIDATE_SHA");
     // Cargo supplies a boolean cfg as a present, empty environment variable.
     // Do not infer effective selection from one spelling of compiler flags.
-    if env::var_os("CARGO_CFG_BUDDY_DEVELOPMENT_NATIVE_PRE_ENTER").is_some() {
-        const REFUSAL: &str = "Development pre-Enter build admission refused";
+    for (selection, admitted, refusal) in [
+        (
+            "CARGO_CFG_BUDDY_DEVELOPMENT_NATIVE_PRE_ENTER",
+            "buddy_development_native_pre_enter_admitted",
+            "Development pre-Enter build admission refused",
+        ),
+        (
+            "CARGO_CFG_BUDDY_DEVELOPMENT_NATIVE_COMPOSER",
+            "buddy_development_native_composer_admitted",
+            "Development composer build admission refused",
+        ),
+    ] {
+        if env::var_os(selection).is_none() {
+            continue;
+        }
         if [
             "READER_BUDDY_RELEASE_TAG",
             "READER_BUDDY_RELEASE_SHA",
@@ -50,18 +66,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .any(|name| env::var_os(name).is_some())
             || git(&["rev-parse", "--verify", "HEAD"])
-                .map_err(|_| REFUSAL)?
+                .map_err(|_| refusal)?
                 .is_empty()
             || git(&["tag", "--points-at", "HEAD"])
-                .map_err(|_| REFUSAL)?
+                .map_err(|_| refusal)?
                 .lines()
                 .any(semantic_tag)
         {
-            return Err(REFUSAL.into());
+            return Err(refusal.into());
         }
         // Final-target `cargo rustc -- --cfg ...` does not necessarily reach
         // this script. The library refuses that uncoupled selection below.
-        println!("cargo:rustc-cfg=buddy_development_native_pre_enter_admitted");
+        println!("cargo:rustc-cfg={admitted}");
     }
     let candidate_tag = env::var("READER_BUDDY_CANDIDATE_TAG").ok();
     let candidate_sha = env::var("READER_BUDDY_CANDIDATE_SHA").ok();
