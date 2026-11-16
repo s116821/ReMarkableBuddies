@@ -1,6 +1,8 @@
 //! Finite, explicitly compiled tablet mechanics trial through the admitted Buddy
 //! runtime. Return is a diagnostic event, not a product Submit mapping. The
 //! independent bootstrap controller still owns recovery. No effect is retried.
+#[path = "resident_composer_trial/armed.rs"]
+mod armed;
 use anyhow::{bail, ensure, Context, Result};
 use remarkable_open_sdk::{
     native_adapter::{composer as wire, HistoricalCapture, LostRequest, ReaderFacts, Reply},
@@ -123,6 +125,7 @@ enum Call<'a> {
     Capture(ReaderFacts),
     Provision(ReaderFacts),
     Read(wire::RangeIdentity, Option<Vec<i32>>),
+    AwaitDiagnosed(wire::RangeIdentity, Vec<i32>),
     Clear(&'a RetainedUser),
 }
 struct Trial<'a> {
@@ -236,6 +239,19 @@ impl Trial<'_> {
             .overall
             .min(limit)
             .min(Instant::now() + Duration::from_secs(25));
+        let witness = match &call {
+            Call::AwaitDiagnosed(identity, keys) => {
+                Some(std::cell::RefCell::new(armed::Witness::open(
+                    runtime.evidence_directory(),
+                    runtime.identity().clone(),
+                    operation,
+                    identity.clone(),
+                    keys.clone(),
+                )?))
+            }
+            _ => None,
+        };
+        let evidence = self.root.to_owned();
         self.check(deadline)?;
         self.setup
             .services()
@@ -250,7 +266,21 @@ impl Trial<'_> {
         let conversation = self.conversation;
         let result = runtime.with_connection(
             deadline,
-            &mut || self.check(deadline),
+            &mut || {
+                self.check(deadline)?;
+                if let Some(witness)=&witness {
+                    if let Some(receipt)=witness.borrow_mut().poll()? {
+                        // Both physical observers remain quiet until the exact
+                        // native attempt has actually armed with time remaining.
+                        self.allow_typing()?;
+                        retain(&evidence,"typing-ready.json",serde_json::json!({
+                            "operation":operation.0.to_string(),"native_armed_at_sample":receipt,
+                            "text":TEXT,"diagnostic_key":"Return once; ordinary newline is preserved",
+                            "live_lease_or_submit_claim":false}))?;
+                    }
+                }
+                Ok(())
+            },
             |connection, pulse| match call {
                 Call::Capture(facts) => {
                     connection.capture_source_with_progress(operation, facts, deadline, pulse)
@@ -270,6 +300,14 @@ impl Trial<'_> {
                     deadline,
                     pulse,
                 ),
+                Call::AwaitDiagnosed(identity,keys)=>connection.composer_await_key_diagnosed_with_progress(
+                    conversation,operation,identity,keys,deadline,
+                    &mut |frame,digest| {
+                        witness.as_ref().context("diagnostic witness absent")?.borrow_mut().prepare(frame,digest)?;
+                        retain(&evidence,&format!("{phase}.prepared.json"),serde_json::json!({
+                            "operation":frame.operation.0.to_string(),"request_sha256":digest,
+                            "frame":format!("{frame:?}"),"sent_or_armed":false}))
+                    },pulse),
                 Call::Clear(retained) => {
                     connection.composer_clear_with_progress(operation, retained, deadline, pulse)
                 }
@@ -302,6 +340,14 @@ impl Trial<'_> {
             "journal":format!("{journal:?}"),"render_or_save_ack":false}),
         )?;
         journal?;
+        if result.is_ok() {
+            if let Some(witness) = &witness {
+                ensure!(
+                    witness.borrow().seen(),
+                    "native AwaitKey never supplied its matching armed witness"
+                );
+            }
+        }
         result
     }
     fn read(
@@ -605,18 +651,11 @@ fn execute(
     ensure!(resumed.units.is_empty(), "idle composer changed");
     // Overlap descriptors before deliberately leaving quiet admission. This
     // local policy is never used by ordinary observer/capture/effect probes.
-    trial.allow_typing()?;
-    retain(
-        root,
-        "typing-ready.json",
-        serde_json::json!({"identity":format!("{:?}",state.identity),
-        "text":TEXT,"diagnostic_key":"Return once; ordinary newline is preserved","seconds_max":20}),
-    )?;
     let key = match trial.call(
         runtime,
         "typing-key",
         fresh(),
-        Call::Read(state.identity.clone(), Some(vec![RETURN, ENTER])),
+        Call::AwaitDiagnosed(state.identity.clone(), vec![RETURN, ENTER]),
     )? {
         Reply::Composer(wire::Reply::KeyObserved(wire::Outcome::Verified { value, .. })) => value,
         other => bail!("diagnostic key did not verify: {other:?}"),

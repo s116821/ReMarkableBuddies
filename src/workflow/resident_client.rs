@@ -949,6 +949,37 @@ mod linux {
         }
 
         #[cfg(buddy_development_native_composer)]
+        #[allow(clippy::too_many_arguments)]
+        pub fn composer_await_key_diagnosed_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            identity: remarkable_open_sdk::native_adapter::composer::RangeIdentity,
+            keys: Vec<i32>,
+            deadline: Instant,
+            prepared: &mut dyn FnMut(&Frame, [u8; 32]) -> Result<()>,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            // Development diagnostic sees the SDK's actual prepared frame;
+            // it cannot supply another frame or bypass range admission.
+            composer::require_range(&self.store, conversation, &identity)?;
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::Composer(
+                        remarkable_open_sdk::native_adapter::composer::Command::AwaitKey {
+                            identity,
+                            keys,
+                        },
+                    ),
+                    deadline,
+                    |frame, digest| prepared(frame, digest).map_err(progress_error),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
+
+        #[cfg(buddy_development_native_composer)]
         pub fn composer_clear_with_progress(
             &mut self,
             operation: OperationId,
