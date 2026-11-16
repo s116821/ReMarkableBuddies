@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
+    fs,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::MetadataExt,
     path::{Component, Path},
     sync::Arc,
 };
+
+pub(crate) mod leaf;
 
 type Checked<T> = std::result::Result<T, Status>;
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -272,52 +274,13 @@ fn observe(path: Option<PathBuf>) -> Checked<Observation> {
     }
     let config_meta = fs::symlink_metadata(&path).map_err(|_| Status::Unavailable)?;
     let target = root.join(name);
-    let state = match fs::symlink_metadata(&target) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::Absent {},
-        Err(_) => return Err(Status::Unavailable),
-        Ok(meta) => {
-            let mode = meta.mode() & 0o7777;
-            if !meta.is_file()
-                || meta.nlink() != 1
-                || !owner(&meta)
-                || !private_mode(mode)
-                || (meta.dev() == config_meta.dev() && meta.ino() == config_meta.ino())
-            {
-                return Err(Status::Unsupported);
-            }
-            if meta.len() > MAX_RECORD as u64 {
-                return Err(Status::Unavailable);
-            }
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NOFOLLOW)
-                .open(&target)
-                .map_err(|_| Status::Unavailable)?;
-            let identity = metadata_hash(&meta, true);
-            if metadata_hash(&file.metadata().map_err(|_| Status::Unavailable)?, true) != identity {
-                return Err(Status::Unavailable);
-            }
-            let mut bytes = Vec::new();
-            (&file)
-                .take((MAX_RECORD + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|_| Status::Unavailable)?;
-            if bytes.len() != meta.len() as usize
-                || metadata_hash(&file.metadata().map_err(|_| Status::Unavailable)?, true)
-                    != identity
-                || metadata_hash(
-                    &fs::symlink_metadata(&target).map_err(|_| Status::Unavailable)?,
-                    true,
-                ) != identity
-            {
-                return Err(Status::Unavailable);
-            }
-            State::Present {
-                sha256: digest(&bytes),
-                metadata_sha256: identity,
-                mode,
-            }
-        }
+    let state = match leaf::observe(&target, &config_meta, MAX_RECORD)? {
+        None => State::Absent {},
+        Some(file) => State::Present {
+            sha256: digest(&file.bytes),
+            metadata_sha256: file.metadata_sha256,
+            mode: file.mode,
+        },
     };
     let parent_identity_sha256 = metadata_hash(&root_meta, false);
     if metadata_hash(&parent(&root)?, false) != parent_identity_sha256 {
@@ -508,74 +471,6 @@ pub(crate) enum Phase {
     BeforeSync,
     BeforeReadback,
 }
-struct Stage {
-    path: PathBuf,
-    parent_identity: String,
-    identity: (u64, u64),
-    sealed_metadata: String,
-}
-impl Stage {
-    fn create(root: &Path, bytes: &[u8], mode: u32) -> Checked<Self> {
-        if !private_mode(mode) {
-            return Err(Status::Unsupported);
-        }
-        let path = root.join(format!(".credential-stage-{}", Uuid::new_v4()));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|_| Status::Unavailable)?;
-        let meta = file.metadata().map_err(|_| Status::Unavailable)?;
-        let mut stage = Self {
-            path,
-            parent_identity: metadata_hash(&parent(root)?, false),
-            identity: (meta.dev(), meta.ino()),
-            sealed_metadata: String::new(),
-        };
-        let mut file = file;
-        file.write_all(bytes).map_err(|_| Status::Unavailable)?;
-        file.set_permissions(fs::Permissions::from_mode(mode))
-            .map_err(|_| Status::Unavailable)?;
-        file.sync_all().map_err(|_| Status::Unavailable)?;
-        let meta = file.metadata().map_err(|_| Status::Unavailable)?;
-        if !meta.is_file() || !owner(&meta) || meta.nlink() != 1 || meta.mode() & 0o7777 != mode {
-            return Err(Status::Unsupported);
-        }
-        stage.sealed_metadata = metadata_hash(&meta, true);
-        Ok(stage)
-    }
-    fn check_sealed(&self) -> Checked<()> {
-        let root = self.path.parent().ok_or(Status::Unavailable)?;
-        if metadata_hash(&parent(root)?, false) != self.parent_identity {
-            return Err(Status::Unavailable);
-        }
-        let meta = fs::symlink_metadata(&self.path).map_err(|_| Status::Unavailable)?;
-        if !meta.is_file() || metadata_hash(&meta, true) != self.sealed_metadata {
-            return Err(Status::Unsupported);
-        }
-        Ok(())
-    }
-    fn cleanup(&self) -> Checked<()> {
-        let root = self.path.parent().ok_or(Status::Unavailable)?;
-        if metadata_hash(&parent(root)?, false) != self.parent_identity {
-            return Err(Status::Unavailable);
-        }
-        match fs::symlink_metadata(&self.path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Ok(m) if m.is_file() && (m.dev(), m.ino()) == self.identity => {
-                fs::remove_file(&self.path).map_err(|_| Status::Unavailable)
-            }
-            _ => Err(Status::Unavailable),
-        }
-    }
-}
-impl Drop for Stage {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
-    }
-}
-
 pub(crate) fn publish_locked(
     path: &Path,
     paths: &StorePaths,
@@ -607,38 +502,28 @@ pub(crate) fn publish_with(
         if !intent.matches_change(change) {
             return Err(Status::InvalidInput);
         }
-        let stage = match (&intent.target, change.bytes()) {
-            (Desired::Present { mode, .. }, Some(bytes)) => {
-                Some(Stage::create(&doc.root, bytes, *mode)?)
+        let mutation = match (&intent.action, &intent.target, change.bytes()) {
+            (Action::Install, Desired::Present { mode, .. }, Some(bytes)) => {
+                leaf::Mutation::Create(bytes, *mode)
             }
-            _ => None,
-        };
-        hook(Phase::Staged)?;
-        if observe(Some(path.to_owned()))?.binding != intent.base {
-            return Err(Status::Conflict);
-        }
-        hook(Phase::BeforeSyscall)?;
-        if let Some(stage) = &stage {
-            stage.check_sealed()?;
-        }
-        attempted = true;
-        match (&intent.action, &stage) {
-            (Action::Install, Some(stage)) => {
-                fs::hard_link(&stage.path, &doc.target).map_err(|_| Status::Unavailable)?;
-                stage.cleanup()?;
+            (Action::Replace, Desired::Present { mode, .. }, Some(bytes)) => {
+                leaf::Mutation::Replace(bytes, *mode)
             }
-            (Action::Replace, Some(stage)) => {
-                fs::rename(&stage.path, &doc.target).map_err(|_| Status::Unavailable)?
-            }
-            (Action::Remove, None) => {
-                fs::remove_file(&doc.target).map_err(|_| Status::Unavailable)?
-            }
+            (Action::Remove, Desired::Absent {}, None) => leaf::Mutation::Remove,
             _ => return Err(Status::InvalidInput),
-        }
-        hook(Phase::AfterSyscall)?;
-        hook(Phase::BeforeSync)?;
-        files::sync_dir(&doc.root).map_err(|_| Status::Unavailable)?;
-        hook(Phase::BeforeReadback)?;
+        };
+        leaf::publish(
+            &doc.target,
+            mutation,
+            || {
+                if observe(Some(path.to_owned()))?.binding != intent.base {
+                    return Err(Status::Conflict);
+                }
+                Ok(())
+            },
+            &mut hook,
+            &mut attempted,
+        )?;
         let observed = observe(Some(path.to_owned()))?;
         if !observed.binding.same_location(&intent.base)
             || !desired(&observed.binding.state, &intent.target)
@@ -669,6 +554,7 @@ pub(crate) fn publish_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     const SECRET: &str = "SYNTHETIC_SECRET\r\n tail α ";
     struct Fixture {
         root: PathBuf,

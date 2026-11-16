@@ -57,6 +57,19 @@ fn read_record<T: DeserializeOwned>(
     }
 }
 
+fn owned_root(
+    root: &Path,
+    actor: Uuid,
+    budget: Option<&mut super::selection::SelectedReadBudget>,
+) -> Result<(), Refusal> {
+    directory(root)?;
+    let owner: Identity = read_record(&root.join("owner.json"), MAX_RECORD as u64, budget)?;
+    if owner.actor != actor || owner.format != FORMAT {
+        return Err(Refusal::Unsupported);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NotebookAdmission {
     Deny,
@@ -132,15 +145,7 @@ impl ExistingCustody {
             return Err(Refusal::Unsupported);
         }
         for root in [&paths.cache, &paths.credentials] {
-            directory(root)?;
-            let owner: Identity = read_record(
-                &root.join("owner.json"),
-                MAX_RECORD as u64,
-                budget.as_deref_mut(),
-            )?;
-            if owner.actor != identity.actor || owner.format != FORMAT {
-                return Err(Refusal::Unsupported);
-            }
+            owned_root(root, identity.actor, budget.as_deref_mut())?;
         }
         for child in ["generations", "quarantine", "sync"] {
             directory(&paths.data.join(child))?;
@@ -159,6 +164,11 @@ impl ExistingCustody {
 }
 
 impl Store {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn verify_drive_credential_root(&self) -> Result<(), Refusal> {
+        owned_root(&self.paths.credentials, self.actor_id, None)
+    }
+
     /// Retains one lease through caller maintenance. Does not create directories,
     /// repair markers, clean staging, publish capabilities or initialize a store.
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {

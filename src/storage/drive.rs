@@ -37,7 +37,7 @@ pub struct Credentials {
     pub collection: Uuid,
 }
 impl Credentials {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
             self.credential_version == 1
                 && !self.access_token.trim().is_empty()
@@ -52,7 +52,7 @@ impl Credentials {
         );
         Ok(())
     }
-    fn binding_digest(&self) -> String {
+    pub(crate) fn binding_digest(&self) -> String {
         digest(
             &serde_json::to_vec(&(
                 &self.client_id,

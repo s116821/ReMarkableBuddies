@@ -52,6 +52,11 @@ pub struct SyncModeToken {
     sha256: String,
 }
 impl SyncModeToken {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fields(&self) -> (Uuid, &str) {
+        (self.actor, &self.sha256)
+    }
+
     /// Decode an operator's original conditional precondition, never a live lease.
     pub(crate) fn from_maintenance_request(actor: Uuid, sha256: String) -> Result<Self> {
         ensure!(
@@ -597,6 +602,19 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
         snapshot(self, &load(self)?)
     }
+    /// Serialize a fixed credential operation with mode and Store publication.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_credential_mode<T>(
+        &self,
+        operation: impl FnOnce(&dyn Fn() -> Result<SyncModeSnapshot>) -> T,
+    ) -> Result<T> {
+        let _inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+        Ok(operation(&|| snapshot(self, &load(self)?)))
+    }
+
     /// Explicit choice only; original replay returns history, not a current token.
     pub fn set_sync_mode(
         &self,

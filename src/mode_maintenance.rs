@@ -22,6 +22,8 @@ use std::{
     sync::Arc,
 };
 
+mod drive_credential;
+
 pub const MAX_INPUT: usize = 16 * 1024;
 pub const MAX_OUTPUT: usize = 16 * 1024;
 
@@ -33,6 +35,7 @@ pub enum Operation {
     Choose,
     CreateGroup,
     ProvisionIsolatedBackup,
+    DriveCredential,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -171,6 +174,8 @@ pub struct Report {
     _store: Option<Arc<Store>>,
     #[serde(skip)]
     _mode: Option<OutputLease>,
+    #[serde(skip)]
+    drive_credential: Option<drive_credential::Report>,
 }
 impl Report {
     fn new(operation: Operation, status: Status) -> Self {
@@ -183,9 +188,13 @@ impl Report {
             data: None,
             _store: None,
             _mode: None,
+            drive_credential: None,
         }
     }
     fn encoded(&self) -> Result<Vec<u8>> {
+        if let Some(credential) = &self.drive_credential {
+            return credential.encoded();
+        }
         let mut bytes = serde_json::to_vec(self)?;
         bytes.push(b'\n');
         if bytes.len() <= MAX_OUTPUT {
@@ -287,6 +296,9 @@ pub fn run(
     config_path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
+    if operation == Operation::DriveCredential {
+        return drive_credential::run(input, config_path, stdin);
+    }
     run_with_provision(
         operation,
         input,

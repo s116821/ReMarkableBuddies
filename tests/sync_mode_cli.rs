@@ -86,6 +86,95 @@ fn create_group_requires_strict_stdin_and_refuses_unqualified_without_mutation()
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn drive_credential_cli_uses_fixed_stdin_and_local_only_custody() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use remarkable_reader_buddy::storage::sync::mode::SyncModeChoice;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let store = Store::open(fixture.paths()).unwrap();
+    let token = store.sync_mode_snapshot().unwrap().token;
+    store
+        .set_sync_mode(&token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+        .unwrap();
+    let token = store.sync_mode_snapshot().unwrap().token;
+    drop(store);
+    let inspect = json!({"control_version":1,"action":"inspect","expected_mode":token});
+    let inspect_bytes = serde_json::to_vec(&inspect).unwrap();
+    let local_state = fixture.inventory();
+    assert_eq!(
+        fixture.run("drive-credential", None, false)["outcome"],
+        "invalid-input"
+    );
+    let initial = fixture.run("drive-credential", Some(&inspect_bytes), false);
+    assert_eq!(initial["outcome"], "observed");
+    assert_eq!(initial["current"]["slot"], json!({"kind":"absent"}));
+    assert_eq!(fixture.inventory(), local_state);
+    assert_eq!(
+        fixture.run("drive-credential", Some(&inspect_bytes), true)["outcome"],
+        "invalid-input"
+    );
+    let duplicate = format!(
+        "{{\"action\":\"inspect\",{}",
+        std::str::from_utf8(&inspect_bytes)
+            .unwrap()
+            .trim_start_matches('{')
+    );
+    assert_eq!(
+        fixture.run("drive-credential", Some(duplicate.as_bytes()), false)["outcome"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("drive-credential", Some(&vec![b'x'; 68 * 1024 + 1]), false)["outcome"],
+        "invalid-input"
+    );
+
+    let collection = Uuid::new_v4();
+    let client_id = "fixture.apps.googleusercontent.com";
+    let account = "PRIVATE_FIXTURE_ACCOUNT";
+    let binding = storage::digest(&serde_json::to_vec(&(client_id, account, collection)).unwrap());
+    let credential = serde_json::to_vec(&json!({
+        "credential_version":1,"client_id":client_id,"client_secret":null,
+        "access_token":"PRIVATE_FIXTURE_ACCESS","refresh_token":"PRIVATE_FIXTURE_REFRESH",
+        "expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()+1800,
+        "scopes":["https://www.googleapis.com/auth/drive.appdata"],
+        "account_permission_id":account,"collection":collection
+    }))
+    .unwrap();
+    let operation = Uuid::new_v4();
+    let apply = json!({"control_version":1,"action":"apply","operation":operation,
+        "original":initial["current"],"change":{"kind":"create","collection":collection,
+        "binding_sha256":binding,"credential_b64":STANDARD.encode(&credential)}});
+    let result = fixture.run(
+        "drive-credential",
+        Some(&serde_json::to_vec(&apply).unwrap()),
+        false,
+    );
+    assert_eq!(result["outcome"], "verified");
+    assert_eq!(result["operation"], operation.to_string());
+    assert_eq!(
+        result["current"]["mode_token"],
+        initial["current"]["mode_token"]
+    );
+    assert_eq!(
+        fs::read(fixture.paths().credentials.join("drive.json")).unwrap(),
+        credential
+    );
+    let after_apply = fixture.inventory();
+    let readback = json!({"control_version":1,"action":"readback","operation":operation,
+        "original":initial["current"],"desired":{"kind":"present","collection":collection,
+        "binding_sha256":binding,"sha256":storage::digest(&credential)}});
+    let result = fixture.run(
+        "drive-credential",
+        Some(&serde_json::to_vec(&readback).unwrap()),
+        false,
+    );
+    assert_eq!(result["outcome"], "desired-state-observed");
+    assert_eq!(fixture.inventory(), after_apply);
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -181,7 +270,9 @@ impl Fixture {
         assert!(output.stdout.ends_with(b"\n"));
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["report_version"], 1);
-        assert_eq!(value["activation_performed"], false);
+        if operation != "drive-credential" {
+            assert_eq!(value["activation_performed"], false);
+        }
         assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_"));
         value
     }
