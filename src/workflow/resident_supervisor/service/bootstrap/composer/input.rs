@@ -378,10 +378,17 @@ pub(super) fn poll(
     let confirmation = context
         .root
         .join(format!("composer.{}-positioned", phase.name()));
-    if !present(&confirmation)? {
+    let marker = context
+        .root
+        .join(format!("composer.{}-positioned.ready", phase.name()));
+    // The host may still be writing the single-link payload. Never open it
+    // until it has closed/verified that payload and exclusively created ready.
+    if !present(&marker)? {
         return Ok(());
     }
-    let (confirmation_pin, bytes) = read_pin(&confirmation, deadline)?;
+    let (marker_pin, marker_bytes) = placement_pin(&marker, deadline)?;
+    ensure!(marker_bytes.is_empty(), "invalid placement ready marker");
+    let (confirmation_pin, bytes) = placement_pin(&confirmation, deadline)?;
     ensure!(
         bytes == cue.bytes,
         "placement confirmation differs from complete current cue"
@@ -391,6 +398,7 @@ pub(super) fn poll(
     admit(true)?;
     cue.current()?;
     confirmation_pin.current()?;
+    marker_pin.current()?;
     remaining(expiry, 1_000_000_000)?;
     match phase {
         Phase::Seed => *seed_attempted = true,
@@ -405,6 +413,7 @@ pub(super) fn poll(
     let result = owner.emit(phase, expiry, deadline, &mut |full| {
         cue.current()?;
         confirmation_pin.current()?;
+        marker_pin.current()?;
         admit(full)
     });
     let release = owner.release();
@@ -430,6 +439,7 @@ pub(super) fn poll(
     );
     cue.current()?;
     confirmation_pin.current()?;
+    marker_pin.current()?;
     admit(false)?;
     remaining(expiry, 1)?;
     check(deadline)?;
@@ -441,12 +451,24 @@ pub(super) fn poll(
         // completion. Publish only after successful final guards and full record.
         cue.current()?;
         confirmation_pin.current()?;
+        marker_pin.current()?;
         admit(false)?;
         remaining(expiry, 1)?;
         check(deadline)?;
         write_new(&context.root, "composer.typing-complete.ready", b"")?;
     }
     Ok(())
+}
+fn placement_pin(path: &Path, deadline: Instant) -> Result<(Pinned, Vec<u8>)> {
+    let (pin, bytes) = read_pin(path, deadline)?;
+    ensure!(
+        trusted_file(path)?.metadata()?.mode() & 0o7777 == 0o600,
+        "placement publication must have mode 0600"
+    );
+    // read_pin already requires a protected root-owned regular single-link
+    // inode. Recheck it after the stricter permission check to reject replacement.
+    pin.current()?;
+    Ok((pin, bytes))
 }
 fn completed(expected: usize, downs: usize, pairs: usize, releases: usize, held: bool) -> bool {
     expected > 0 && downs == expected && pairs == expected && releases == expected && !held
