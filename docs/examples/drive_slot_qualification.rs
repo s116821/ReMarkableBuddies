@@ -19,7 +19,7 @@ use std::{
 
 #[path = "drive_slot_qualification/ledger.rs"]
 mod ledger;
-use ledger::{Action, Directory, Evidence, Frozen, Journal, Plan, IDS, ROLES};
+use ledger::{Action, Directory, Evidence, Frozen, Journal, OwnedGrant, Owner, Plan, Role, IDS};
 
 #[derive(Parser)]
 #[command(about = "Explicit disposable Drive qualification; no default live action")]
@@ -64,11 +64,36 @@ enum Command {
     },
 }
 
-fn client(dir: &Directory, plan: &Plan, role: usize, deadline: Instant) -> Result<GoogleDrive> {
-    let mut client = GoogleDrive::open(dir.grant(role)?)?;
-    wire::verify_binding(&client, &plan.grants[role].binding_sha256, plan.group)?;
-    wire::set_window(&mut client, deadline, Arc::new(AtomicBool::new(false)));
-    Ok(client)
+struct Client<'a> {
+    drive: GoogleDrive,
+    grant: OwnedGrant<'a>,
+}
+
+fn client<'a>(
+    dir: &'a Directory,
+    plan: &Plan,
+    owner: Owner,
+    deadline: Instant,
+) -> Result<Client<'a>> {
+    let grant = dir.grant(owner)?;
+    let mut drive = GoogleDrive::open(grant.path.clone())?;
+    wire::verify_binding(&drive, &plan.owners.get(owner).binding_sha256, plan.group)?;
+    wire::set_window(&mut drive, deadline, Arc::new(AtomicBool::new(false)));
+    Ok(Client { drive, grant })
+}
+
+fn verify_acquisition(client: &Client<'_>, plan: &Plan, owner: Owner) -> Result<()> {
+    let acquisition = plan
+        .owners
+        .get(owner)
+        .acquisition
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing reviewed acquisition"))?;
+    ensure!(
+        client.grant.digest()? == acquisition.initial_grant_sha256,
+        "acquired grant changed"
+    );
+    Ok(())
 }
 
 fn allocate(root: &Path, approved: &str) -> Result<()> {
@@ -84,17 +109,22 @@ fn allocate(root: &Path, approved: &str) -> Result<()> {
         "allocation unavailable"
     );
     let deadline = ledger::deadline(plan.expires_unix)?;
-    let mut clients = (0..ROLES.len())
-        .map(|role| client(&dir, &plan, role, deadline))
-        .collect::<Result<Vec<_>>>()?;
-    check_role_bindings(&plan, &clients)?;
-    let allocator = &mut clients[0];
+    let mut host = client(&dir, &plan, Owner::Host, deadline)?;
+    let tablet = client(&dir, &plan, Owner::Tablet, deadline)?;
+    verify_acquisition(&host, &plan, Owner::Host)?;
+    verify_acquisition(&tablet, &plan, Owner::Tablet)?;
+    check_live_owners(&host.drive, &tablet.drive)?;
+    check_controls(&dir, &plan, &host.drive, deadline)?;
     let mut ids = Vec::<String>::new();
     dir.save("allocation.json", &ids)?;
-    let allocator_refreshed =
-        wire::authorize_refresh(allocator, plan.group, plan.grants[0].stimulate_refresh)?;
+    let allocator_refreshed = wire::authorize_refresh(
+        &mut host.drive,
+        plan.group,
+        plan.owners.host.stimulate_refresh,
+    )?;
+    check_live_owners(&host.drive, &tablet.drive)?;
     while ids.len() < IDS {
-        let id = allocator.allocate()?;
+        let id = host.drive.allocate()?;
         ensure!(!ids.contains(&id), "provider returned a duplicate ID");
         ids.push(id);
         dir.save("allocation.json", &ids)?;
@@ -103,6 +133,8 @@ fn allocate(root: &Path, approved: &str) -> Result<()> {
         plan,
         ids,
         allocator_refreshed,
+        allocation_host_sha256: host.grant.digest()?,
+        allocation_tablet_sha256: tablet.grant.digest()?,
     };
     frozen.validate()?;
     dir.save("journal.json", &Journal::default())?;
@@ -333,71 +365,76 @@ fn create_unique(run: &Run<'_>, client: &mut GoogleDrive, index: usize) -> Resul
     Ok(pointer)
 }
 
-fn check_role_bindings(plan: &Plan, clients: &[GoogleDrive]) -> Result<Vec<Evidence>> {
-    let mut evidence = Vec::new();
-    for left in 0..4 {
-        for right in left + 1..4 {
-            ensure!(
-                wire::same_account(&clients[left], &clients[right])
-                    && wire::independent_grants(&clients[left], &clients[right]),
-                "independent same-account grants required"
-            );
-            let shared = wire::same_registration(&clients[left], &clients[right]);
-            ensure!(
-                shared == (plan.grants[left].binding_sha256 == plan.grants[right].binding_sha256),
-                "registration mapping differs"
-            );
-            evidence.push(Evidence::Registration {
-                left,
-                right,
-                shared,
-            });
-        }
-    }
+fn check_live_owners(host: &GoogleDrive, tablet: &GoogleDrive) -> Result<()> {
     ensure!(
-        wire::same_registration(&clients[0], &clients[4])
-            && !wire::same_account(&clients[0], &clients[4])
-            && !wire::same_registration(&clients[0], &clients[5])
-            && wire::same_account(&clients[0], &clients[5]),
-        "changed account/application controls are not distinct"
+        wire::same_account(host, tablet)
+            && wire::same_registration(host, tablet)
+            && wire::independent_grants(host, tablet),
+        "independent same-account, same-registration grants required"
     );
-    Ok(evidence)
+    Ok(())
 }
 
-fn qualify_clients(run: &Run<'_>, clients: &mut [GoogleDrive]) -> Result<()> {
+fn check_controls(
+    dir: &Directory,
+    plan: &Plan,
+    host: &GoogleDrive,
+    deadline: Instant,
+) -> Result<()> {
+    let wrong_account = client(dir, plan, Owner::WrongAccount, deadline)?;
+    let wrong_client = client(dir, plan, Owner::WrongClient, deadline)?;
+    ensure!(
+        wire::same_registration(host, &wrong_account.drive)
+            && !wire::same_account(host, &wrong_account.drive)
+            && !wire::same_registration(host, &wrong_client.drive)
+            && wire::same_account(host, &wrong_client.drive),
+        "changed account/application controls are not distinct"
+    );
+    Ok(())
+}
+
+fn qualify_clients(
+    run: &Run<'_>,
+    host: &mut GoogleDrive,
+    tablet: &mut GoogleDrive,
+    deadline: Instant,
+) -> Result<()> {
     let frozen = run.frozen;
-    for event in check_role_bindings(&frozen.plan, clients)? {
-        run.evidence(event)?;
-    }
-    for (role, client) in clients[..4].iter_mut().enumerate() {
-        let stimulated = frozen.plan.grants[role].stimulate_refresh;
-        let refreshed = if role == 0 && frozen.allocator_refreshed {
+    check_live_owners(host, tablet)?;
+    check_controls(run.dir, &frozen.plan, host, deadline)?;
+    run.evidence(Evidence::Registration {})?;
+    for (owner, client) in [(Owner::Host, &mut *host), (Owner::Tablet, &mut *tablet)] {
+        let stimulated = frozen.plan.owners.get(owner).stimulate_refresh;
+        let refreshed = if owner == Owner::Host && frozen.allocator_refreshed {
             client.authorize(frozen.plan.group)?;
             true
         } else {
             wire::authorize_refresh(client, frozen.plan.group, stimulated)?
         };
         run.evidence(Evidence::Refresh {
-            role,
+            owner,
             stimulated,
             observed: refreshed,
         })?;
         ensure!(refreshed, "required refresh observation missing");
     }
-    Ok(())
+    check_live_owners(host, tablet)
 }
 
-fn race(run: &Run<'_>, clients: &mut [GoogleDrive], index: usize, deadline: Instant) -> Result<()> {
-    let end =
-        deadline.min(Instant::now() + Duration::from_millis(run.frozen.plan.rendezvous_millis));
-    let gate = Gate::new(end);
-    let (first, second) = clients.split_at_mut(3);
-    let (a, b) = (&mut first[0], &mut second[0]);
-    let (left, right) = thread::scope(|scope| {
-        let left = scope.spawn(|| run.contend(a, index, false, &gate));
-        let right = scope.spawn(|| run.contend(b, index, true, &gate));
-        (left.join(), right.join())
-    });
+fn race(run: &Run<'_>, index: usize, deadline: Instant) -> Result<()> {
+    let plan = &run.frozen.plan;
+    let (left, right) = {
+        let mut a = client(run.dir, plan, Frozen::owner(index, false), deadline)?;
+        let mut b = client(run.dir, plan, Frozen::owner(index, true), deadline)?;
+        check_live_owners(&a.drive, &b.drive)?;
+        let end = deadline.min(Instant::now() + Duration::from_millis(plan.rendezvous_millis));
+        let gate = Gate::new(end);
+        thread::scope(|scope| {
+            let left = scope.spawn(|| run.contend(&mut a.drive, index, false, &gate));
+            let right = scope.spawn(|| run.contend(&mut b.drive, index, true, &gate));
+            (left.join(), right.join())
+        })
+    };
     let (left_status, left) = left.map_err(|_| anyhow::anyhow!("contender failed"))??;
     let (right_status, right) = right.map_err(|_| anyhow::anyhow!("contender failed"))??;
     let second_won = match (left_status, right_status) {
@@ -418,18 +455,26 @@ fn race(run: &Run<'_>, clients: &mut [GoogleDrive], index: usize, deadline: Inst
             && (left.candidate_match, right.candidate_match) == expected,
         "contenders did not retain the same winner"
     );
-    let mut observer = client(run.dir, &run.frozen.plan, 0, deadline)?;
-    agreed(run.frozen, &mut observer, &winner)?;
-    *a = observer;
+    {
+        let mut observer = client(run.dir, plan, Owner::Host, deadline)?;
+        agreed(run.frozen, &mut observer.drive, &winner)?;
+    }
+    let winner_owner = Frozen::owner(index, second_won);
     run.evidence(Evidence::Race {
         sample: index + 1,
-        winner: if second_won { 3 } else { 0 },
+        winner: winner_owner,
     })?;
     if index == 0 {
-        let client = if second_won { b } else { a };
-        let prepared = run.prepare(client, &winner)?;
-        let (status, value) =
-            run.create(client, index, Action::WinnerReplay, &prepared, None, false);
+        let mut winner_client = client(run.dir, plan, winner_owner, deadline)?;
+        let prepared = run.prepare(&mut winner_client.drive, &winner)?;
+        let (status, value) = run.create(
+            &mut winner_client.drive,
+            index,
+            Action::WinnerReplay,
+            &prepared,
+            None,
+            false,
+        );
         ensure!(
             status == Some(409) && value?.pointer == winner,
             "same-ID replay evidence missing"
@@ -439,14 +484,18 @@ fn race(run: &Run<'_>, clients: &mut [GoogleDrive], index: usize, deadline: Inst
     Ok(())
 }
 
-fn controls(run: &Run<'_>, clients: &mut [GoogleDrive], deadline: Instant) -> Result<()> {
+fn controls(run: &Run<'_>, deadline: Instant) -> Result<()> {
     let frozen = run.frozen;
+    let plan = &frozen.plan;
     let original = frozen.resource(10, false)?.pointer()?;
-    let prepared = run.prepare(&mut clients[0], &original)?;
-    for control in &mut clients[4..] {
+    let mut host = client(run.dir, plan, Owner::Host, deadline)?;
+    let prepared = run.prepare(&mut host.drive, &original)?;
+    for owner in Owner::CONTROLS {
+        let mut control = client(run.dir, plan, owner, deadline)?;
         let expected = "prepared slot application/account mismatch";
         ensure!(
             control
+                .drive
                 .observe_prepared_slot(&prepared)
                 .err()
                 .is_some_and(|err| err.to_string() == expected),
@@ -454,7 +503,7 @@ fn controls(run: &Run<'_>, clients: &mut [GoogleDrive], deadline: Instant) -> Re
         );
     }
     run.evidence(Evidence::ChangedContext {})?;
-    let (status, result) = run.create(&mut clients[0], 10, Action::Original, &prepared, None, true);
+    let (status, result) = run.create(&mut host.drive, 10, Action::Original, &prepared, None, true);
     ensure!(
         status.is_some_and(success)
             && result
@@ -462,18 +511,25 @@ fn controls(run: &Run<'_>, clients: &mut [GoogleDrive], deadline: Instant) -> Re
                 .is_some_and(|err| err.to_string() == "qualification acknowledgement interrupted"),
         "lost acknowledgement boundary unresolved"
     );
-    clients[0] = client(run.dir, &frozen.plan, 0, deadline)?;
-    let observed = clients[0].observe_prepared_slot(&prepared)?;
-    ensure!(
-        observed.pointer == original && observed.candidate_match == PointerMatch::Same,
-        "original slot not recovered"
-    );
+    drop(host);
+    {
+        let mut observer = client(run.dir, plan, Owner::Host, deadline)?;
+        let observed = observer.drive.observe_prepared_slot(&prepared)?;
+        ensure!(
+            observed.pointer == original && observed.candidate_match == PointerMatch::Same,
+            "original slot not recovered"
+        );
+    }
     run.evidence(Evidence::LostAcknowledgement {})?;
 
-    for origin in 0..3 {
-        let pointer = create_unique(run, &mut clients[origin], 11 + origin)?;
-        for (reader, client) in clients[..3].iter_mut().enumerate() {
-            let exact = agreed(frozen, client, &pointer).is_ok();
+    for (index, origin) in Role::MATRIX.into_iter().enumerate() {
+        let pointer = {
+            let mut writer = client(run.dir, plan, origin.owner(), deadline)?;
+            create_unique(run, &mut writer.drive, 11 + index)?
+        };
+        for reader in Role::MATRIX {
+            let mut observer = client(run.dir, plan, reader.owner(), deadline)?;
+            let exact = agreed(frozen, &mut observer.drive, &pointer).is_ok();
             run.evidence(Evidence::Matrix {
                 origin,
                 reader,
@@ -486,7 +542,8 @@ fn controls(run: &Run<'_>, clients: &mut [GoogleDrive], deadline: Instant) -> Re
         }
     }
 
-    let client = &mut clients[0];
+    let mut host = client(run.dir, plan, Owner::Host, deadline)?;
+    let client = &mut host.drive;
     let absent = frozen.resource(25, false)?.pointer()?;
     ensure!(
         matches!(
@@ -531,9 +588,13 @@ fn execute_run(dir: &Directory, approved: &str) -> Result<()> {
     ensure!(sha == approved, "frozen run identity mismatch");
     journal.admit_run()?;
     let deadline = ledger::deadline(frozen.plan.expires_unix)?;
-    let mut clients = (0..ROLES.len())
-        .map(|role| client(dir, &frozen.plan, role, deadline))
-        .collect::<Result<Vec<_>>>()?;
+    let mut host = client(dir, &frozen.plan, Owner::Host, deadline)?;
+    let mut tablet = client(dir, &frozen.plan, Owner::Tablet, deadline)?;
+    ensure!(
+        host.grant.digest()? == frozen.allocation_host_sha256
+            && tablet.grant.digest()? == frozen.allocation_tablet_sha256,
+        "allocation grant custody changed"
+    );
     let run = Run {
         dir,
         frozen: &frozen,
@@ -543,14 +604,17 @@ fn execute_run(dir: &Directory, approved: &str) -> Result<()> {
         j.started = true;
         Ok(())
     })?;
-    qualify_clients(&run, &mut clients)?;
+    qualify_clients(&run, &mut host.drive, &mut tablet.drive, deadline)?;
+    drop(host);
+    drop(tablet);
     for index in 18..25 {
-        run.stage(&mut clients[Frozen::owner(index, false)], index)?;
+        let mut writer = client(dir, &frozen.plan, Frozen::owner(index, false), deadline)?;
+        run.stage(&mut writer.drive, index)?;
     }
     for index in 0..10 {
-        race(&run, &mut clients, index, deadline)?;
+        race(&run, index, deadline)?;
     }
-    controls(&run, &mut clients, deadline)?;
+    controls(&run, deadline)?;
     ensure!(Instant::now() < deadline, "qualification deadline elapsed");
     run.update(|j| {
         j.passed = true;
@@ -605,9 +669,9 @@ fn follow_up(dir: &Directory, approved: &str, until: u64, cleanup: Option<&str>)
                 let mut client =
                     client(dir, &frozen.plan, Frozen::owner(index, contender), deadline)?;
                 let resource = frozen.resource(index, contender)?;
-                if wire::presence(&mut client, &resource)? == wire::Presence::Exact {
+                if wire::presence(&mut client.drive, &resource)? == wire::Presence::Exact {
                     let verified =
-                        cleanup.is_none() || wire::delete_verified(&mut client, &resource)?;
+                        cleanup.is_none() || wire::delete_verified(&mut client.drive, &resource)?;
                     return Ok(verified.then_some(action));
                 }
             }
@@ -634,6 +698,8 @@ fn follow_up(dir: &Directory, approved: &str, until: u64, cleanup: Option<&str>)
 
 fn report(dir: &Directory) -> Result<()> {
     if !dir.exists("frozen.json") && dir.exists("allocation.json") {
+        let (plan, _): (Plan, _) = dir.load("plan.json")?;
+        plan.validate()?;
         let (ids, _): (Vec<String>, _) = dir.load("allocation.json")?;
         ensure!(ids.len() <= IDS, "invalid qualification allocation");
         println!("allocation incomplete; {} IDs recorded", ids.len());

@@ -9,18 +9,72 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
-pub const ROLES: [&str; 6] = [
-    "browser",
-    "electron",
-    "tablet",
-    "contender",
-    "wrong-account",
-    "wrong-client",
-];
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Owner {
+    Host,
+    Tablet,
+    WrongAccount,
+    WrongClient,
+}
+
+impl Owner {
+    pub const LIVE: [Self; 2] = [Self::Host, Self::Tablet];
+    pub const CONTROLS: [Self; 2] = [Self::WrongAccount, Self::WrongClient];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Tablet => "tablet",
+            Self::WrongAccount => "wrong-account",
+            Self::WrongClient => "wrong-client",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Host => 0,
+            Self::Tablet => 1,
+            Self::WrongAccount => 2,
+            Self::WrongClient => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Browser,
+    Electron,
+    Tablet,
+    Contender,
+}
+
+impl Role {
+    pub const MATRIX: [Self; 3] = [Self::Browser, Self::Electron, Self::Tablet];
+
+    pub fn owner(self) -> Owner {
+        match self {
+            Self::Browser | Self::Electron => Owner::Host,
+            Self::Tablet | Self::Contender => Owner::Tablet,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Browser => "browser",
+            Self::Electron => "electron",
+            Self::Tablet => "tablet",
+            Self::Contender => "contender",
+        }
+    }
+}
+
 pub const IDS: usize = 27;
 const META_MAX: usize = 8 * 1024;
 const MAX_BODY: usize = 344 * 1024;
@@ -37,7 +91,27 @@ pub struct Plan {
     pub expires_unix: u64,
     pub request_seconds: u64,
     pub rendezvous_millis: u64,
-    pub grants: [Grant; 6],
+    pub owners: Owners,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Owners {
+    pub host: Grant,
+    pub tablet: Grant,
+    pub wrong_account: Grant,
+    pub wrong_client: Grant,
+}
+
+impl Owners {
+    pub fn get(&self, owner: Owner) -> &Grant {
+        match owner {
+            Owner::Host => &self.host,
+            Owner::Tablet => &self.tablet,
+            Owner::WrongAccount => &self.wrong_account,
+            Owner::WrongClient => &self.wrong_client,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,12 +119,33 @@ pub struct Plan {
 pub struct Grant {
     pub binding_sha256: String,
     pub stimulate_refresh: bool,
+    pub acquisition: Option<Acquisition>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Acquisition {
+    pub issuance: Uuid,
+    pub evidence_sha256: String,
+    pub initial_grant_sha256: String,
+    pub audience_verified: bool,
+    pub appdata_only_verified: bool,
+}
+
+impl Acquisition {
+    fn valid(&self) -> bool {
+        !self.issuance.is_nil()
+            && hex(&self.evidence_sha256, 64)
+            && hex(&self.initial_grant_sha256, 64)
+            && self.audience_verified
+            && self.appdata_only_verified
+    }
 }
 
 impl Plan {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.version == 1
+            self.version == 2
                 && !self.run.is_nil()
                 && !self.group.is_nil()
                 && self.run != self.group
@@ -58,10 +153,30 @@ impl Plan {
                 && hex(&self.docs_revision, 40)
                 && self.request_seconds == 10
                 && (1..=10_000).contains(&self.rendezvous_millis)
-                && self.grants.iter().all(|g| hex(&g.binding_sha256, 64))
-                && self.grants[3].binding_sha256 == self.grants[0].binding_sha256
-                && self.grants[4..].iter().all(|g| !g.stimulate_refresh),
+                && Owner::LIVE
+                    .into_iter()
+                    .chain(Owner::CONTROLS)
+                    .all(|owner| hex(&self.owners.get(owner).binding_sha256, 64))
+                && self.owners.host.binding_sha256 == self.owners.tablet.binding_sha256
+                && Owner::CONTROLS.into_iter().all(|owner| {
+                    let g = self.owners.get(owner);
+                    !g.stimulate_refresh && g.acquisition.is_none()
+                }),
             "invalid qualification plan"
+        );
+        let (Some(host), Some(tablet)) = (
+            &self.owners.host.acquisition,
+            &self.owners.tablet.acquisition,
+        ) else {
+            anyhow::bail!("missing reviewed acquisition");
+        };
+        ensure!(
+            host.valid()
+                && tablet.valid()
+                && host.issuance != tablet.issuance
+                && host.evidence_sha256 != tablet.evidence_sha256
+                && host.initial_grant_sha256 != tablet.initial_grant_sha256,
+            "invalid independent acquisition evidence"
         );
         Ok(())
     }
@@ -101,6 +216,8 @@ pub struct Frozen {
     pub plan: Plan,
     pub ids: Vec<String>,
     pub allocator_refreshed: bool,
+    pub allocation_host_sha256: String,
+    pub allocation_tablet_sha256: String,
 }
 
 impl Frozen {
@@ -110,6 +227,9 @@ impl Frozen {
         ensure!(
             unique.len() == IDS
                 && self.ids.len() == IDS
+                && hex(&self.allocation_host_sha256, 64)
+                && hex(&self.allocation_tablet_sha256, 64)
+                && self.allocation_host_sha256 != self.allocation_tablet_sha256
                 && self.ids.iter().all(|id| !id.is_empty()
                     && id.len() <= 111
                     && id
@@ -138,13 +258,13 @@ impl Frozen {
         self.resource(index, false)
     }
 
-    pub fn owner(index: usize, contender: bool) -> usize {
+    pub fn owner(index: usize, contender: bool) -> Owner {
         match index {
-            11..=13 => index - 11,
-            20..=22 => index - 20,
-            19 => 3,
-            0..=9 if contender => 3,
-            _ => 0,
+            11..=13 => Role::MATRIX[index - 11].owner(),
+            20..=22 => Role::MATRIX[index - 20].owner(),
+            19 => Role::Contender.owner(),
+            0..=9 if contender => Role::Contender.owner(),
+            _ => Owner::Host,
         }
     }
 }
@@ -170,26 +290,22 @@ impl Action {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Evidence {
-    Registration {
-        left: usize,
-        right: usize,
-        shared: bool,
-    },
+    Registration {},
     Refresh {
-        role: usize,
+        owner: Owner,
         stimulated: bool,
         observed: bool,
     },
     Race {
         sample: usize,
-        winner: usize,
+        winner: Owner,
     },
     Replay {},
     ChangedContext {},
     LostAcknowledgement {},
     Matrix {
-        origin: usize,
-        reader: usize,
+        origin: Role,
+        reader: Role,
         exact: bool,
     },
     Negative {
@@ -201,23 +317,16 @@ pub enum Evidence {
 impl Evidence {
     pub fn label(&self) -> String {
         match *self {
-            Self::Registration {
-                left,
-                right,
-                shared,
-            } => format!(
-                "registration {} {} shared={shared}",
-                ROLES[left], ROLES[right]
-            ),
+            Self::Registration {} => "registration host tablet shared=true".into(),
             Self::Refresh {
-                role,
+                owner,
                 stimulated,
                 observed,
             } => format!(
                 "refresh {} stimulated={stimulated} observed={observed}",
-                ROLES[role]
+                owner.label()
             ),
-            Self::Race { sample, winner } => format!("race {sample} winner {}", ROLES[winner]),
+            Self::Race { sample, winner } => format!("race {sample} winner {}", winner.label()),
             Self::Replay {} => "winner replay conflict".into(),
             Self::ChangedContext {} => "changed account and client refused".into(),
             Self::LostAcknowledgement {} => {
@@ -229,8 +338,11 @@ impl Evidence {
                 exact,
             } => {
                 format!(
-                    "matrix {} -> {} exact={exact}",
-                    ROLES[origin], ROLES[reader]
+                    "matrix {}({}) -> {}({}) exact={exact}",
+                    origin.label(),
+                    origin.owner().label(),
+                    reader.label(),
+                    reader.owner().label()
                 )
             }
             Self::Negative { index } => format!("negative resource {index} refused"),
@@ -240,10 +352,13 @@ impl Evidence {
 
     fn valid(&self) -> bool {
         match *self {
-            Self::Registration { left, right, .. } => left < right && right < 4,
-            Self::Refresh { role, .. } => role < 4,
-            Self::Race { sample, winner } => (1..=10).contains(&sample) && matches!(winner, 0 | 3),
-            Self::Matrix { origin, reader, .. } => origin < 3 && reader < 3,
+            Self::Refresh { owner, .. } => Owner::LIVE.contains(&owner),
+            Self::Race { sample, winner } => {
+                (1..=10).contains(&sample) && Owner::LIVE.contains(&winner)
+            }
+            Self::Matrix { origin, reader, .. } => {
+                Role::MATRIX.contains(&origin) && Role::MATRIX.contains(&reader)
+            }
             Self::Negative { index } => (14..=16).contains(&index),
             _ => true,
         }
@@ -358,6 +473,24 @@ impl Journal {
 pub struct Directory {
     root: PathBuf,
     _lock: File,
+    owner_leases: [AtomicBool; 4],
+}
+
+pub struct OwnedGrant<'a> {
+    pub path: PathBuf,
+    lease: &'a AtomicBool,
+}
+
+impl OwnedGrant<'_> {
+    pub fn digest(&self) -> Result<String> {
+        Ok(digest(&files::read(&self.path, MAX_JSON)?))
+    }
+}
+
+impl Drop for OwnedGrant<'_> {
+    fn drop(&mut self) {
+        self.lease.store(false, Ordering::Release);
+    }
 }
 
 impl Directory {
@@ -401,14 +534,23 @@ impl Directory {
             Ok(Self {
                 root: root.to_owned(),
                 _lock: lock,
+                owner_leases: Default::default(),
             })
         }
     }
 
-    pub fn grant(&self, role: usize) -> Result<PathBuf> {
-        let path = self.root.join(format!("{}.json", ROLES[role]));
-        files::safe_path(&path)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
+    pub fn grant(&self, owner: Owner) -> Result<OwnedGrant<'_>> {
+        let lease = &self.owner_leases[owner.index()];
+        ensure!(
+            !lease.swap(true, Ordering::Acquire),
+            "qualification credential owner is busy"
+        );
+        let grant = OwnedGrant {
+            path: self.root.join(format!("{}.json", owner.label())),
+            lease,
+        };
+        files::safe_path(&grant.path)?;
+        let metadata = std::fs::symlink_metadata(&grant.path)?;
         ensure!(metadata.is_file(), "grant must be a dedicated regular file");
         #[cfg(unix)]
         {
@@ -418,7 +560,7 @@ impl Directory {
                 "grant must be private and dedicated"
             );
         }
-        Ok(path)
+        Ok(grant)
     }
 
     pub fn exists(&self, name: &str) -> bool {
@@ -453,6 +595,140 @@ impl Directory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plan() -> Plan {
+        let live = |id, evidence: &str, grant: &str| Grant {
+            binding_sha256: "3".repeat(64),
+            stimulate_refresh: true,
+            acquisition: Some(Acquisition {
+                issuance: Uuid::from_u128(id),
+                evidence_sha256: evidence.repeat(64),
+                initial_grant_sha256: grant.repeat(64),
+                audience_verified: true,
+                appdata_only_verified: true,
+            }),
+        };
+        let control = |binding: &str| Grant {
+            binding_sha256: binding.repeat(64),
+            stimulate_refresh: false,
+            acquisition: None,
+        };
+        Plan {
+            version: 2,
+            run: Uuid::from_u128(1),
+            group: Uuid::from_u128(2),
+            buddy_revision: "1".repeat(40),
+            docs_revision: "2".repeat(40),
+            expires_unix: 0,
+            request_seconds: 10,
+            rendezvous_millis: 100,
+            owners: Owners {
+                host: live(3, "4", "5"),
+                tablet: live(4, "6", "7"),
+                wrong_account: control("8"),
+                wrong_client: control("9"),
+            },
+        }
+    }
+
+    #[test]
+    fn closed_v2_requires_independent_verified_acquisition() {
+        let approved = plan();
+        approved.validate().unwrap();
+        let validate_mutation = |change: fn(&mut Plan)| {
+            let mut candidate = approved.clone();
+            change(&mut candidate);
+            assert!(candidate.validate().is_err());
+        };
+        validate_mutation(|p| p.version = 1);
+        validate_mutation(|p| p.owners.tablet.binding_sha256 = "b".repeat(64));
+        validate_mutation(|p| p.owners.tablet.acquisition = None);
+        validate_mutation(|p| p.owners.wrong_client.stimulate_refresh = true);
+        validate_mutation(|p| {
+            p.owners.wrong_account.acquisition = p.owners.host.acquisition.clone()
+        });
+        validate_mutation(|p| {
+            p.owners
+                .host
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .audience_verified = false
+        });
+        validate_mutation(|p| {
+            p.owners
+                .tablet
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .appdata_only_verified = false
+        });
+        validate_mutation(|p| {
+            p.owners.tablet.acquisition.as_mut().unwrap().issuance =
+                p.owners.host.acquisition.as_ref().unwrap().issuance
+        });
+        validate_mutation(|p| {
+            p.owners
+                .tablet
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .evidence_sha256 = p
+                .owners
+                .host
+                .acquisition
+                .as_ref()
+                .unwrap()
+                .evidence_sha256
+                .clone()
+        });
+        validate_mutation(|p| {
+            p.owners
+                .tablet
+                .acquisition
+                .as_mut()
+                .unwrap()
+                .initial_grant_sha256 = p
+                .owners
+                .host
+                .acquisition
+                .as_ref()
+                .unwrap()
+                .initial_grant_sha256
+                .clone()
+        });
+
+        let mut legacy = serde_json::to_value(&approved).unwrap();
+        legacy.as_object_mut().unwrap().remove("owners");
+        legacy["version"] = 1.into();
+        legacy["grants"] = serde_json::to_value(vec![
+            serde_json::json!({"binding_sha256": "3".repeat(64), "stimulate_refresh": false});
+            6
+        ])
+        .unwrap();
+        assert!(serde_json::from_value::<Plan>(legacy).is_err());
+    }
+
+    #[test]
+    fn original_resource_inventory_maps_to_two_owners() {
+        assert_eq!(
+            Role::MATRIX.map(Role::owner),
+            [Owner::Host, Owner::Host, Owner::Tablet]
+        );
+        assert_eq!(Role::Contender.owner(), Owner::Tablet);
+        assert_eq!(IDS, 27);
+        for index in 0..25 {
+            let owner = if matches!(index, 13 | 19 | 22) {
+                Owner::Tablet
+            } else {
+                Owner::Host
+            };
+            assert_eq!(Frozen::owner(index, false), owner);
+            if index < 10 {
+                assert_eq!(Frozen::owner(index, true), Owner::Tablet);
+            }
+        }
+    }
 
     #[test]
     fn reserve_enforces_action_identity_and_encoded_limits() {
@@ -491,8 +767,8 @@ mod tests {
             serde_json::from_str::<Evidence>(r#"{"kind":"replay","token":"private"}"#).is_err()
         );
         journal.evidence.push(Evidence::Matrix {
-            origin: 0,
-            reader: 6,
+            origin: Role::Browser,
+            reader: Role::Contender,
             exact: false,
         });
         assert!(journal.validate().is_err());
@@ -501,6 +777,10 @@ mod tests {
     #[cfg(unix)]
     mod unix {
         use super::*;
+        use crate::{check_live_owners, client, verify_acquisition};
+        use remarkable_reader_buddy::storage::drive::{
+            qualification as wire, Credentials, GoogleDrive, APP_SCOPE,
+        };
         use std::{
             fs,
             os::unix::fs::{symlink, DirBuilderExt, PermissionsExt},
@@ -525,7 +805,10 @@ mod tests {
                     "qualification.lock",
                     "frozen.json",
                     "journal.json",
-                    "browser.json",
+                    "host.json",
+                    "tablet.json",
+                    "wrong-account.json",
+                    "wrong-client.json",
                     "synthetic.json",
                 ] {
                     let _ = fs::remove_file(self.0.join(name));
@@ -557,22 +840,11 @@ mod tests {
             let scratch = Scratch::new();
             let owner = Directory::open(&scratch.0).unwrap();
             let frozen = Frozen {
-                plan: Plan {
-                    version: 1,
-                    run: Uuid::from_u128(1),
-                    group: Uuid::from_u128(2),
-                    buddy_revision: "1".repeat(40),
-                    docs_revision: "2".repeat(40),
-                    expires_unix: 0,
-                    request_seconds: 10,
-                    rendezvous_millis: 100,
-                    grants: std::array::from_fn(|_| Grant {
-                        binding_sha256: "3".repeat(64),
-                        stimulate_refresh: false,
-                    }),
-                },
+                plan: plan(),
                 ids: (0..IDS).map(|index| format!("synthetic-{index}")).collect(),
                 allocator_refreshed: false,
+                allocation_host_sha256: "5".repeat(64),
+                allocation_tablet_sha256: "7".repeat(64),
             };
             let mut journal = Journal::default();
             journal.admit_run().unwrap();
@@ -601,24 +873,107 @@ mod tests {
             let scratch = Scratch::new();
             let owner = Directory::open(&scratch.0).unwrap();
             let target = scratch.0.join("synthetic.json");
-            let grant = scratch.0.join("browser.json");
+            let grant = scratch.0.join("host.json");
             owner
                 .save("synthetic.json", &"synthetic test bytes")
                 .unwrap();
 
             symlink(&target, &grant).unwrap();
-            assert!(owner.grant(0).is_err());
+            assert!(owner.grant(Owner::Host).is_err());
             fs::remove_file(&grant).unwrap();
 
             fs::hard_link(&target, &grant).unwrap();
-            assert!(owner.grant(0).is_err());
+            assert!(owner.grant(Owner::Host).is_err());
             fs::remove_file(&grant).unwrap();
 
             fs::rename(&target, &grant).unwrap();
             fs::set_permissions(&grant, fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(owner.grant(0).is_err());
+            assert!(owner.grant(Owner::Host).is_err());
             fs::set_permissions(&grant, fs::Permissions::from_mode(0o600)).unwrap();
-            assert_eq!(owner.grant(0).unwrap(), grant);
+            assert_eq!(owner.grant(Owner::Host).unwrap().path, grant);
+        }
+
+        #[test]
+        fn serial_views_reopen_the_rotated_owner_and_keep_the_other_file() {
+            let scratch = Scratch::new();
+            let directory = Directory::open(&scratch.0).unwrap();
+            let mut plan = plan();
+            let grant_for = |suffix: &str| Credentials {
+                credential_version: 1,
+                client_id: "synthetic-client".into(),
+                client_secret: None,
+                access_token: format!("synthetic-access-{suffix}"),
+                refresh_token: format!("synthetic-refresh-{suffix}"),
+                expires_at: 1,
+                scopes: vec![APP_SCOPE.into()],
+                account_permission_id: "synthetic-account".into(),
+                collection: plan.group,
+            };
+            let first_host = grant_for("host");
+            let first_tablet = grant_for("tablet");
+            let rotated_host = grant_for("host-rotated");
+            let host_path = scratch.0.join("host.json");
+            directory.save("host.json", &first_host).unwrap();
+            directory.save("tablet.json", &first_tablet).unwrap();
+            // Immutable synthetic comparison value. All mutable sessions use
+            // the exclusive owner path, including the test's rotation write.
+            let old_host = GoogleDrive::open(host_path.clone()).unwrap();
+            let binding = digest(
+                &serde_json::to_vec(&(
+                    &first_host.client_id,
+                    &first_host.account_permission_id,
+                    plan.group,
+                ))
+                .unwrap(),
+            );
+            plan.owners.host.binding_sha256 = binding.clone();
+            plan.owners.tablet.binding_sha256 = binding;
+            for owner in Owner::LIVE {
+                let digest = directory.grant(owner).unwrap().digest().unwrap();
+                let grant = if owner == Owner::Host {
+                    &mut plan.owners.host
+                } else {
+                    &mut plan.owners.tablet
+                };
+                grant.acquisition.as_mut().unwrap().initial_grant_sha256 = digest;
+            }
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let browser = client(&directory, &plan, Role::Browser.owner(), deadline).unwrap();
+            let tablet = client(&directory, &plan, Role::Tablet.owner(), deadline).unwrap();
+            verify_acquisition(&browser, &plan, Owner::Host).unwrap();
+            verify_acquisition(&tablet, &plan, Owner::Tablet).unwrap();
+            check_live_owners(&browser.drive, &tablet.drive).unwrap();
+            assert!(client(&directory, &plan, Role::Electron.owner(), deadline).is_err());
+            assert!(client(&directory, &plan, Role::Contender.owner(), deadline).is_err());
+            directory.save("host.json", &rotated_host).unwrap();
+            drop(browser);
+            drop(tablet);
+
+            let electron = client(&directory, &plan, Role::Electron.owner(), deadline).unwrap();
+            let tablet = client(&directory, &plan, Role::Tablet.owner(), deadline).unwrap();
+            assert!(wire::independent_grants(&old_host, &electron.drive));
+            assert!(verify_acquisition(&electron, &plan, Owner::Host).is_err());
+            verify_acquisition(&tablet, &plan, Owner::Tablet).unwrap();
+            check_live_owners(&electron.drive, &tablet.drive).unwrap();
+            drop(electron);
+            drop(tablet);
+
+            // Same-binding files still need independent grants.
+            directory.save("tablet.json", &rotated_host).unwrap();
+            let host = client(&directory, &plan, Owner::Host, deadline).unwrap();
+            let tablet = client(&directory, &plan, Owner::Tablet, deadline).unwrap();
+            assert!(check_live_owners(&host.drive, &tablet.drive).is_err());
+            drop(host);
+            drop(tablet);
+            let mut excessive_scope = first_host;
+            excessive_scope
+                .scopes
+                .push("synthetic-unapproved-scope".into());
+            directory.save("host.json", &excessive_scope).unwrap();
+            assert!(client(&directory, &plan, Owner::Host, deadline).is_err());
+            directory.save("host.json", &rotated_host).unwrap();
+            // A failed open also retires its owner lease.
+            assert!(client(&directory, &plan, Owner::Host, deadline).is_ok());
         }
     }
 }
