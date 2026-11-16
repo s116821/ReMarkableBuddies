@@ -462,6 +462,60 @@ impl Samples {
         current: &[SourceEntry],
         deadline: Instant,
     ) -> Result<()> {
+        self.verify_owned_page_edit(
+            policy,
+            plan,
+            target,
+            old_rm_bytes,
+            old_thumbnail_bytes,
+            source,
+            original,
+            current,
+            deadline,
+            true,
+        )
+    }
+    #[cfg(buddy_development_native_composer)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn verify_composer_edit(
+        &self,
+        policy: &OpeningMetadata,
+        plan: &CapturePlan,
+        target: &str,
+        old_rm_bytes: u64,
+        old_thumbnail_bytes: u64,
+        source: &Path,
+        original: &[SourceEntry],
+        current: &[SourceEntry],
+        deadline: Instant,
+    ) -> Result<()> {
+        self.verify_owned_page_edit(
+            policy,
+            plan,
+            target,
+            old_rm_bytes,
+            old_thumbnail_bytes,
+            source,
+            original,
+            current,
+            deadline,
+            false,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn verify_owned_page_edit(
+        &self,
+        policy: &OpeningMetadata,
+        plan: &CapturePlan,
+        target: &str,
+        old_rm_bytes: u64,
+        old_thumbnail_bytes: u64,
+        source: &Path,
+        original: &[SourceEntry],
+        current: &[SourceEntry],
+        deadline: Instant,
+        require_stroke_growth: bool,
+    ) -> Result<()> {
         ensure!(
             target == plan.page && original.len() == current.len(),
             "reuse must preserve current target and complete inventory"
@@ -500,17 +554,18 @@ impl Samples {
             pins.push(pin);
         }
         ensure!(
-            sizes[0] > i128::from(old_rm_bytes)
-                && original
-                    .iter()
-                    .find(|entry| entry.path == paths[0])
-                    .context("original reused target absent")?
-                    .sha256
-                    != current
+            !require_stroke_growth
+                || (sizes[0] > i128::from(old_rm_bytes)
+                    && original
                         .iter()
                         .find(|entry| entry.path == paths[0])
-                        .context("current reused target absent")?
-                        .sha256,
+                        .context("original reused target absent")?
+                        .sha256
+                        != current
+                            .iter()
+                            .find(|entry| entry.path == paths[0])
+                            .context("current reused target absent")?
+                            .sha256),
             "reuse pen must change/grow native target stroke data"
         );
         let content = &self
@@ -555,7 +610,7 @@ impl Samples {
             - policy.content.len() as i128
             + metadata.len() as i128
             - policy.metadata.len() as i128;
-        ensure!(delta > 0 && i128::from(decimal(string(&new_content, "/sizeInBytes")?)?) - i128::from(decimal(string(&old_content, "/sizeInBytes")?)?) == delta, "reuse sizeInBytes must account exactly for target files and document JSON byte changes");
+        ensure!((!require_stroke_growth || delta > 0) && i128::from(decimal(string(&new_content, "/sizeInBytes")?)?) - i128::from(decimal(string(&old_content, "/sizeInBytes")?)?) == delta, "owned page edit sizeInBytes must account exactly for target files and document JSON byte changes");
         let old_stamp = string(&old_content, "/cPages/lastOpened/timestamp")?
             .split_once(':')
             .context("invalid reuse baseline stamp")?;

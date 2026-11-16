@@ -28,6 +28,8 @@ const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
+#[cfg(buddy_development_native_composer)]
+pub mod composer;
 pub mod effect;
 pub mod opening;
 pub mod setup;
@@ -705,6 +707,16 @@ impl Context {
         let base = source_root(self.candidate.kind, &self.nonce);
         let current = inventory(&base, deadline)?;
         let samples = opening::Samples::read(plan, &base, &self.root, label, &current, deadline)?;
+        #[cfg(buddy_development_native_composer)]
+        if let Some(selection) = composer::Selection::load(self, deadline)? {
+            // Only the separately admitted exact composer page may change.
+            // Recovery still runs even when this evidence validation refuses.
+            if present(&self.root.join("composer.admitted"))? {
+                selection.preserve(self, &samples, policy, plan, &current, deadline)?;
+                mailbox.current()?;
+                return self.current(deadline);
+            }
+        }
         let effect_selection = effect::Selection::load(self, deadline)?;
         let inserted_target = effect_selection
             .as_ref()
@@ -1278,11 +1290,24 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     // A separately bound development sidecar may declare exactly one own
     // gesture. Ordinary capture keeps its original continuous quiet guard.
     let mut effect_handoff = effect::ActorHandoff::load(&context, deadline)?;
+    #[cfg(buddy_development_native_composer)]
+    let mut composer_handoff = composer::ActorHandoff::load(&context, deadline)?;
     // PID1's control-group termination remains responsible for descendants after
     // any controller error, including failure before the child identity is saved.
     loop {
         context.current(deadline)?;
-        if let Some(handoff) = &mut effect_handoff {
+        #[cfg(buddy_development_native_composer)]
+        let composer_owns_input = if let Some(handoff) = &mut composer_handoff {
+            handoff.poll(&context, child.id(), &mut input, deadline)?;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(buddy_development_native_composer))]
+        let composer_owns_input = false;
+        if composer_owns_input {
+            // The cfg-selected composer handoff performed its own admission.
+        } else if let Some(handoff) = &mut effect_handoff {
             handoff.poll(&context, child.id(), &mut input, deadline)?;
         } else {
             quiet(&mut input)?;
