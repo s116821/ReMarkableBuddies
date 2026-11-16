@@ -7,6 +7,10 @@ use std::{fs, path::PathBuf, sync::Arc};
 #[path = "tests_selection.rs"]
 mod selection;
 
+#[cfg(buddy_development_native_composer)]
+#[path = "tests_composer.rs"]
+mod composer_controls;
+
 fn id(n: u32) -> SdkUuid {
     SdkUuid::parse(&format!("00000000-0000-0000-0000-{n:012x}")).unwrap()
 }

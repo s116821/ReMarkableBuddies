@@ -167,6 +167,35 @@ jobs:
           source_sha: ${{ github.sha }}
           source_head: ${{ github.event.pull_request.head.sha || github.sha }}
           cargo_messages: ${{ runner.temp }}/current-cargo-test.jsonl
+      - name: Check out the pinned development composer SDK
+        uses: actions/checkout@3d3c42e5aac5ba805925da76410c181273ba90b1
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
+        with:
+          repository: s116821/ReMarkableOpenSDK
+          ref: 72087c9ff95b80ac6d0a312750f131810f5feb52
+          path: .native-composer-sdk
+          persist-credentials: false
+      - name: Check the development composer consumer against the pinned SDK
+        if: (needs.title.outputs.application == 'true' || steps.paths.outputs.application == 'true') && github.event_name == 'pull_request'
+        env:
+          RUSTFLAGS: --cfg buddy_development_native_composer
+          CARGO_TARGET_DIR: ${{ runner.temp }}/native-composer-target
+        run: |
+          sdk="$GITHUB_WORKSPACE/.native-composer-sdk"
+          patch="patch.\"https://github.com/s116821/ReMarkableOpenSDK\".remarkable-open-sdk.path=\"$sdk\""
+          features=development-resident-bootstrap,remarkable-open-sdk/development-composer-v1
+          ordinary_lock="$RUNNER_TEMP/native-composer-Cargo.ordinary.lock"
+          cp Cargo.lock "$ordinary_lock"
+          trap 'cp "$ordinary_lock" Cargo.lock' EXIT
+          # Resolve the path patch once in this checkout. The ordinary lock is restored on exit.
+          cargo metadata --format-version 1 --config "$patch" --features "$features" |
+            jq -e --arg manifest "$sdk/Cargo.toml" '
+              [.packages[] | select(.name == "remarkable-open-sdk") | [.source, .manifest_path]] == [[null, $manifest]]
+            ' >/dev/null
+          cargo test --locked --lib composer_controls --config "$patch" --features "$features" |
+            tee "$RUNNER_TEMP/native-composer-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/native-composer-tests.log"
+          cargo clippy --locked --lib --config "$patch" --features "$features" -- -D warnings
     defaults:
       run:
         shell: bash
