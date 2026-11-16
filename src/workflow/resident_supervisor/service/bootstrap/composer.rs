@@ -305,6 +305,51 @@ impl ObserverPermit {
     pub fn actor_fixed_input(&self) -> bool {
         self.selection.wire.input_mode == InputMode::ActorFixed
     }
+    pub fn wait_typing_complete(
+        &self,
+        cue_sha256: &str,
+        expires_monotonic_ns: u64,
+        deadline: Instant,
+        pulse: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            self.actor_fixed_input(),
+            "fixed typing completion without selected mode"
+        );
+        digest(cue_sha256)?;
+        loop {
+            check(deadline)?;
+            pulse()?;
+            self.selection.pin.current()?;
+            ensure!(
+                monotonic_ns()? < expires_monotonic_ns,
+                "original typing cue expired before actor completion"
+            );
+            let marker = self.root.join("composer.typing-complete.ready");
+            if present(&marker)? {
+                let (marker_pin, marker_bytes) = read_pin(&marker, deadline)?;
+                ensure!(
+                    marker_bytes.is_empty(),
+                    "invalid typing completion publication"
+                );
+                let (pin, bytes) = read_pin(&self.root.join("composer.typing-complete"), deadline)?;
+                ensure!(
+                    bytes.len() <= 4096 && sha(&bytes) == cue_sha256,
+                    "actor typing completion differs from original cue"
+                );
+                pin.current()?;
+                marker_pin.current()?;
+                pulse()?;
+                check(deadline)?;
+                ensure!(
+                    monotonic_ns()? < expires_monotonic_ns,
+                    "original typing cue expired during completion read"
+                );
+                return Ok(());
+            }
+            pace(deadline);
+        }
+    }
     pub fn new(
         name: &str,
         candidate: &str,

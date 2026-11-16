@@ -140,6 +140,7 @@ struct Trial<'a> {
     input: &'a mut TrialInput,
     cue_binding: ComposerBinding,
     actor_fixed: bool,
+    typing_cue: Option<(String, u64)>,
 }
 struct TrialInput {
     quiet: Option<RequestInput>,
@@ -451,8 +452,9 @@ impl Trial<'_> {
             "native_expiry_ns":receipt.expiry_ns,"text":TEXT,
             "diagnostic_key":"Return once; ordinary newline is preserved",
             "live_lease_or_submit_claim":false});
-        file.write_all(&serde_json::to_vec_pretty(&value)?)?;
-        file.write_all(b"\n")?;
+        let mut bytes = serde_json::to_vec_pretty(&value)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
         file.sync_all()?;
         File::open(self.root)?.sync_all()?;
         // Slow rebinding, service checks or staging fsync must not turn a valid
@@ -462,6 +464,7 @@ impl Trial<'_> {
         receipt.current()?;
         fs::hard_link(&staged, &ready)?;
         File::open(self.root)?.sync_all()?;
+        self.typing_cue = Some((format!("{:x}", Sha256::digest(&bytes)), receipt.expiry_ns));
         println!("composer_trial_evidence={}", ready.display());
         Ok(())
     }
@@ -620,6 +623,7 @@ fn execute(
         input,
         cue_binding: permit.cue_binding(),
         actor_fixed: permit.actor_fixed_input(),
+        typing_cue: None,
     };
     trial.check(overall)?;
     ensure!(
@@ -637,7 +641,7 @@ fn execute(
         serde_json::json!({"schema":1,"conversation":conversation.to_string(),
         "candidate_sha256":setup.candidate_sha256,"text":TEXT,"native_selection_qualified":false,
         "input_mode":if trial.actor_fixed {"actor_fixed"} else {"manual"},
-        "actor_fixed_instructions":"Only when actor_fixed is selected: do not type the seed or composer text yourself. Visibly place the caret on the selected page for each current cue and release all input. Publish an exact byte copy of composer.seed-ready as composer.seed-positioned, or typing-ready.json as composer.typing-positioned, in the original control root before the target expiry. The actor alone emits the fixed keys and seed-complete. Arming is not placement proof.",
+        "actor_fixed_instructions":"Only when actor_fixed is selected: do not type the seed or composer text yourself. For seed-ready, visibly place the caret in the selected disposable page's editable native text region. For typing-ready, visibly place it in the empty interval BETWEEN the two newly provisioned separator paragraphs, never merely anywhere on the page. If that exact location cannot be shown, do not confirm. Release all input, then publish an exact byte copy of composer.seed-ready as composer.seed-positioned, or typing-ready.json as composer.typing-positioned, in the original control root before the target expiry. The actor alone emits the fixed keys and completion. Arming is not placement proof.",
         "instructions":if trial.actor_fixed {"Use only the actor_fixed_instructions; a person positions the caret and releases input, then confirms the exact current cue. Do not type the fixed text manually."} else {"Use composer.seed-ready only while the target CLOCK_MONOTONIC is before its expires_monotonic_ns; host receipt time never starts a new window. Type seed then Return on the disposable selected page and release all input; copy the whole exact fresh cue, including newline, to composer.seed-complete before expiry. Keep this input focused. On typing-ready.json, put the caret between the two appended empty paragraphs, type exactly composer trial, press Return once, then stop typing. A Reader/Undo/Redo gesture or composer-store/cancel aborts."},
         "owned_persistent_path":root,"product_submit_selected":false,"effects":"one provision and at most one conditional clear; no replay"}),
     )?;
@@ -729,6 +733,17 @@ fn execute(
     // newline with new operation IDs and a finite polling bound, no +1 rule.
     let expected: Vec<_> = format!("{TEXT}\n").encode_utf16().collect();
     let settle = overall.min(Instant::now() + Duration::from_secs(5));
+    if trial.actor_fixed {
+        let (cue_sha, expiry) = trial
+            .typing_cue
+            .clone()
+            .context("fixed typing cue missing")?;
+        permit.wait_typing_complete(&cue_sha, expiry, settle, &mut || {
+            trial.check(settle)?;
+            runtime.pulse()
+        })?;
+        trial.require_quiet_again()?;
+    }
     let mut draft = None;
     for index in 0..12 {
         trial.check(settle)?;

@@ -418,20 +418,51 @@ pub(super) fn poll(
     )?;
     result?;
     release?;
+    ensure!(
+        completed(
+            phase.keys().len(),
+            owner.attempted_downs,
+            owner.completed_pairs,
+            owner.release_attempts,
+            owner.held.is_some()
+        ),
+        "incomplete fixed key sequence"
+    );
+    cue.current()?;
+    confirmation_pin.current()?;
+    admit(false)?;
+    remaining(expiry, 1)?;
+    check(deadline)?;
     if matches!(phase, Phase::Seed) {
+        write_new(&context.root, "composer.seed-complete", &cue.bytes)?;
+    } else {
+        write_new(&context.root, "composer.typing-complete", &cue.bytes)?;
+        // The observer must not treat Return's historical callback as release
+        // completion. Publish only after successful final guards and full record.
         cue.current()?;
         confirmation_pin.current()?;
         admit(false)?;
         remaining(expiry, 1)?;
         check(deadline)?;
-        write_new(&context.root, "composer.seed-complete", &cue.bytes)?;
+        write_new(&context.root, "composer.typing-complete.ready", b"")?;
     }
     Ok(())
+}
+fn completed(expected: usize, downs: usize, pairs: usize, releases: usize, held: bool) -> bool {
+    expected > 0 && downs == expected && pairs == expected && releases == expected && !held
 }
 
 #[cfg(test)]
 mod composer_controls {
     use super::*;
+    #[test]
+    fn return_down_alone_cannot_complete_fixed_typing() {
+        assert!(completed(15, 15, 15, 15, false));
+        assert!(!completed(15, 15, 14, 14, true));
+        assert!(!completed(15, 15, 14, 15, false));
+        assert!(!completed(15, 15, 15, 16, false));
+        assert!(!completed(15, 14, 14, 14, false));
+    }
     #[test]
     fn fixed_input_refuses_expiry_and_never_retries_partial_key() {
         assert!(remaining_at(100, 100, 1).is_err());
