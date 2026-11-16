@@ -19,6 +19,24 @@ pub use crate::device::request_input::InputProgress;
 
 pub enum Request {
     Observe,
+    #[cfg(buddy_development_native_composer)]
+    ComposerProvision {
+        conversation: crate::storage::Uuid,
+        facts: ReaderFacts,
+    },
+    #[cfg(buddy_development_native_composer)]
+    ComposerObserve {
+        conversation: crate::storage::Uuid,
+        identity: remarkable_open_sdk::native_adapter::composer::RangeIdentity,
+    },
+    #[cfg(buddy_development_native_composer)]
+    ComposerAwaitKey {
+        conversation: crate::storage::Uuid,
+        identity: remarkable_open_sdk::native_adapter::composer::RangeIdentity,
+        keys: Vec<i32>,
+    },
+    #[cfg(buddy_development_native_composer)]
+    ComposerClear(super::resident_client::composer::RetainedUser),
     /// Source-correlated historical pixels, never a current-page or writing lease.
     CaptureSource(ReaderFacts),
     Insert {
@@ -44,6 +62,46 @@ impl Request {
     ) -> Result<Reply> {
         match self {
             Self::Observe => connection.observe_with_progress(operation, deadline, progress),
+            #[cfg(buddy_development_native_composer)]
+            Self::ComposerProvision {
+                conversation,
+                facts,
+            } => connection.composer_provision_with_progress(
+                conversation,
+                operation,
+                facts,
+                deadline,
+                progress,
+            ),
+            #[cfg(buddy_development_native_composer)]
+            Self::ComposerObserve {
+                conversation,
+                identity,
+            } => connection.composer_read_with_progress(
+                conversation,
+                operation,
+                identity,
+                None,
+                deadline,
+                progress,
+            ),
+            #[cfg(buddy_development_native_composer)]
+            Self::ComposerAwaitKey {
+                conversation,
+                identity,
+                keys,
+            } => connection.composer_read_with_progress(
+                conversation,
+                operation,
+                identity,
+                Some(keys),
+                deadline,
+                progress,
+            ),
+            #[cfg(buddy_development_native_composer)]
+            Self::ComposerClear(retained) => {
+                connection.composer_clear_with_progress(operation, &retained, deadline, progress)
+            }
             Self::CaptureSource(expected) => {
                 connection.capture_source_with_progress(operation, expected, deadline, progress)
             }

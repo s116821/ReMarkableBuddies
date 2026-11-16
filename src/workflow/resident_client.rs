@@ -1,4 +1,4 @@
-//! Durable resident insertion/selection attempts, distinct from qualified page bindings.
+//! Durable resident effects, distinct from qualified page bindings.
 //! Native replies remain historical. No runtime activation or Reader write path
 //! is installed by this module; Supervisor and acquisition qualification remain
 //! separate. Stored attempts never refresh synthetic Platform observations.
@@ -15,6 +15,9 @@ use std::path::Path;
 pub(crate) mod ordinary_close;
 #[cfg(feature = "development-native-close")]
 pub(crate) mod ordinary_reopen;
+
+#[cfg(buddy_development_native_composer)]
+pub mod composer;
 
 const JOURNAL_FILE: &str = "native-insertion-attempts-v1.json";
 const MAX_JOURNAL: usize = 8 * 1024 * 1024;
@@ -157,12 +160,13 @@ fn validate_reply(original: &HistoricalFrame, response: &HistoricalFrame) -> Res
         original.fingerprint() == *request_sha256,
         "native reply digest mismatch"
     );
-    let Message::Request(command @ (Command::InsertAfter(_) | Command::SelectAdjacent(_))) =
-        &request.message
-    else {
+    let Message::Request(command) = &request.message else {
         bail!("expected native effect")
     };
+    ensure!(journal_effect(command), "expected native effect");
     match (command, reply) {
+        #[cfg(buddy_development_native_composer)]
+        (Command::Composer(command), reply) => composer::validate_reply(command, reply)?,
         (_, Reply::Rejected(_) | Reply::Indeterminate) => {}
         (
             Command::InsertAfter(insertion),
@@ -190,15 +194,20 @@ fn validate_reply(original: &HistoricalFrame, response: &HistoricalFrame) -> Res
     }
     Ok(reply.clone())
 }
+fn journal_effect(command: &Command) -> bool {
+    match command {
+        Command::InsertAfter(_) | Command::SelectAdjacent(_) => true,
+        #[cfg(buddy_development_native_composer)]
+        Command::Composer(command) => command.is_effectful(),
+        _ => false,
+    }
+}
 impl Attempt {
     fn historical(&self) -> Result<HistoricalAttempt> {
         ensure!(!self.conversation.is_nil(), "nil native conversation");
         let request = decode(&self.frame)?;
         ensure!(
-            matches!(
-                request.frame().message,
-                Message::Request(Command::InsertAfter(_) | Command::SelectAdjacent(_))
-            ),
+            matches!(&request.frame().message, Message::Request(command) if journal_effect(command)),
             "journal contains non-effect"
         );
         ensure!(
@@ -219,7 +228,15 @@ impl Attempt {
 }
 impl HistoricalAttempt {
     fn known_no_effect(&self) -> bool {
-        self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_)))
+        let known = self.known_not_dispatched || matches!(self.reply, Some(Reply::Rejected(_)));
+        #[cfg(buddy_development_native_composer)]
+        {
+            known || composer::refused(self.reply.as_ref())
+        }
+        #[cfg(not(buddy_development_native_composer))]
+        {
+            known
+        }
     }
     #[cfg(target_os = "linux")]
     pub(super) fn possible_insertion(
@@ -237,6 +254,10 @@ impl HistoricalAttempt {
         if self.known_no_effect() {
             return true;
         }
+        #[cfg(buddy_development_native_composer)]
+        if let Some(allowed) = composer::permits_followup(self, next) {
+            return allowed;
+        }
         let target = match &self.reply {
             Some(Reply::InsertionObserved { target, .. }) => *target,
             Some(Reply::TargetObserved(facts)) => facts.page(),
@@ -249,8 +270,13 @@ impl HistoricalAttempt {
 }
 impl State {
     fn validate(&self, actor: Uuid) -> Result<Vec<HistoricalAttempt>> {
+        let newest_format = if cfg!(buddy_development_native_composer) {
+            3
+        } else {
+            2
+        };
         ensure!(
-            matches!(self.format, 1 | 2) && self.actor == actor && !actor.is_nil(),
+            (1..=newest_format).contains(&self.format) && self.actor == actor && !actor.is_nil(),
             "native journal owner/schema mismatch"
         );
         ensure!(
@@ -263,12 +289,21 @@ impl State {
         for attempt in &self.attempts {
             let value = attempt.historical()?;
             ensure!(
-                self.format == 2
+                self.format >= 2
                     || matches!(
                         value.request.frame().message,
                         Message::Request(Command::InsertAfter(_))
                     ),
                 "selection requires native journal format 2"
+            );
+            #[cfg(buddy_development_native_composer)]
+            ensure!(
+                self.format == 3
+                    || !matches!(
+                        value.request.frame().message,
+                        Message::Request(Command::Composer(_))
+                    ),
+                "composer requires native journal format 3"
             );
             ensure!(
                 operations.insert(value.request.frame().operation),
@@ -349,7 +384,11 @@ fn reserve(store: &Store, conversation: Uuid, request: &Frame, expected: [u8; 32
                 "native conversation requires original-target reconciliation"
             );
         }
-        state.format = 2;
+        state.format = state.format.max(2);
+        #[cfg(buddy_development_native_composer)]
+        if matches!(request.message, Message::Request(Command::Composer(_))) {
+            state.format = 3;
+        }
         state.attempts.push(attempt);
         #[cfg(test)]
         publication_fault(PublicationPoint::Reservation)?;
@@ -372,7 +411,7 @@ fn finish(store: &Store, request: &Frame, outcome: Outcome) -> Result<()> {
             "native outcome already recorded"
         );
         attempt.outcome = outcome;
-        state.format = 2;
+        state.format = state.format.max(2);
         #[cfg(test)]
         publication_fault(PublicationPoint::Outcome)?;
         persist(&path, &state)?;
@@ -856,6 +895,115 @@ mod linux {
                 progress,
             )
         }
+        #[cfg(buddy_development_native_composer)]
+        pub fn composer_provision_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            facts: ReaderFacts,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            let store = self.store.clone();
+            let expected = facts.clone();
+            self.execute_effect_admitted(
+                conversation,
+                operation,
+                Command::Composer(
+                    remarkable_open_sdk::native_adapter::composer::Command::Provision(facts),
+                ),
+                deadline,
+                progress,
+                &|| composer::require_page(&store, conversation, &expected),
+            )
+            .map_err(anyhow::Error::new)
+        }
+
+        #[cfg(buddy_development_native_composer)]
+        pub fn composer_read_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            identity: remarkable_open_sdk::native_adapter::composer::RangeIdentity,
+            keys: Option<Vec<i32>>,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            composer::require_range(&self.store, conversation, &identity)?;
+            let command = match keys {
+                None => remarkable_open_sdk::native_adapter::composer::Command::Observe(identity),
+                Some(keys) => remarkable_open_sdk::native_adapter::composer::Command::AwaitKey {
+                    identity,
+                    keys,
+                },
+            };
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::Composer(command),
+                    deadline,
+                    |_, _| Ok(()),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
+
+        #[cfg(buddy_development_native_composer)]
+        #[allow(clippy::too_many_arguments)]
+        pub fn composer_await_key_diagnosed_with_progress(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            identity: remarkable_open_sdk::native_adapter::composer::RangeIdentity,
+            keys: Vec<i32>,
+            deadline: Instant,
+            prepared: &mut dyn FnMut(&Frame, [u8; 32]) -> Result<()>,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            // Development diagnostic sees the SDK's actual prepared frame;
+            // it cannot supply another frame or bypass range admission.
+            composer::require_range(&self.store, conversation, &identity)?;
+            self.client
+                .execute_with_progress(
+                    operation,
+                    Command::Composer(
+                        remarkable_open_sdk::native_adapter::composer::Command::AwaitKey {
+                            identity,
+                            keys,
+                        },
+                    ),
+                    deadline,
+                    |frame, digest| prepared(frame, digest).map_err(progress_error),
+                    &mut || progress().map_err(progress_error),
+                )
+                .map_err(|error| self.transport_failure(error).into())
+        }
+
+        #[cfg(buddy_development_native_composer)]
+        pub fn composer_clear_with_progress(
+            &mut self,
+            operation: OperationId,
+            retained: &composer::RetainedUser,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<Reply> {
+            retained.check(&self.store, operation)?;
+            let store = self.store.clone();
+            self.execute_effect_admitted(
+                retained.conversation(),
+                operation,
+                Command::Composer(
+                    remarkable_open_sdk::native_adapter::composer::Command::Clear(
+                        retained.draft().clone(),
+                    ),
+                ),
+                deadline,
+                progress,
+                &|| retained.check(&store, operation),
+            )
+            .map_err(anyhow::Error::new)
+        }
+
         fn execute_effect(
             &mut self,
             conversation: Uuid,
@@ -863,6 +1011,26 @@ mod linux {
             command: Command,
             deadline: Instant,
             progress: &mut dyn FnMut() -> Result<()>,
+        ) -> std::result::Result<Reply, EffectFailure> {
+            self.execute_effect_admitted(
+                conversation,
+                operation,
+                command,
+                deadline,
+                progress,
+                &|| Ok(()),
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn execute_effect_admitted(
+            &mut self,
+            conversation: Uuid,
+            operation: OperationId,
+            command: Command,
+            deadline: Instant,
+            progress: &mut dyn FnMut() -> Result<()>,
+            admit: &dyn Fn() -> Result<()>,
         ) -> std::result::Result<Reply, EffectFailure> {
             #[cfg(feature = "development-native-close")]
             if let Err(error) = ordinary_close::require_unused(&self.store) {
@@ -887,12 +1055,19 @@ mod linux {
                 command,
                 deadline,
                 |frame, hash| {
+                    admit().map_err(std::io::Error::other)?;
                     reserve(&self.store, conversation, frame, hash)
                         .map_err(std::io::Error::other)?;
                     original = Some(frame.clone());
                     Ok(())
                 },
-                &mut || progress().map_err(progress_error),
+                &mut || {
+                    progress().map_err(progress_error)?;
+                    // SDK calls progress after reservation and at every IO
+                    // boundary. Recheck after caller code has run, including
+                    // the final pre-write check; reservation is not a lease.
+                    admit().map_err(progress_error)
+                },
             );
             match result {
                 Ok(reply) => {
@@ -1019,6 +1194,8 @@ mod linux {
                 Message::Request(Command::SelectAdjacent(selection)) => {
                     Command::ReconcileSelection(selection)
                 }
+                #[cfg(buddy_development_native_composer)]
+                Message::Request(Command::Composer(_)) => bail!("composer effects require original native outcome; observation cannot reconcile or replay them"),
                 _ => unreachable!("validated journal contains only effects"),
             };
             self.client

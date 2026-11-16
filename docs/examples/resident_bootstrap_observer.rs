@@ -36,6 +36,10 @@ mod diagnostic_pen_line;
 #[path = "support/resident_storage_probe.rs"]
 mod storage_probe;
 
+#[cfg(all(target_os = "linux", buddy_development_native_composer))]
+#[path = "support/resident_composer_trial.rs"]
+mod composer_trial;
+
 #[cfg(target_os = "linux")]
 mod native {
     use super::*;
@@ -69,15 +73,29 @@ mod native {
     // revision and review, not a command-line override of these identities.
     // Opt-in terminal-peer union retirement fix; unchanged profile/timers. Earlier observers
     // remain frozen with their original spent candidates and are not replayed.
+    #[cfg(not(buddy_development_native_composer))]
     const PROFILE: &str = if super::effect_probe::DEVELOPMENT_EFFECT_PROBE {
         "91ba3d8c200f8bfa3898ef7410595bf4ddff62f25fba3106c7f4ed442938eb5b"
     } else {
         "c0d8cbbb9b4618a870de348fedaedbf242b8009bf4615d67bd83d4f3c03a538d"
     };
+    #[cfg(not(buddy_development_native_composer))]
     const ADAPTER: &str = if super::effect_probe::DEVELOPMENT_EFFECT_PROBE {
         "fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b3a6ba1e0ee63b843fc"
     } else {
         "43ae4fd0754849e104d0120ca14d8f69b90cff2d001998ba132dc4e4c25f6c23"
+    };
+    // Compile-time pins from the separately reviewed native build. Missing pins
+    // compile for CI source checking but refuse before any runtime launch.
+    #[cfg(buddy_development_native_composer)]
+    const PROFILE: &str = match option_env!("BUDDY_COMPOSER_PROFILE_SHA256") {
+        Some(value) => value,
+        None => "",
+    };
+    #[cfg(buddy_development_native_composer)]
+    const ADAPTER: &str = match option_env!("BUDDY_COMPOSER_ADAPTER_SHA256") {
+        Some(value) => value,
+        None => "",
     };
     const STOCK: &str = "071d85beef3ef2d4cc0e11002140b27b82a2cc04a2ed740a5669f591069b77df";
 
@@ -529,6 +547,8 @@ mod native {
     }
 
     pub fn run(nonce: &str) -> Result<()> {
+        #[cfg(buddy_development_native_composer)]
+        super::composer_trial::validate_pins(PROFILE, ADAPTER)?;
         ensure!(
             unsafe { nix::libc::geteuid() } == 0,
             "Native observation requires root"
@@ -546,6 +566,7 @@ mod native {
             fs::canonicalize("/run")? == Path::new("/run"),
             "Runtime parent changed"
         );
+        #[cfg(not(buddy_development_native_composer))]
         let effect_plan = super::effect_probe::Plan::load(
             &stage,
             nonce,
@@ -553,15 +574,26 @@ mod native {
                 .as_ref()
                 .map(|setup| setup.candidate_sha256.as_str()),
         )?;
+        #[cfg(buddy_development_native_composer)]
+        let effect_plan: Option<super::effect_probe::Plan> = None;
+        #[cfg(buddy_development_native_composer)]
+        ensure!(
+            capture_setup.is_some(),
+            "composer trial requires selected capture setup"
+        );
         ensure!(
             effect_plan.is_none() || capture_setup.is_some(),
             "effect probe requires capture setup"
         );
         DirBuilder::new().mode(0o700).create(&root)?;
+        #[cfg(buddy_development_native_composer)]
+        let store_root = super::composer_trial::prepare_store(&stage)?;
+        #[cfg(not(buddy_development_native_composer))]
+        let store_root = root.clone();
         let store = Arc::new(Store::open(StorePaths {
-            data: root.join("data"),
-            cache: root.join("cache"),
-            credentials: root.join("credentials"),
+            data: store_root.join("data"),
+            cache: store_root.join("cache"),
+            credentials: store_root.join("credentials"),
         })?);
         let launch = Launch {
             // Only the pinned, versioned candidate selects this contract.
@@ -581,7 +613,8 @@ mod native {
                 ("LANG".into(), "en_US.UTF-8".into()),
             ]),
             arguments: vec!["--system".into()],
-            operation_budget_ms: if effect_plan.is_some() {
+            operation_budget_ms: if cfg!(buddy_development_native_composer) || effect_plan.is_some()
+            {
                 30_000
             } else {
                 10_000
@@ -676,6 +709,19 @@ mod native {
                 (_, Err(error)) => Err(anyhow::anyhow!("{error:#}")),
                 (Err(error), _) => Err(anyhow::anyhow!("{error:#}")),
             };
+            #[cfg(buddy_development_native_composer)]
+            let captured = captured.and_then(|image| {
+                super::composer_trial::run(
+                    &mut runtime,
+                    &store,
+                    setup,
+                    &mut capture_input,
+                    &image,
+                    &store_root,
+                    overall,
+                )?;
+                Ok(image)
+            });
             // Actor setup admission still requires the Reader incarnation. Once
             // shutdown retires it, PID1 may terminate this observer before return.
             // Preserve the primary refusal before that transition; pending cleanup

@@ -28,6 +28,8 @@ const BUDDY: &str = "/home/root/.local/lib/reader-buddy/reader-buddy";
 const BUDDY_ARGV0: &str = "/opt/bin/reader-buddy";
 const MAX_RECORD: u64 = 256 * 1024;
 
+#[cfg(buddy_development_native_composer)]
+pub mod composer;
 pub mod effect;
 pub mod opening;
 pub mod setup;
@@ -705,6 +707,16 @@ impl Context {
         let base = source_root(self.candidate.kind, &self.nonce);
         let current = inventory(&base, deadline)?;
         let samples = opening::Samples::read(plan, &base, &self.root, label, &current, deadline)?;
+        #[cfg(buddy_development_native_composer)]
+        if let Some(selection) = composer::Selection::load(self, deadline)? {
+            // Only the separately admitted exact composer page may change.
+            // Recovery still runs even when this evidence validation refuses.
+            if present(&self.root.join("composer.admitted"))? {
+                selection.preserve(self, &samples, policy, plan, &current, deadline)?;
+                mailbox.current()?;
+                return self.current(deadline);
+            }
+        }
         let effect_selection = effect::Selection::load(self, deadline)?;
         let inserted_target = effect_selection
             .as_ref()
@@ -1070,10 +1082,17 @@ fn stopped(baseline: &ServiceBaseline, deadline: Instant) -> Result<()> {
     Ok(())
 }
 
-fn actor(mut context: Context, deadline: Instant) -> Result<()> {
+fn actor(
+    mut context: Context,
+    deadline: Instant,
+    #[cfg(buddy_development_native_composer)] keyboard: &mut Option<composer::InputOwner>,
+) -> Result<()> {
     fs::DirBuilder::new().mode(0o700).create(&context.root)?;
     context.bind_root()?;
     context.units("actor", None, deadline)?;
+    // The exact owned device must exist before either input inventory is admitted.
+    #[cfg(buddy_development_native_composer)]
+    let mut composer_handoff = composer::ActorHandoff::load(&context, deadline, keyboard)?;
     let mut input = if context.candidate.kind == Kind::Native {
         Some(RequestInput::new(TriggerCorner::LowerLeft, None)?)
     } else {
@@ -1282,7 +1301,31 @@ fn actor(mut context: Context, deadline: Instant) -> Result<()> {
     // any controller error, including failure before the child identity is saved.
     loop {
         context.current(deadline)?;
-        if let Some(handoff) = &mut effect_handoff {
+        #[cfg(buddy_development_native_composer)]
+        let composer_owns_input = if let Some(handoff) = &mut composer_handoff {
+            handoff.poll(
+                &context,
+                child.id(),
+                &mut input,
+                deadline,
+                keyboard.as_mut(),
+                &mut |full| {
+                    if full {
+                        context.stopped_boundary(&baselines, deadline)
+                    } else {
+                        context.stopped_pulse(&baselines, deadline)
+                    }
+                },
+            )?;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(buddy_development_native_composer))]
+        let composer_owns_input = false;
+        if composer_owns_input {
+            // The cfg-selected composer handoff performed its own admission.
+        } else if let Some(handoff) = &mut effect_handoff {
             handoff.poll(&context, child.id(), &mut input, deadline)?;
         } else {
             quiet(&mut input)?;
@@ -1777,10 +1820,31 @@ pub fn entry(arguments: Vec<String>) -> Result<()> {
         300
     };
     let evidence = context.root.clone();
+    // Keep the virtual descriptor alive through actor result logging. On a
+    // failed actor, existing PID1 group retirement remains the only recovery
+    // owner; descriptor disappearance is input loss, never fresh admission.
+    #[cfg(buddy_development_native_composer)]
+    let mut composer_keyboard = None;
     let result = if role == "actor" {
-        actor(context, start + Duration::from_secs(seconds))
+        actor(
+            context,
+            start + Duration::from_secs(seconds),
+            #[cfg(buddy_development_native_composer)]
+            &mut composer_keyboard,
+        )
     } else {
         recover(context, start + Duration::from_secs(seconds))
+    };
+    #[cfg(buddy_development_native_composer)]
+    let result = match composer_keyboard
+        .as_mut()
+        .map(composer::InputOwner::release)
+        .transpose()
+    {
+        Ok(_) => result,
+        Err(release) => Err(anyhow::anyhow!(
+            "composer actor outcome {result:?}; owned key release failed: {release:#}"
+        )),
     };
     let _ = write_new(
         &evidence,

@@ -525,6 +525,10 @@ impl Installed {
     }
 }
 
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
 fn hex_digest(text: &str) -> [u8; 32] {
     let mut out = [0; 32];
     for (i, pair) in text.as_bytes().as_chunks::<2>().0.iter().enumerate() {
