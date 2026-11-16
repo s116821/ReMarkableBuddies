@@ -5,6 +5,16 @@ use crate::device::{input_observer::InputObserver, interaction::Interaction};
 use nix::libc;
 use remarkable_open_sdk::native_adapter::{ReaderFacts, RuntimeIdentity};
 use std::os::fd::AsRawFd;
+mod input;
+pub(super) use input::Owner as InputOwner;
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum InputMode {
+    #[default]
+    Manual,
+    ActorFixed,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +30,8 @@ struct SelectionWire {
     rm_bytes: u64,
     thumbnail_sha256: String,
     thumbnail_bytes: u64,
+    #[serde(default)]
+    input_mode: InputMode,
 }
 pub(super) struct Selection {
     wire: SelectionWire,
@@ -195,7 +207,7 @@ impl Selection {
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Message {
+pub struct Message {
     schema: u8,
     selection_sha256: String,
     binding: setup::Binding,
@@ -287,6 +299,12 @@ pub struct ObserverPermit {
     typing_requested: bool,
 }
 impl ObserverPermit {
+    pub fn cue_binding(&self) -> Message {
+        self.message.clone()
+    }
+    pub fn actor_fixed_input(&self) -> bool {
+        self.selection.wire.input_mode == InputMode::ActorFixed
+    }
     pub fn new(
         name: &str,
         candidate: &str,
@@ -423,15 +441,30 @@ pub(super) struct ActorHandoff {
     typing: Option<InputObserver>,
     end: Option<Instant>,
     finished: bool,
+    seed_attempted: bool,
+    typing_attempted: bool,
 }
 impl ActorHandoff {
-    pub(super) fn load(context: &Context, deadline: Instant) -> Result<Option<Self>> {
-        Ok(Selection::load(context, deadline)?.map(|selection| Self {
+    pub(super) fn load(
+        context: &Context,
+        deadline: Instant,
+        keyboard: &mut Option<InputOwner>,
+    ) -> Result<Option<Self>> {
+        let Some(selection) = Selection::load(context, deadline)? else {
+            return Ok(None);
+        };
+        if selection.wire.input_mode == InputMode::ActorFixed {
+            ensure!(keyboard.is_none(), "composer keyboard already owned");
+            *keyboard = Some(InputOwner::open(&context.root, deadline)?);
+        }
+        Ok(Some(Self {
             selection,
             message: None,
             typing: None,
             end: None,
             finished: false,
+            seed_attempted: false,
+            typing_attempted: false,
         }))
     }
     fn receive(&self, context: &Context, name: &str, deadline: Instant) -> Result<Option<Message>> {
@@ -449,12 +482,15 @@ impl ActorHandoff {
         pin.current()?;
         Ok(Some(message))
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn poll(
         &mut self,
         context: &Context,
         observer: u32,
         input: &mut Option<RequestInput>,
         deadline: Instant,
+        keyboard: Option<&mut InputOwner>,
+        pulse: &mut dyn FnMut(bool) -> Result<()>,
     ) -> Result<()> {
         self.selection.pin.current()?;
         ensure!(
@@ -527,6 +563,41 @@ impl ActorHandoff {
                     .all(|event| *event == Interaction::Invalidated),
                 "composer canceled by gesture"
             );
+            if self.selection.wire.input_mode == InputMode::ActorFixed {
+                let keyboard = keyboard.context("composer keyboard absent")?;
+                let typing = self
+                    .typing
+                    .as_mut()
+                    .context("composer typing observer absent")?;
+                let mut admit = |full| {
+                    check(end)?;
+                    self.selection.pin.current()?;
+                    ensure!(
+                        !present(&context.stage.join("composer-store/cancel"))?,
+                        "composer trial canceled"
+                    );
+                    let events = typing.poll()?;
+                    ensure!(
+                        events
+                            .iter()
+                            .all(|event| *event == Interaction::Invalidated)
+                            && typing.quiescent()
+                            && (!full || events.is_empty()),
+                        "input changed across confirmed fixed-key admission"
+                    );
+                    message.binding.current(context, observer)?;
+                    pulse(full)
+                };
+                input::poll(
+                    context,
+                    message,
+                    keyboard,
+                    &mut self.seed_attempted,
+                    &mut self.typing_attempted,
+                    end,
+                    &mut admit,
+                )?;
+            }
             return Ok(());
         }
         quiet(input)?;

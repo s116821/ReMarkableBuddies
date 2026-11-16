@@ -22,7 +22,10 @@ use remarkable_reader_buddy::{
     workflow::{
         resident_client::{self, composer::RetainedUser},
         resident_runtime::ResidentRuntime,
-        resident_supervisor::service::bootstrap::{composer::ObserverPermit, setup::ObserverSetup},
+        resident_supervisor::service::bootstrap::{
+            composer::{Message as ComposerBinding, ObserverPermit},
+            setup::ObserverSetup,
+        },
     },
 };
 use sha2::{Digest, Sha256};
@@ -135,6 +138,8 @@ struct Trial<'a> {
     conversation: Uuid,
     overall: Instant,
     input: &'a mut TrialInput,
+    cue_binding: ComposerBinding,
+    actor_fixed: bool,
 }
 struct TrialInput {
     quiet: Option<RequestInput>,
@@ -440,6 +445,8 @@ impl Trial<'_> {
             .mode(0o600)
             .open(&staged)?;
         let value = serde_json::json!({
+            "schema":1,"phase":"composer-typing-v1","binding":self.cue_binding,
+            "input_mode":if self.actor_fixed {"actor_fixed"} else {"manual"},
             "operation":operation.0.to_string(),"native_armed_at_sample":receipt.line,
             "native_expiry_ns":receipt.expiry_ns,"text":TEXT,
             "diagnostic_key":"Return once; ordinary newline is preserved",
@@ -611,6 +618,8 @@ fn execute(
         conversation,
         overall,
         input,
+        cue_binding: permit.cue_binding(),
+        actor_fixed: permit.actor_fixed_input(),
     };
     trial.check(overall)?;
     ensure!(
@@ -627,7 +636,9 @@ fn execute(
         "trial.json",
         serde_json::json!({"schema":1,"conversation":conversation.to_string(),
         "candidate_sha256":setup.candidate_sha256,"text":TEXT,"native_selection_qualified":false,
-        "instructions":"Use composer.seed-ready only while the target CLOCK_MONOTONIC is before its expires_monotonic_ns; host receipt time never starts a new window. Type seed then Return on the disposable selected page and release all input; copy the whole exact fresh cue, including newline, to composer.seed-complete before expiry. Keep this input focused. On typing-ready.json, put the caret between the two appended empty paragraphs, type exactly composer trial, press Return once, then stop typing. A Reader/Undo/Redo gesture or composer-store/cancel aborts.",
+        "input_mode":if trial.actor_fixed {"actor_fixed"} else {"manual"},
+        "actor_fixed_instructions":"Only when actor_fixed is selected: do not type the seed or composer text yourself. Visibly place the caret on the selected page for each current cue and release all input. Publish an exact byte copy of composer.seed-ready as composer.seed-positioned, or typing-ready.json as composer.typing-positioned, in the original control root before the target expiry. The actor alone emits the fixed keys and seed-complete. Arming is not placement proof.",
+        "instructions":if trial.actor_fixed {"Use only the actor_fixed_instructions; a person positions the caret and releases input, then confirms the exact current cue. Do not type the fixed text manually."} else {"Use composer.seed-ready only while the target CLOCK_MONOTONIC is before its expires_monotonic_ns; host receipt time never starts a new window. Type seed then Return on the disposable selected page and release all input; copy the whole exact fresh cue, including newline, to composer.seed-complete before expiry. Keep this input focused. On typing-ready.json, put the caret between the two appended empty paragraphs, type exactly composer trial, press Return once, then stop typing. A Reader/Undo/Redo gesture or composer-store/cancel aborts."},
         "owned_persistent_path":root,"product_submit_selected":false,"effects":"one provision and at most one conditional clear; no replay"}),
     )?;
     let handoff = overall.min(Instant::now() + Duration::from_secs(5));
