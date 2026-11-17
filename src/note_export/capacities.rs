@@ -420,26 +420,23 @@ impl CapacitiesDestination {
             Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
             _ => {}
         }
-        match historical {
-            Some(found) => {
-                if !matches_plan(&found, note, &attempt) {
-                    return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
-                }
-                if control.is_some() {
-                    return if matches!(
-                        found.outcome,
-                        Outcome::Completed | Outcome::Failed | Outcome::Canceled
-                    ) {
-                        terminal(&found)
-                    } else {
-                        report(&found, ExportStatus::ReconcileRequired)
-                    };
-                }
-                return self
-                    .readback(ledger, found, &mut canceled, budget, None)
-                    .await;
+        if let Some(found) = historical {
+            if !matches_plan(&found, note, &attempt) {
+                return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
             }
-            None => {}
+            if control.is_some() {
+                return if matches!(
+                    found.outcome,
+                    Outcome::Completed | Outcome::Failed | Outcome::Canceled
+                ) {
+                    terminal(&found)
+                } else {
+                    report(&found, ExportStatus::ReconcileRequired)
+                };
+            }
+            return self
+                .readback(ledger, found, &mut canceled, budget, None)
+                .await;
         }
         let expected = (|| {
             let root = ledger.expected(Namespace::Conversation, note.conversation)?;
