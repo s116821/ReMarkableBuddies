@@ -64,6 +64,10 @@ impl Request {
         .then_some(request)
     }
 
+    pub(super) fn is_disconnect(&self) -> bool {
+        self.selector == Selector::Disconnect
+    }
+
     fn approved(&self, status: &Status, registration: &Registration) -> bool {
         status.enrollment.as_ref().is_some_and(|original| {
             original.tablet_id == self.binding.tablet_id

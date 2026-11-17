@@ -749,6 +749,11 @@ fn attest_running_executable(output: &mut impl Write) -> io::Result<()> {
     executable_stamp(file, metadata.len(), deadline, output)
 }
 
+fn admits_attested_request(frame: &[u8]) -> bool {
+    Request::parse(frame).is_some_and(|request| request.selector == Selector::Exchange)
+        || grant_command::Request::parse(frame).is_some_and(|request| request.is_disconnect())
+}
+
 pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result<()> {
     let attested = std::env::var_os(ATTEST_ENV).as_deref() == Some(OsStr::new("1"));
     if attested {
@@ -759,9 +764,7 @@ pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result
     let Ok(frame) = read_frame(started + Duration::from_millis(MAX_MILLIS)) else {
         return Report::new(None).write_to(output);
     };
-    if attested
-        && !Request::parse(&frame).is_some_and(|request| request.selector == Selector::Exchange)
-    {
+    if attested && !admits_attested_request(&frame) {
         return Report::new(None).write_to(output);
     }
     // Runtime::block_on polls the actor on the calling thread. The worker keeps

@@ -215,6 +215,43 @@ fn capture_connection_reports_only_the_saved_selection_under_original_custody() 
 }
 
 #[test]
+fn attested_actor_admits_only_exact_mutating_handoffs() {
+    let fixture = Fixture::new(false);
+    let mut request = json!({
+        "contract_version": 1,
+        "selector": "disconnect",
+        "budget_ms": 30_000,
+        "binding": fixture.binding,
+        "space_id": Uuid::new_v4(),
+        "expected_grant_sha256": "a".repeat(64)
+    });
+    let admits = |body: &Value| admits_attested_request(&serde_json::to_vec(body).unwrap());
+    assert!(admits(&request));
+    request["selector"] = json!("refresh");
+    assert!(!admits(&request));
+    request["selector"] = json!("disconnect");
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_grant_sha256");
+    assert!(!admits(&request));
+    request["selector"] = json!("grant-status");
+    assert!(!admits(&request));
+    request.as_object_mut().unwrap().remove("space_id");
+    request["selector"] = json!("status");
+    assert!(!admits(&request));
+    request["selector"] = json!("exchange");
+    request["proof"] = json!({
+        "code": "synthetic-code",
+        "verifier": "v".repeat(43),
+        "client_id": "fixture-public-client",
+        "redirect_uri": "http://127.0.0.1:48761/oauth/capacities/callback",
+        "resource": "https://api.capacities.io"
+    });
+    assert!(admits(&request));
+}
+
+#[test]
 fn launched_executable_stamp_requires_exact_bounded_bytes_before_readiness() {
     let bytes = b"synthetic executable witness";
     let deadline = Instant::now() + Duration::from_secs(5);
