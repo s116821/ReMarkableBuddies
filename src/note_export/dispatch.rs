@@ -90,7 +90,10 @@ impl<D: NoteDestination> OwnedDestination for LegacyDestination<'_, D> {
 /// Only existing command composition instantiates credentials from saved policy.
 pub(crate) enum ConfiguredDestination {
     Mem(mem::MemDestination),
-    Capacities(capacities::CapacitiesDestination),
+    Capacities {
+        destination: capacities::CapacitiesDestination,
+        _lease: config::capacities::AccessTokenLease,
+    },
 }
 
 impl ConfiguredDestination {
@@ -106,10 +109,14 @@ impl ConfiguredDestination {
         tags: BTreeSet<Uuid>,
         may_write: bool,
     ) -> Result<Self> {
-        let token =
+        let lease =
             config::capacities::access_token(&config.paths.credentials, space, grant, may_write)?;
-        capacities::CapacitiesDestination::enrolled(token.expose(), space, grant, tags)
-            .map(Self::Capacities)
+        let destination =
+            capacities::CapacitiesDestination::enrolled(lease.expose(), space, grant, tags)?;
+        Ok(Self::Capacities {
+            destination,
+            _lease: lease,
+        })
     }
 
     pub(crate) fn selected(config: &Config) -> Result<Self> {
@@ -165,21 +172,23 @@ impl OwnedDestination for ConfiguredDestination {
     fn backend(&self) -> &str {
         match self {
             Self::Mem(destination) => destination.backend(),
-            Self::Capacities(destination) => destination.backend(),
+            Self::Capacities { destination, .. } => destination.backend(),
         }
     }
 
     fn association_id(&self, conversation: Uuid, correlation: Uuid) -> Uuid {
         match self {
             Self::Mem(_) => correlation,
-            Self::Capacities(destination) => destination.association_id(conversation, correlation),
+            Self::Capacities { destination, .. } => {
+                destination.association_id(conversation, correlation)
+            }
         }
     }
 
     fn intent_binding(&self) -> String {
         match self {
             Self::Mem(destination) => destination.backend().to_owned(),
-            Self::Capacities(destination) => destination.intent_binding(),
+            Self::Capacities { destination, .. } => destination.intent_binding(),
         }
     }
 
@@ -197,7 +206,7 @@ impl OwnedDestination for ConfiguredDestination {
                     .export_owned(ledger, note, canceled, owner, control)
                     .await
             }
-            Self::Capacities(destination) => {
+            Self::Capacities { destination, .. } => {
                 destination
                     .export_owned(ledger, note, canceled, owner, control)
                     .await
@@ -227,7 +236,7 @@ impl OwnedDestination for ConfiguredDestination {
                     )
                     .await
             }
-            Self::Capacities(destination) => {
+            Self::Capacities { destination, .. } => {
                 destination
                     .reconcile_owned(
                         ledger,

@@ -1,7 +1,10 @@
-//! Private local Capacities enrollment selection and read-only grant custody.
+//! Private local Capacities enrollment selection and grant custody.
 use crate::{note_export::Failure, storage::Uuid};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::{collections::BTreeSet, fmt, path::Path};
+
+#[cfg(target_os = "linux")]
+pub mod lifecycle;
 
 #[derive(Clone, Serialize)]
 pub struct ExportConnection {
@@ -71,7 +74,7 @@ impl ExportConnection {
 const MAX_GRANT: u64 = 16 * 1024;
 
 #[cfg(target_os = "linux")]
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Grant {
     schema_version: u32,
@@ -86,48 +89,54 @@ struct Grant {
 }
 
 #[cfg(target_os = "linux")]
-fn admitted_grant(
-    bytes: &[u8],
-    space: Uuid,
-    id: Uuid,
-    may_write: bool,
-    now: u64,
-) -> Result<super::Secret, Failure> {
-    const RESOURCE: &str = "https://api.capacities.io";
-    let invalid = Failure::MissingCapacitiesCredentials;
-    let raw = super::inspection::strict_json(bytes).map_err(|_| invalid)?;
-    if !raw.is_object() {
-        return Err(invalid);
+impl Grant {
+    fn validate(&self, id: Uuid) -> Result<(), Failure> {
+        if self.schema_version != 1 {
+            return Err(Failure::Unsupported);
+        }
+        let scopes: BTreeSet<_> = self.scopes.iter().map(String::as_str).collect();
+        if self.grant_id != id
+            || self.space_id.is_nil()
+            || self.resource != "https://api.capacities.io"
+            || !private_text(&self.client_id, 256)
+            || !private_text(&self.access_token, 4096)
+            || self.access_token.starts_with("cap-api-")
+            || !private_text(&self.refresh_token, 4096)
+            || scopes.len() != self.scopes.len()
+            || !scopes
+                .iter()
+                .all(|scope| matches!(*scope, "api:read" | "api:write" | "offline_access"))
+            || !scopes.contains("api:read")
+            || !scopes.contains("offline_access")
+            || self.expires_at == 0
+        {
+            return Err(Failure::Authentication);
+        }
+        Ok(())
     }
-    let grant: Grant = serde_json::from_value(raw).map_err(|_| invalid)?;
-    if grant.schema_version != 1 {
-        return Err(Failure::Unsupported);
+}
+
+#[cfg(target_os = "linux")]
+fn private_text(value: &str, limit: usize) -> bool {
+    !value.is_empty() && value.len() <= limit && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+pub(crate) struct AccessTokenLease {
+    token: super::Secret,
+    #[cfg(target_os = "linux")]
+    _owner: lifecycle::GrantOwner,
+}
+
+impl AccessTokenLease {
+    pub(crate) fn expose(&self) -> &str {
+        self.token.expose()
     }
-    let scopes: BTreeSet<_> = grant.scopes.iter().map(String::as_str).collect();
-    let text = |value: &str, limit| {
-        !value.is_empty()
-            && value.len() <= limit
-            && value.bytes().all(|byte| byte.is_ascii_graphic())
-    };
-    if grant.grant_id != id
-        || grant.space_id != space
-        || grant.resource != RESOURCE
-        || !text(&grant.client_id, 256)
-        || !text(&grant.access_token, 4096)
-        || grant.access_token.starts_with("cap-api-")
-        || !text(&grant.refresh_token, 4096)
-        || scopes.len() != grant.scopes.len()
-        || !scopes
-            .iter()
-            .all(|scope| matches!(*scope, "api:read" | "api:write" | "offline_access"))
-        || !scopes.contains("api:read")
-        || !scopes.contains("offline_access")
-        || (may_write && !scopes.contains("api:write"))
-        || grant.expires_at <= now
-    {
-        return Err(Failure::Authentication);
+}
+
+impl fmt::Debug for AccessTokenLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[Capacities access token lease]")
     }
-    Ok(super::Secret(grant.access_token))
 }
 
 pub(crate) fn access_token(
@@ -135,20 +144,13 @@ pub(crate) fn access_token(
     space: Uuid,
     id: Uuid,
     may_write: bool,
-) -> Result<super::Secret, Failure> {
+) -> Result<AccessTokenLease, Failure> {
     if space.is_nil() || id.is_nil() {
         return Err(Failure::MissingCapacitiesCredentials);
     }
     #[cfg(target_os = "linux")]
     {
-        let target = root.join(format!("capacities-grant-{id}.json"));
-        let bytes = super::model_credential::linux::read_private(root, &target, MAX_GRANT)
-            .map_err(|_| Failure::MissingCapacitiesCredentials)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| Failure::Authentication)?
-            .as_secs();
-        admitted_grant(&bytes, space, id, may_write, now)
+        lifecycle::GrantOwner::open(root, id)?.access_token(space, may_write)
     }
     #[cfg(not(target_os = "linux"))]
     {

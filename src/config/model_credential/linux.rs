@@ -199,7 +199,7 @@ fn path_hash(kind: &str, path: &Path) -> Checked<String> {
         format!("urn:remarkable-buddies:model-credential-{kind}:v1:{s}").as_bytes(),
     ))
 }
-fn metadata_hash(meta: &fs::Metadata, file: bool) -> String {
+pub(crate) fn metadata_hash(meta: &fs::Metadata, file: bool) -> String {
     let mut values = BTreeMap::from([
         ("device", meta.dev().to_string()),
         ("inode", meta.ino().to_string()),
@@ -228,11 +228,11 @@ fn metadata_values_hash(values: &BTreeMap<&str, String>, file: bool) -> String {
     serde_json::to_writer(&mut bytes, values).expect("fixed metadata serializes");
     digest(&bytes)
 }
-fn owner(meta: &fs::Metadata) -> bool {
+pub(crate) fn owner(meta: &fs::Metadata) -> bool {
     // IDs are process metadata, never credential/provider discovery.
     meta.uid() == unsafe { nix::libc::geteuid() } && meta.gid() == unsafe { nix::libc::getegid() }
 }
-fn parent(path: &Path) -> Checked<fs::Metadata> {
+pub(crate) fn parent(path: &Path) -> Checked<fs::Metadata> {
     files::safe_path(path).map_err(|_| Status::Unsupported)?;
     let meta = fs::symlink_metadata(path).map_err(|_| Status::Unavailable)?;
     if !meta.is_dir() || !owner(&meta) || meta.mode() & 0o7777 != 0o700 {
