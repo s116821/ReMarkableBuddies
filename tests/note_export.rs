@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 use tokio::sync::watch;
+#[path = "support/capacities_flow.rs"]
+mod capacities_flow;
 
 struct LocalStore(PathBuf);
 impl LocalStore {

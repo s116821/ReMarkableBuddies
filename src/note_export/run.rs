@@ -8,6 +8,9 @@ use tokio::sync::watch;
 
 pub(crate) struct Owner<'a>(&'a AtomicBool);
 impl<'a> Owner<'a> {
+    pub(super) fn belongs_to(&self, ledger: &Ledger) -> bool {
+        std::ptr::eq(self.0, &ledger.store().export_active)
+    }
     pub(crate) fn acquire(ledger: &'a Ledger) -> Option<Self> {
         let active = &ledger.store().export_active;
         active
@@ -38,12 +41,19 @@ pub(crate) struct ExportControl<'a> {
     pub event: &'a mut (dyn FnMut(ExportPhase, &Ledger) + Send),
     pub deadline: Option<std::time::Instant>,
 }
-fn event(control: &mut Option<&mut ExportControl<'_>>, phase: ExportPhase, ledger: &Ledger) {
+pub(super) fn event(
+    control: &mut Option<&mut ExportControl<'_>>,
+    phase: ExportPhase,
+    ledger: &Ledger,
+) {
     if let Some(control) = control.as_deref_mut() {
         (control.event)(phase, ledger);
     }
 }
-fn selection_current(control: &mut Option<&mut ExportControl<'_>>, ledger: &Ledger) -> bool {
+pub(super) fn selection_current(
+    control: &mut Option<&mut ExportControl<'_>>,
+    ledger: &Ledger,
+) -> bool {
     let Some(control) = control.as_deref_mut() else {
         return true;
     };

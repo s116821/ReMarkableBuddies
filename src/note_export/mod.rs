@@ -1,6 +1,7 @@
 //! Explicit prepared-content exports. Historical retries never dispatch again.
 pub mod capacities;
 pub mod command;
+pub(crate) mod dispatch;
 pub mod mem;
 mod run;
 use crate::{conversation::ExportAssociation, storage::Uuid};

@@ -1,6 +1,6 @@
 //! Capacities REST create and exact-ID readback for explicitly prepared notes.
 use super::{
-    run::{dispatch, pending, report, store_state, Owner},
+    run::{dispatch, event, pending, report, selection_current, store_state, Owner},
     *,
 };
 use crate::{
@@ -241,16 +241,37 @@ impl CapacitiesDestination {
         &self,
         ledger: &Ledger,
         note: &PreparedNote,
+        canceled: watch::Receiver<bool>,
+    ) -> ExportReport {
+        let Some(owner) = Owner::acquire(ledger) else {
+            return ExportReport::new(ExportStatus::Busy, note.correlation, note.effect_operation);
+        };
+        self.owned_export(ledger, note, canceled, &owner, None)
+            .await
+    }
+
+    async fn owned_export(
+        &self,
+        ledger: &Ledger,
+        note: &PreparedNote,
         mut canceled: watch::Receiver<bool>,
+        owner: &ExportOwner<'_>,
+        mut control: Option<&mut ExportControl<'_>>,
     ) -> ExportReport {
         let fallback = |status, failure| {
             let mut report = ExportReport::new(status, note.correlation, note.effect_operation);
             report.failure = failure;
             report
         };
-        let Some(_owner) = Owner::acquire(ledger) else {
-            return fallback(ExportStatus::Busy, None);
-        };
+        if !owner.belongs_to(ledger)
+            || control.as_deref().is_some_and(|c| {
+                !c.input
+                    .as_ref()
+                    .is_some_and(|input| input.matches(note).unwrap_or(false))
+            })
+        {
+            return fallback(ExportStatus::Refused, Some(Failure::Storage));
+        }
         if note.render(CorrelationLocation::Metadata).is_err() {
             return fallback(ExportStatus::Refused, Some(Failure::InvalidInput));
         }
@@ -260,13 +281,53 @@ impl CapacitiesDestination {
             Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
         };
         let budget = Budget::default();
+        let budget = Budget {
+            end: control
+                .as_deref()
+                .and_then(|c| c.deadline)
+                .map_or(budget.end, |end| end.min(budget.end)),
+        };
 
+        // Guarded Writer preparation has its own receipt fingerprint. A current
+        // exact Prepared plan is unresolved custody, not a generic historical
+        // receipt or permission to resend after an interrupted publication.
+        match ledger.export_association(note.conversation, id) {
+            Ok(Some(current))
+                if current.outcome == Outcome::Prepared
+                    && current
+                        .capacities
+                        .as_ref()
+                        .is_some_and(|old| old.id == attempt.id) =>
+            {
+                return if current.capacities.as_ref() == Some(&attempt)
+                    && matches_plan(&current, note, &attempt)
+                {
+                    report(&current, ExportStatus::ReconcileRequired)
+                } else {
+                    fallback(ExportStatus::Conflict, Some(Failure::Conflict))
+                };
+            }
+            Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
+            _ => {}
+        }
         match ledger.historical_export_attempt(note.conversation, id, attempt.id) {
             Ok(Some(found)) => {
                 if !matches_plan(&found, note, &attempt) {
                     return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
                 }
-                return self.readback(ledger, found, &mut canceled, budget).await;
+                if control.is_some() {
+                    return if matches!(
+                        found.outcome,
+                        Outcome::Completed | Outcome::Failed | Outcome::Canceled
+                    ) {
+                        terminal(&found)
+                    } else {
+                        report(&found, ExportStatus::ReconcileRequired)
+                    };
+                }
+                return self
+                    .readback(ledger, found, &mut canceled, budget, None)
+                    .await;
             }
             Ok(None) => {}
             Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
@@ -293,10 +354,12 @@ impl CapacitiesDestination {
             }
         }
 
-        match pending(self.preflight(budget), &mut canceled, budget).await {
-            Ok(Some(())) => {}
-            Ok(None) => return fallback(ExportStatus::CanceledNoEffect, None),
-            Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
+        if control.is_none() {
+            match pending(self.preflight(budget), &mut canceled, budget).await {
+                Ok(Some(())) => {}
+                Ok(None) => return fallback(ExportStatus::CanceledNoEffect, None),
+                Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
+            }
         }
         let mut association = ExportAssociation {
             id,
@@ -310,24 +373,75 @@ impl CapacitiesDestination {
             attempt: None,
             capacities: Some(attempt),
         };
-        match ledger.associate_export_observed(
-            association.operation,
-            root,
-            heads,
-            association.clone(),
-        ) {
+        event(&mut control, ExportPhase::BeforeAdmission, ledger);
+        if *canceled.borrow() || canceled.has_changed().is_err() {
+            return fallback(ExportStatus::CanceledNoEffect, None);
+        }
+        let admission = if let Some(c) = control.as_deref_mut() {
+            let Some(input) = c.input.take() else {
+                return fallback(ExportStatus::Refused, Some(Failure::Storage));
+            };
+            ledger
+                .associate_writer_export_observed(
+                    association.operation,
+                    heads,
+                    association.clone(),
+                    input,
+                )
+                .map(|(result, fresh, guard)| {
+                    c.guard = guard;
+                    (result, fresh)
+                })
+        } else {
+            ledger.associate_export_observed(
+                association.operation,
+                root,
+                heads,
+                association.clone(),
+            )
+        };
+        match admission {
             Ok((_, true)) => {}
             Ok((_, false)) => return report(&association, ExportStatus::ReconcileRequired),
             Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
+        }
+
+        event(&mut control, ExportPhase::AfterAdmission, ledger);
+        if control.is_some() {
+            event(&mut control, ExportPhase::BeforeDestinationPoll, ledger);
+            if !selection_current(&mut control, ledger) {
+                return no_send(ledger, association, Some(Failure::Conflict), &mut control);
+            }
+            let preflight = async {
+                if let Some(c) = control.as_deref_mut() {
+                    c.observation.destination_polled = true;
+                }
+                self.preflight(budget).await
+            };
+            match pending(preflight, &mut canceled, budget).await {
+                Ok(Some(())) => {}
+                Ok(None) => return no_send(ledger, association, None, &mut control),
+                Err(failure) => return no_send(ledger, association, Some(failure), &mut control),
+            }
         }
 
         let (result, polled) = dispatch(
             self.create(payload, budget),
             &mut canceled,
             budget,
-            &mut || Ok(()),
+            &mut || {
+                event(&mut control, ExportPhase::BeforeWritePoll, ledger);
+                if selection_current(&mut control, ledger) {
+                    Ok(())
+                } else {
+                    Err(Failure::Conflict)
+                }
+            },
         )
         .await;
+        if let Some(c) = control.as_deref_mut() {
+            c.observation.write_polled |= polled;
+        }
         match result {
             Ok(Some(candidate)) => {
                 association
@@ -343,8 +457,14 @@ impl CapacitiesDestination {
                         Failure::Storage,
                     );
                 }
-                self.readback(ledger, association, &mut canceled, budget)
-                    .await
+                self.readback(
+                    ledger,
+                    association,
+                    &mut canceled,
+                    budget,
+                    control.as_deref_mut().map(|c| &mut *c.observation),
+                )
+                .await
             }
             result if polled => {
                 transition(&mut association, Outcome::ReconcileRequired, "uncertain");
@@ -359,24 +479,7 @@ impl CapacitiesDestination {
                 result_report.failure = result.err();
                 result_report
             }
-            result => {
-                let failure = result.err();
-                if failure.is_some() {
-                    transition(&mut association, Outcome::Failed, "failed-no-send");
-                } else {
-                    transition(&mut association, Outcome::Canceled, "canceled-no-send");
-                }
-                if store_state(ledger, association.clone()).is_err() {
-                    return with_failure(
-                        &association,
-                        ExportStatus::ReconcileRequired,
-                        Failure::Storage,
-                    );
-                }
-                let mut result_report = terminal(&association);
-                result_report.failure = failure;
-                result_report
-            }
+            result => no_send(ledger, association, result.err(), &mut control),
         }
     }
 
@@ -386,19 +489,42 @@ impl CapacitiesDestination {
         ledger: &Ledger,
         conversation: Uuid,
         correlation: Uuid,
-        mut canceled: watch::Receiver<bool>,
+        canceled: watch::Receiver<bool>,
     ) -> ExportReport {
-        let Some(_owner) = Owner::acquire(ledger) else {
+        let Some(owner) = Owner::acquire(ledger) else {
             return ExportReport::new(ExportStatus::Busy, correlation, Uuid::nil());
         };
+        self.owned_reconcile(ledger, conversation, correlation, canceled, &owner, None)
+            .await
+    }
+    async fn owned_reconcile(
+        &self,
+        ledger: &Ledger,
+        conversation: Uuid,
+        correlation: Uuid,
+        mut canceled: watch::Receiver<bool>,
+        owner: &ExportOwner<'_>,
+        observation: Option<&mut ExportObservation>,
+    ) -> ExportReport {
+        if !owner.belongs_to(ledger) {
+            let mut result = ExportReport::new(ExportStatus::Refused, correlation, Uuid::nil());
+            result.failure = Some(Failure::Storage);
+            return result;
+        }
         let id = CapacitiesAttempt::association_id(conversation, self.space, correlation);
         let Ok(Some(association)) = ledger.export_association(conversation, id) else {
             let mut result = ExportReport::new(ExportStatus::Refused, correlation, Uuid::nil());
             result.failure = Some(Failure::Storage);
             return result;
         };
-        self.readback(ledger, association, &mut canceled, Budget::default())
-            .await
+        self.readback(
+            ledger,
+            association,
+            &mut canceled,
+            Budget::default(),
+            observation,
+        )
+        .await
     }
 
     async fn readback(
@@ -407,6 +533,7 @@ impl CapacitiesDestination {
         mut association: ExportAssociation,
         canceled: &mut watch::Receiver<bool>,
         budget: Budget,
+        observation: Option<&mut ExportObservation>,
     ) -> ExportReport {
         let Some(attempt) = association.capacities.as_mut() else {
             return with_failure(&association, ExportStatus::Conflict, Failure::Conflict);
@@ -423,7 +550,13 @@ impl CapacitiesDestination {
         let Some(id) = attempt.candidate else {
             return report(&association, ExportStatus::ReconcileRequired);
         };
-        match pending(self.read_candidate(attempt, id, budget), canceled, budget).await {
+        let read = async {
+            if let Some(observation) = observation {
+                observation.destination_polled = true;
+            }
+            self.read_candidate(attempt, id, budget).await
+        };
+        match pending(read, canceled, budget).await {
             Ok(Some(block)) => {
                 attempt.verified_body_block = Some(block);
                 association.native_note = Some(id.to_string());
@@ -443,6 +576,77 @@ impl CapacitiesDestination {
             Err(failure) => with_failure(&association, ExportStatus::ReconcileRequired, failure),
         }
     }
+}
+
+impl super::dispatch::OwnedDestination for CapacitiesDestination {
+    fn backend(&self) -> &str {
+        CAPACITIES_BACKEND
+    }
+    fn association_id(&self, conversation: Uuid, correlation: Uuid) -> Uuid {
+        CapacitiesAttempt::association_id(conversation, self.space, correlation)
+    }
+    fn intent_binding(&self) -> String {
+        // Fixed UUID/ordered UUID set serialization cannot fail; no token enters the intent.
+        serde_json::to_string(&(CAPACITIES_BACKEND, self.space, CAPACITIES_PAGE, &self.tags))
+            .expect("Capacities intent primitives")
+    }
+    async fn export_owned(
+        &self,
+        ledger: &Ledger,
+        note: &PreparedNote,
+        canceled: watch::Receiver<bool>,
+        owner: &ExportOwner<'_>,
+        control: Option<&mut ExportControl<'_>>,
+    ) -> ExportReport {
+        self.owned_export(ledger, note, canceled, owner, control)
+            .await
+    }
+    async fn reconcile_owned(
+        &self,
+        ledger: &Ledger,
+        conversation: Uuid,
+        correlation: Uuid,
+        canceled: watch::Receiver<bool>,
+        owner: &ExportOwner<'_>,
+        observation: Option<&mut ExportObservation>,
+    ) -> ExportReport {
+        self.owned_reconcile(
+            ledger,
+            conversation,
+            correlation,
+            canceled,
+            owner,
+            observation,
+        )
+        .await
+    }
+}
+
+fn no_send(
+    ledger: &Ledger,
+    mut association: ExportAssociation,
+    failure: Option<Failure>,
+    control: &mut Option<&mut ExportControl<'_>>,
+) -> ExportReport {
+    if failure.is_some() {
+        transition(&mut association, Outcome::Failed, "failed-no-send");
+    } else {
+        transition(&mut association, Outcome::Canceled, "canceled-no-send");
+    }
+    let saved = store_state(ledger, association.clone()).is_ok();
+    if let Some(c) = control.as_deref_mut() {
+        c.observation.no_send_recorded = Some(saved);
+    }
+    if !saved {
+        return with_failure(
+            &association,
+            ExportStatus::ReconcileRequired,
+            Failure::Storage,
+        );
+    }
+    let mut result = terminal(&association);
+    result.failure = failure;
+    result
 }
 
 fn transport(error: reqwest::Error) -> Failure {
