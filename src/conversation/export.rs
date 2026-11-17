@@ -19,6 +19,8 @@ pub struct CapacitiesAttempt {
     pub payload_sha256: String,
     pub body_sha256: String,
     pub tags: BTreeSet<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<Uuid>,
     pub candidate: Option<Uuid>,
     pub verified_body_block: Option<String>,
 }
@@ -43,13 +45,15 @@ impl CapacitiesAttempt {
     }
 
     fn same_plan(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.evidence_version == other.evidence_version
+            && self.id == other.id
             && self.space == other.space
             && self.structure == other.structure
             && self.correlation == other.correlation
             && self.payload_sha256 == other.payload_sha256
             && self.body_sha256 == other.body_sha256
             && self.tags == other.tags
+            && self.grant_id == other.grant_id
     }
 
     fn validate(&self, association: &ExportAssociation) -> Result<()> {
@@ -64,7 +68,11 @@ impl CapacitiesAttempt {
         };
         ensure!(
             association.backend == CAPACITIES_BACKEND
-                && self.evidence_version == 1
+                && matches!(
+                    (self.evidence_version, self.grant_id),
+                    (1, None) | (2, Some(_))
+                )
+                && self.grant_id.is_none_or(|id| !id.is_nil())
                 && association.attempt.is_none()
                 && self.structure == CAPACITIES_PAGE
                 && !association.conversation.is_nil()
@@ -360,6 +368,52 @@ impl ExportAssociation {
 }
 
 impl Ledger {
+    /// Resolve the portable correlation against existing heads, including all
+    /// conflicting heads of a matching record. No active provider preference.
+    pub(crate) fn original_exports(
+        &self,
+        conversation: Uuid,
+        correlation: Uuid,
+    ) -> Result<Vec<ExportAssociation>> {
+        ensure!(
+            !conversation.is_nil() && !correlation.is_nil() && conversation != correlation,
+            "invalid export identity"
+        );
+        self.live_root(conversation, None)?;
+        let (unavailable, heads) = self.store.snapshot_heads_matching_with_status(
+            &[Namespace::ExportAssociation],
+            8,
+            |envelope| {
+                let record = &envelope.payload["record"];
+                let matches_uuid = |field: &serde_json::Value, id| {
+                    field.as_str().and_then(|s| Uuid::parse_str(s).ok()) == Some(id)
+                };
+                envelope.record_id == correlation
+                    || (matches_uuid(&record["conversation"], conversation)
+                        && matches_uuid(&record["capacities"]["correlation"], correlation))
+            },
+        )?;
+        ensure!(unavailable == 0, "incomplete export history");
+        heads
+            .iter()
+            .map(|head| {
+                let Record::Export(association) = Self::decode(head)? else {
+                    bail!("invalid original export")
+                };
+                ensure!(
+                    association.conversation == conversation
+                        && association
+                            .capacities
+                            .as_ref()
+                            .map_or(association.id, |a| a.correlation)
+                            == correlation,
+                    "foreign export association"
+                );
+                Ok(association)
+            })
+            .collect()
+    }
+
     /// Current export facts only; no dispatch or native capability is returned.
     pub fn export_association(
         &self,

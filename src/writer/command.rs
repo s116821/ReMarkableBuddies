@@ -210,7 +210,7 @@ fn run_flow(
     request: crate::writer_flow::Request,
 ) -> crate::writer_flow::Report {
     use crate::{
-        note_export::mem::MemDestination,
+        note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure},
         writer_flow::{self, Failure as FlowFailure},
     };
     let result = (|| -> std::result::Result<_, FlowFailure> {
@@ -240,12 +240,29 @@ fn run_flow(
         } else {
             None
         };
-        let token = std::env::var("MEM_API_KEY").map_err(|_| FlowFailure::MissingCredentials)?;
-        let destination =
-            MemDestination::new(&token).map_err(|_| FlowFailure::MissingCredentials)?;
-        let ledger = Ledger::new(Arc::new(
-            Store::open(config.paths).map_err(|_| FlowFailure::Storage)?,
-        ));
+        let destination_failure = |failure| match failure {
+            ExportFailure::MissingCredentials
+            | ExportFailure::MissingCapacitiesCredentials
+            | ExportFailure::Authentication
+            | ExportFailure::Transport => FlowFailure::MissingCredentials,
+            ExportFailure::Unsupported => FlowFailure::Unsupported,
+            _ => FlowFailure::Storage,
+        };
+        let (ledger, destination) = match &request {
+            writer_flow::Request::ReconcileExport {
+                conversation,
+                correlation,
+            } => ConfiguredDestination::original(&config, *conversation, *correlation)
+                .map_err(destination_failure)?,
+            _ => {
+                let destination =
+                    ConfiguredDestination::selected(&config).map_err(destination_failure)?;
+                let ledger = Ledger::new(Arc::new(
+                    Store::open(config.paths).map_err(|_| FlowFailure::Storage)?,
+                ));
+                (ledger, destination)
+            }
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -255,22 +272,24 @@ fn run_flow(
             let (sender, canceled) = tokio::sync::watch::channel(false);
             let mut worker = tokio::task::spawn_blocking(move || {
                 if let Some(mut model) = model {
-                    writer_flow::run(
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut model,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 } else {
-                    writer_flow::run(
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut NoModel,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 }
             });

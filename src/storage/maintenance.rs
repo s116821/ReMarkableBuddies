@@ -162,6 +162,19 @@ impl Store {
     pub fn open_existing(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, false)
     }
+    /// Existing-only export reconciliation supports legacy and ready ordinary
+    /// notebook storage without importing or initializing another mode.
+    pub(crate) fn open_existing_for_export_reconciliation(
+        paths: StorePaths,
+    ) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |store, generation| store.recover(generation),
+        )
+    }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)

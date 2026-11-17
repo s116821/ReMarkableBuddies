@@ -601,6 +601,7 @@ fn refused(request: &Request, failure: runner::Failure) -> Report {
     }
 }
 pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
+    use crate::note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure};
     let result = (|| -> std::result::Result<Report, runner::Failure> {
         request
             .preflight()
@@ -629,14 +630,14 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             None
         };
+        let selected = || {
+            ConfiguredDestination::selected(&config).map_err(|failure| match failure {
+                ExportFailure::Unsupported => runner::Failure::Unsupported,
+                _ => runner::Failure::MissingCredentials,
+            })
+        };
         let mut destination = if !config.memory.enabled && request.joined().is_some() {
-            Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            )
+            Some(selected()?)
         } else {
             None
         };
@@ -726,13 +727,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             effective.base_url,
         );
         if destination.is_none() && request.joined().is_some() {
-            destination = Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            );
+            destination = Some(selected()?);
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -743,7 +738,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             let (sender,canceled)=tokio::sync::watch::channel(false);
             let mut worker=tokio::task::spawn_blocking(move|| {
                 let _memory = memory;
-                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run(&ledger,&mut model,&destination,*input,identity,canceled)))}
+                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run_destination_with_events(&ledger,&mut model,&destination,*input,identity,canceled,&mut |_, _| {})))}
                 else {Report::Generation(runner::run(&ledger,&mut model,*input,&mut||*canceled.borrow()).report)}
             });
             let joined=tokio::select! {result=&mut worker=>result,_=tokio::signal::ctrl_c()=>{let _=sender.send(true);worker.await}};

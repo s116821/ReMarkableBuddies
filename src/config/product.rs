@@ -6,7 +6,18 @@ use serde_json::Value;
 #[serde(rename_all = "kebab-case")]
 pub enum ExportDestination {
     Mem,
+    Capacities,
     Disabled,
+}
+impl ExportDestination {
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mem" => Some(Self::Mem),
+            "capacities" => Some(Self::Capacities),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -101,11 +112,10 @@ impl<'de> Deserialize<'de> for ProductConfiguration {
                         }
                         "export_destination" => {
                             result.declarations |= 8;
-                            result.export_destination = match value.as_str() {
-                                Some("mem") => ExportDestination::Mem,
-                                Some("disabled") => ExportDestination::Disabled,
-                                _ => return Err(de::Error::custom("invalid export backend")),
-                            }
+                            result.export_destination = value
+                                .as_str()
+                                .and_then(ExportDestination::parse)
+                                .ok_or_else(|| de::Error::custom("invalid export backend"))?
                         }
                         _ => return Err(de::Error::custom("unsupported product setting")),
                     }
@@ -133,8 +143,15 @@ impl super::Config {
             .and_then(Option::as_ref)
             .is_none_or(|p| {
                 p.writer_enabled
-                    && (!external_export || p.export_destination == ExportDestination::Mem)
+                    && (!external_export || p.export_destination != ExportDestination::Disabled)
             })
+    }
+
+    pub fn export_destination(&self) -> ExportDestination {
+        self.product_settings
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map_or(ExportDestination::Mem, |p| p.export_destination)
     }
 }
 
@@ -165,11 +182,11 @@ mod tests {
         }
         for reader in [false, true] {
             for writer in [false, true] {
-                for backend in ["mem", "disabled"] {
+                for backend in ["mem", "disabled", "capacities"] {
                     let config:Config=serde_json::from_value(json!({"product_settings":{"reader_enabled":reader,"writer_enabled":writer,"export_destination":backend}})).unwrap();
                     assert_eq!(config.reader_enabled(), reader);
                     assert_eq!(config.admits_writer(false), writer);
-                    assert_eq!(config.admits_writer(true), writer && backend == "mem");
+                    assert_eq!(config.admits_writer(true), writer && backend != "disabled");
                 }
             }
         }

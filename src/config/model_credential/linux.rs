@@ -240,6 +240,52 @@ fn parent(path: &Path) -> Checked<fs::Metadata> {
     }
     Ok(meta)
 }
+
+/// Read one named credential from the private root with the existing owner
+/// and identity checks. Callers supply a compiled prefix and validated name.
+pub(crate) fn read_private(root: &Path, target: &Path, limit: u64) -> Checked<Vec<u8>> {
+    if !clean(root) || target.parent() != Some(root) {
+        return Err(Status::Unsupported);
+    }
+    let root_meta = parent(root)?;
+    let before = fs::symlink_metadata(target).map_err(|_| Status::Unavailable)?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || !owner(&before)
+        || !private_mode(before.mode() & 0o7777)
+        || before.len() > limit
+    {
+        return Err(Status::Unsupported);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(target)
+        .map_err(|_| Status::Unavailable)?;
+    let expected = metadata_hash(&before, true);
+    let opened = || {
+        file.metadata()
+            .map(|meta| metadata_hash(&meta, true))
+            .map_err(|_| Status::Unavailable)
+    };
+    if opened()? != expected {
+        return Err(Status::Unavailable);
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Status::Unavailable)?;
+    let current = fs::symlink_metadata(target).map_err(|_| Status::Unavailable)?;
+    if bytes.len() as u64 != before.len()
+        || opened()? != expected
+        || metadata_hash(&current, true) != expected
+        || metadata_hash(&parent(root)?, false) != metadata_hash(&root_meta, false)
+    {
+        return Err(Status::Unavailable);
+    }
+    Ok(bytes)
+}
 struct Observation {
     config: Config,
     path: PathBuf,

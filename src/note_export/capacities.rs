@@ -23,6 +23,7 @@ pub struct CapacitiesDestination {
     origin: Url,
     space: Uuid,
     tags: BTreeSet<Uuid>,
+    grant_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +71,20 @@ impl CapacitiesDestination {
     /// The caller supplies an authorized REST access token for its selected space.
     pub fn new(token: &str, space: Uuid, tags: BTreeSet<Uuid>) -> Result<Self> {
         Self::build("https://api.capacities.io/", token, space, tags, false)
+    }
+
+    pub(super) fn enrolled(
+        token: &str,
+        space: Uuid,
+        grant_id: Uuid,
+        tags: BTreeSet<Uuid>,
+    ) -> Result<Self> {
+        if grant_id.is_nil() {
+            return Err(Failure::MissingCapacitiesCredentials);
+        }
+        let mut destination = Self::new(token, space, tags)?;
+        destination.grant_id = Some(grant_id);
+        Ok(destination)
     }
 
     /// Existing HTTP fixture suites can exercise the same adapter on loopback.
@@ -128,6 +143,7 @@ impl CapacitiesDestination {
             origin,
             space,
             tags,
+            grant_id: None,
         })
     }
 
@@ -276,7 +292,7 @@ impl CapacitiesDestination {
             return fallback(ExportStatus::Refused, Some(Failure::InvalidInput));
         }
         let id = CapacitiesAttempt::association_id(note.conversation, self.space, note.correlation);
-        let (payload, attempt) = match prepare(note, self.space, &self.tags) {
+        let (payload, attempt) = match prepare(note, self.space, &self.tags, self.grant_id) {
             Ok(plan) => plan,
             Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
         };
@@ -538,7 +554,7 @@ impl CapacitiesDestination {
         let Some(attempt) = association.capacities.as_mut() else {
             return with_failure(&association, ExportStatus::Conflict, Failure::Conflict);
         };
-        if attempt.space != self.space {
+        if attempt.space != self.space || attempt.grant_id != self.grant_id {
             return with_failure(&association, ExportStatus::Conflict, Failure::Conflict);
         }
         if matches!(
@@ -587,8 +603,18 @@ impl super::dispatch::OwnedDestination for CapacitiesDestination {
     }
     fn intent_binding(&self) -> String {
         // Fixed UUID/ordered UUID set serialization cannot fail; no token enters the intent.
-        serde_json::to_string(&(CAPACITIES_BACKEND, self.space, CAPACITIES_PAGE, &self.tags))
-            .expect("Capacities intent primitives")
+        if let Some(grant) = self.grant_id {
+            serde_json::to_string(&(
+                CAPACITIES_BACKEND,
+                self.space,
+                CAPACITIES_PAGE,
+                &self.tags,
+                grant,
+            ))
+        } else {
+            serde_json::to_string(&(CAPACITIES_BACKEND, self.space, CAPACITIES_PAGE, &self.tags))
+        }
+        .expect("Capacities intent primitives")
     }
     async fn export_owned(
         &self,
@@ -676,6 +702,7 @@ fn prepare(
     note: &PreparedNote,
     space: Uuid,
     tags: &BTreeSet<Uuid>,
+    grant_id: Option<Uuid>,
 ) -> Result<(Value, CapacitiesAttempt)> {
     let mut properties = json!({"title": {"type": "title", "title": {"value": note.title}}});
     if !tags.is_empty() {
@@ -697,7 +724,7 @@ fn prepare(
         return Err(Failure::InvalidInput);
     }
     let attempt = CapacitiesAttempt {
-        evidence_version: 1,
+        evidence_version: if grant_id.is_some() { 2 } else { 1 },
         id: note.effect_operation,
         space,
         structure: CAPACITIES_PAGE.to_owned(),
@@ -705,6 +732,7 @@ fn prepare(
         payload_sha256: digest(&encoded),
         body_sha256: digest(note.markdown.as_bytes()),
         tags: tags.clone(),
+        grant_id,
         candidate: None,
         verified_body_block: None,
     };
@@ -798,10 +826,9 @@ fn matches_plan(
 ) -> bool {
     association.source_scope == note.source_scope
         && association.source_revision == note.source_revision
-        && association
-            .capacities
-            .as_ref()
-            .is_some_and(|old| old.payload_sha256 == attempt.payload_sha256)
+        && association.capacities.as_ref().is_some_and(|old| {
+            old.payload_sha256 == attempt.payload_sha256 && old.grant_id == attempt.grant_id
+        })
 }
 
 fn transition(association: &mut ExportAssociation, outcome: Outcome, stage: &str) {

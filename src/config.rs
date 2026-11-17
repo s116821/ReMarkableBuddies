@@ -1,5 +1,6 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
 pub mod basic;
+pub mod capacities;
 pub mod credential_reference;
 pub mod inspection;
 pub mod memory_settings;
@@ -84,6 +85,8 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub product_settings: Option<Option<product::ProductConfiguration>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacities_export: Option<capacities::ExportConnection>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub trigger_corner: Option<String>,
@@ -107,6 +110,7 @@ impl Default for Config {
         Self {
             config_schema_version: 1,
             product_settings: None,
+            capacities_export: None,
             model: None,
             base_url: None,
             trigger_corner: None,
@@ -154,6 +158,9 @@ impl Config {
             "unsupported product settings version"
         );
         self.sync.validate()?;
+        if let Some(connection) = &self.capacities_export {
+            connection.validate()?;
+        }
         self.memory.validate()?;
         self.reader.validate()?;
         ensure!(
