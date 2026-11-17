@@ -25,7 +25,8 @@ fn preflight_server() -> (CapacitiesDestination, std::thread::JoinHandle<()>) {
             (
                 "/space/structures",
                 serde_json::json!({"structures":[{"id":"RootPage",
-                "propertyDefinitions":[{"id":"title","type":"title","writable":true}]}]}),
+                "propertyDefinitions":[{"id":"title","type":"title","writable":true},
+                {"id":"content","type":"richText","writable":true}]}]}),
             ),
         ] {
             let end = std::time::Instant::now() + Duration::from_secs(5);

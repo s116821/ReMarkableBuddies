@@ -292,12 +292,14 @@ struct RemoteState {
     cancel_post: Option<watch::Sender<bool>>,
     block_post: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     capacities: Option<CapacitiesApi>,
+    fail_capacities_candidate: Option<Arc<Store>>,
 }
 struct CapacitiesApi {
     space: Uuid,
     object: Uuid,
     tag: Uuid,
     writable_tags: bool,
+    writable_content: bool,
     valid_tag: bool,
     fail_readback: bool,
     page: Option<Value>,
@@ -310,6 +312,7 @@ impl CapacitiesApi {
             object: Uuid::new_v4(),
             tag: Uuid::new_v4(),
             writable_tags: true,
+            writable_content: true,
             valid_tag: true,
             fail_readback: false,
             page: None,
@@ -328,6 +331,7 @@ impl CapacitiesApi {
                     "id": "RootPage",
                     "propertyDefinitions": [
                         {"id": "title", "type": "title", "writable": true},
+                        {"id": "content", "type": "richText", "writable": self.writable_content},
                         {"id": "tags", "type": "entity", "writable": self.writable_tags}
                     ]
                 }]}),
@@ -358,11 +362,39 @@ impl CapacitiesApi {
                 let mut page = body.clone();
                 page["id"] = json!(self.object);
                 page["blocks"]["content"][0]["id"] = json!("marker-id");
-                page["blocks"]["content"][1]["id"] = json!("body-id");
+                capacities_ids(&mut page["blocks"]["content"][1], "body-id");
                 self.page = Some(page.clone());
                 (200, page)
             }
+            ("PATCH", "/blocks/block") => {
+                assert_eq!(body.as_object().unwrap().len(), 4);
+                assert_eq!(body["id"], json!(self.object));
+                assert_eq!(body["propertyId"], "content");
+                assert_eq!(body["block"]["type"], "GroupBlock");
+                let group_id = body["blockId"].as_str().unwrap();
+                let page = self.page.as_mut().unwrap();
+                let block = page["blocks"]["content"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|block| block["id"].as_str() == Some(group_id))
+                    .unwrap();
+                let mut next = body["block"].clone();
+                capacities_ids(&mut next, &format!("replacement-{}", Uuid::new_v4()));
+                next["id"] = json!(group_id);
+                *block = next.clone();
+                (200, next)
+            }
             _ => panic!("unexpected Capacities fixture request: {method} {path}"),
+        }
+    }
+}
+
+fn capacities_ids(block: &mut Value, id: &str) {
+    block["id"] = json!(id);
+    if let Some(children) = block.get_mut("blocks").and_then(Value::as_array_mut) {
+        for (index, child) in children.iter_mut().enumerate() {
+            capacities_ids(child, &format!("{id}-{index}"));
         }
     }
 }
@@ -471,7 +503,16 @@ impl Api {
                 } else {
                     panic!("unexpected fixture request: {method} {path}");
                 };
-                let drop_reply = method == "POST" && std::mem::take(&mut state.lose_ack);
+                if method == "PATCH" && state.capacities.is_some() {
+                    if let Some(store) = state.fail_capacities_candidate.take() {
+                        store
+                            .set_fault(remarkable_reader_buddy::storage::Fault::BeforeCommit)
+                            .unwrap();
+                    }
+                }
+                let mutation =
+                    method == "POST" || (method == "PATCH" && state.capacities.is_some());
+                let drop_reply = mutation && std::mem::take(&mut state.lose_ack);
                 let cancel = if method == "POST" {
                     state.cancel_post.take()
                 } else {
@@ -1329,7 +1370,8 @@ async fn capacities_candidate_survives_reopen_and_reconciles_only_its_exact_obje
                 "type": "TextBlock",
                 "tokens": [{"type": "TextToken", "text": "My addition", "style": {}}]
             }));
-        page["blocks"]["content"][1]["text"] = json!("Edited export block");
+        page["blocks"]["content"][1]["blocks"][0]["tokens"][0]["text"] =
+            json!("Edited export block");
     }
     let (_tx, rx) = watch::channel(false);
     let edited = destination
@@ -1338,15 +1380,19 @@ async fn capacities_candidate_survives_reopen_and_reconciles_only_its_exact_obje
     assert_eq!(edited.status, ExportStatus::ReconcileRequired);
     assert_eq!(edited.native_note, None);
 
-    api.state
-        .lock()
-        .unwrap()
-        .capacities
-        .as_mut()
-        .unwrap()
-        .page
-        .as_mut()
-        .unwrap()["blocks"]["content"][1]["text"] = json!(note.markdown);
+    // Restore the exact desired payload through the fixture's retained request.
+    {
+        let mut state = api.state.lock().unwrap();
+        let mut group = state
+            .requests
+            .iter()
+            .find(|(method, _, _)| method == "POST")
+            .unwrap()
+            .2["blocks"]["content"][1]
+            .clone();
+        capacities_ids(&mut group, "body-id");
+        state.capacities.as_mut().unwrap().page.as_mut().unwrap()["blocks"]["content"][1] = group;
+    }
     let (_tx, rx) = watch::channel(false);
     let confirmed = destination
         .reconcile(&ledger, conversation, note.correlation, rx)
@@ -1362,10 +1408,261 @@ async fn capacities_candidate_survives_reopen_and_reconciles_only_its_exact_obje
     note.markdown.push_str(" New revision.");
     let (_tx, rx) = watch::channel(false);
     let update = destination.export(&ledger, &note, rx).await;
-    assert_eq!(update.status, ExportStatus::Refused);
-    assert_eq!(update.failure, Some(note_export::Failure::Unsupported));
+    assert_eq!(update.status, ExportStatus::VerifiedCurrent);
+    assert_eq!(update.native_note, Some(object.to_string()));
     assert_eq!(api.count("POST"), 1);
+    assert_eq!(api.count("PATCH"), 1);
+    {
+        let state = api.state.lock().unwrap();
+        let page = state.capacities.as_ref().unwrap().page.as_ref().unwrap();
+        assert_eq!(
+            page["properties"]["title"]["title"]["value"],
+            "Edited title"
+        );
+        assert_eq!(
+            page["blocks"]["content"][2]["tokens"][0]["text"],
+            "My addition"
+        );
+    }
+}
+
+#[tokio::test]
+async fn capacities_update_lost_ack_keeps_target_and_new_child_baseline_across_reopen() {
+    let local = LocalStore::new();
+    let (ledger, conversation) = local.ledger();
+    let api = Api::new();
+    let fixture = CapacitiesApi::fixture();
+    let destination = api.capacities_client(fixture.space, fixture.tag);
+    let object = fixture.object;
+    let mut note = prepared(conversation);
+    let original = note.clone();
+    api.state.lock().unwrap().capacities = Some(fixture);
+    let (_tx, rx) = watch::channel(false);
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::VerifiedCurrent
+    );
+    let original_group = api
+        .state
+        .lock()
+        .unwrap()
+        .capacities
+        .as_ref()
+        .unwrap()
+        .page
+        .as_ref()
+        .unwrap()["blocks"]["content"][1]
+        .clone();
+    {
+        let mut state = api.state.lock().unwrap();
+        let page = state.capacities.as_mut().unwrap().page.as_mut().unwrap();
+        page["properties"]["title"]["title"]["value"] = json!("User title");
+        page["properties"]["tags"]["entity"] = json!([]);
+        state.lose_ack = true;
+    }
+    note.effect_operation = Uuid::new_v4();
+    note.source_revision = "r2".into();
+    note.markdown = "# New result\n\n**Readable** $x^2$ and `code`.".into();
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::ReconcileRequired
+    );
+    assert_eq!(api.count("PATCH"), 1);
+    let old = destination.export(&ledger, &original, rx.clone()).await;
+    assert_eq!(old.status, ExportStatus::HistoricalCompleted);
+    assert_eq!(old.effect_operation, original.effect_operation);
+    drop(ledger);
+    let ledger = Ledger::new(local.open());
+    assert_eq!(
+        destination
+            .reconcile(&ledger, conversation, note.correlation, rx.clone())
+            .await
+            .status,
+        ExportStatus::VerifiedCurrent
+    );
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::HistoricalCompleted
+    );
+    assert_eq!(api.count("PATCH"), 1);
+    // A new deliberate update consumes the newly observed child identities.
+    note.effect_operation = Uuid::new_v4();
+    note.source_revision = "r3".into();
+    note.markdown.push_str("\n\n- one\n- two");
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::VerifiedCurrent
+    );
+    assert_eq!(api.count("PATCH"), 2);
+    assert_eq!(api.count("POST"), 1);
+    {
+        let mut state = api.state.lock().unwrap();
+        let page = state.capacities.as_mut().unwrap().page.as_mut().unwrap();
+        assert_eq!(page["id"], json!(object));
+        assert_eq!(page["properties"]["title"]["title"]["value"], "User title");
+        assert_eq!(page["properties"]["tags"]["entity"], json!([]));
+        assert_eq!(page["blocks"]["content"][1]["id"], original_group["id"]);
+        assert_ne!(
+            page["blocks"]["content"][1]["blocks"][0]["id"],
+            original_group["blocks"][0]["id"]
+        );
+        page["blocks"]["content"][1]["blocks"][0]["tokens"][0]["text"] =
+            json!("User changed managed text");
+    }
+    note.effect_operation = Uuid::new_v4();
+    note.source_revision = "r4".into();
+    let refused = destination.export(&ledger, &note, rx).await;
+    assert_eq!(refused.status, ExportStatus::Refused);
+    assert_eq!(refused.failure, Some(note_export::Failure::Conflict));
+    assert_eq!(api.count("PATCH"), 2);
+}
+
+#[tokio::test]
+async fn capacities_update_recovers_when_candidate_commit_never_happened() {
+    let local = LocalStore::new();
+    let (ledger, conversation) = local.ledger();
+    let api = Api::new();
+    let fixture = CapacitiesApi::fixture();
+    let space = fixture.space;
+    let destination = api.capacities_client(space, fixture.tag);
+    api.state.lock().unwrap().capacities = Some(fixture);
+    let mut note = prepared(conversation);
+    let (_tx, rx) = watch::channel(false);
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::VerifiedCurrent
+    );
+    api.state.lock().unwrap().fail_capacities_candidate = Some(ledger.store().clone());
+    note.effect_operation = Uuid::new_v4();
+    note.source_revision = "second".into();
+    note.markdown.push_str("\n\nUpdated after crash.");
+    let report = destination.export(&ledger, &note, rx.clone()).await;
+    assert_eq!(report.status, ExportStatus::ReconcileRequired);
+    assert_eq!(report.failure, Some(note_export::Failure::Storage));
+    assert_eq!(api.count("PATCH"), 1);
+    drop(ledger);
+    let ledger = Ledger::new(local.open());
+    let key = CapacitiesAttempt::association_id(conversation, space, note.correlation);
+    assert_eq!(
+        ledger
+            .export_association(conversation, key)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        Outcome::Prepared
+    );
+    assert_eq!(
+        destination
+            .reconcile(&ledger, conversation, note.correlation, rx)
+            .await
+            .status,
+        ExportStatus::VerifiedCurrent
+    );
+    assert_eq!(
+        ledger
+            .export_association(conversation, key)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        Outcome::Completed
+    );
+    assert_eq!(api.count("PATCH"), 1);
+    assert_eq!(api.count("POST"), 1);
+}
+
+#[tokio::test]
+async fn capacities_cannot_adopt_an_arbitrary_update_or_write_nonwritable_content() {
+    use remarkable_reader_buddy::{
+        conversation::{CapacitiesBaseline, ExportAction},
+        storage::Namespace,
+    };
+    let local = LocalStore::new();
+    let (ledger, conversation) = local.ledger();
+    let api = Api::new();
+    let fixture = CapacitiesApi::fixture();
+    let space = fixture.space;
+    let destination = api.capacities_client(space, fixture.tag);
+    api.state.lock().unwrap().capacities = Some(fixture);
+    let mut note = prepared(conversation);
+    let (_tx, rx) = watch::channel(false);
+    assert_eq!(
+        destination.export(&ledger, &note, rx.clone()).await.status,
+        ExportStatus::VerifiedCurrent
+    );
+    let key = CapacitiesAttempt::association_id(conversation, space, note.correlation);
+    let mut fabricated = ledger
+        .export_association(conversation, key)
+        .unwrap()
+        .unwrap();
+    let attempt = fabricated.capacities.as_mut().unwrap();
+    let managed = attempt.managed.as_mut().unwrap();
+    managed.action = ExportAction::Update;
+    managed.baseline = Some(CapacitiesBaseline {
+        object: attempt.candidate.unwrap(),
+        block: attempt.verified_body_block.take().unwrap(),
+        identity_sha256: managed.confirmed_sha256.take().unwrap(),
+    });
+    attempt.correlation = Uuid::new_v4();
+    attempt.id = Uuid::new_v4();
+    fabricated.id = CapacitiesAttempt::association_id(conversation, space, attempt.correlation);
+    fabricated.operation = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "urn:remarkable-buddies:capacities-export-command:v1:{}:prepared",
+            attempt.id
+        )
+        .as_bytes(),
+    );
+    fabricated.native_note = None;
+    fabricated.outcome = Outcome::Prepared;
+    assert!(ledger
+        .associate_export(
+            fabricated.operation,
+            ledger
+                .expected(Namespace::Conversation, conversation)
+                .unwrap(),
+            ledger
+                .expected(Namespace::ExportAssociation, fabricated.id)
+                .unwrap(),
+            fabricated
+        )
+        .is_err());
+    api.state
+        .lock()
+        .unwrap()
+        .capacities
+        .as_mut()
+        .unwrap()
+        .writable_content = false;
+    note.effect_operation = Uuid::new_v4();
+    note.markdown.push_str(" More.");
+    let result = destination.export(&ledger, &note, rx).await;
+    assert_eq!(result.failure, Some(note_export::Failure::Unsupported));
     assert_eq!(api.count("PATCH"), 0);
+}
+
+#[tokio::test]
+async fn capacities_unrepresentable_markdown_never_contacts_provider() {
+    let local = LocalStore::new();
+    let (ledger, conversation) = local.ledger();
+    let api = Api::new();
+    let fixture = CapacitiesApi::fixture();
+    let destination = api.capacities_client(fixture.space, fixture.tag);
+    api.state.lock().unwrap().capacities = Some(fixture);
+    for markdown in [
+        "![hidden](https://example.org/secret.png)",
+        "<script>bad()</script>",
+        "|a|b|\n|-|-|\n|c|d|",
+    ] {
+        let mut note = prepared(conversation);
+        note.markdown = markdown.into();
+        let (_tx, rx) = watch::channel(false);
+        assert_eq!(
+            destination.export(&ledger, &note, rx).await.status,
+            ExportStatus::Refused
+        );
+    }
+    assert_eq!(api.count("GET") + api.count("POST") + api.count("PATCH"), 0);
 }
 
 #[tokio::test]

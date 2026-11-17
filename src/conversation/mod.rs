@@ -1515,7 +1515,10 @@ impl Ledger {
             ensure!(
                 association.outcome == Outcome::Prepared
                     && association.native_note.is_none()
-                    && (association.capacities.is_some()
+                    && (association.capacities.as_ref().is_some_and(|a| a
+                        .managed
+                        .as_ref()
+                        .is_none_or(|m| m.action == ExportAction::Create))
                         || association
                             .attempt
                             .as_ref()

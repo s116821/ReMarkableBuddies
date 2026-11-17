@@ -23,6 +23,39 @@ pub struct CapacitiesAttempt {
     pub grant_id: Option<Uuid>,
     pub candidate: Option<Uuid>,
     pub verified_body_block: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<CapacitiesManaged>,
+}
+
+/// Version-three readable content; older evidence remains literal Markdown.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesManaged {
+    pub mapping_revision: u32,
+    pub action: ExportAction,
+    pub creation_effect: Uuid,
+    pub desired_sha256: String,
+    pub baseline: Option<CapacitiesBaseline>,
+    pub confirmed_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesBaseline {
+    pub object: Uuid,
+    pub block: String,
+    /// Exact previously observed managed tree, including descendant IDs.
+    pub identity_sha256: String,
+}
+
+impl CapacitiesManaged {
+    fn same_plan(&self, other: &Self) -> bool {
+        self.mapping_revision == other.mapping_revision
+            && self.action == other.action
+            && self.creation_effect == other.creation_effect
+            && self.desired_sha256 == other.desired_sha256
+            && self.baseline == other.baseline
+    }
 }
 
 impl CapacitiesAttempt {
@@ -44,7 +77,7 @@ impl CapacitiesAttempt {
         )
     }
 
-    fn same_plan(&self, other: &Self) -> bool {
+    pub(crate) fn same_plan(&self, other: &Self) -> bool {
         self.evidence_version == other.evidence_version
             && self.id == other.id
             && self.space == other.space
@@ -54,23 +87,32 @@ impl CapacitiesAttempt {
             && self.body_sha256 == other.body_sha256
             && self.tags == other.tags
             && self.grant_id == other.grant_id
+            && match (&self.managed, &other.managed) {
+                (Some(a), Some(b)) => a.same_plan(b),
+                (None, None) => true,
+                _ => false,
+            }
     }
 
     fn validate(&self, association: &ExportAssociation) -> Result<()> {
+        let update = self
+            .managed
+            .as_ref()
+            .is_some_and(|m| m.action == ExportAction::Update);
         let stage = match association.outcome {
-            Outcome::Prepared if self.candidate.is_none() => "prepared",
+            Outcome::Prepared if self.candidate.is_none() || update => "prepared",
             Outcome::ReconcileRequired if self.candidate.is_none() => "uncertain",
             Outcome::ReconcileRequired => "candidate",
             Outcome::Completed => "completed",
-            Outcome::Canceled if self.candidate.is_none() => "canceled-no-send",
-            Outcome::Failed if self.candidate.is_none() => "failed-no-send",
+            Outcome::Canceled if self.candidate.is_none() || update => "canceled-no-send",
+            Outcome::Failed if self.candidate.is_none() || update => "failed-no-send",
             _ => bail!("invalid Capacities export stage"),
         };
         ensure!(
             association.backend == CAPACITIES_BACKEND
                 && matches!(
                     (self.evidence_version, self.grant_id),
-                    (1, None) | (2, Some(_))
+                    (1, None) | (2, Some(_)) | (3, _)
                 )
                 && self.grant_id.is_none_or(|id| !id.is_nil())
                 && association.attempt.is_none()
@@ -92,6 +134,49 @@ impl CapacitiesAttempt {
                 && self.candidate.is_none_or(|id| !id.is_nil()),
             "invalid Capacities export scope"
         );
+        ensure!(
+            self.managed.is_some() == (self.evidence_version == 3),
+            "invalid managed representation"
+        );
+        if let Some(managed) = &self.managed {
+            ensure!(
+                managed.mapping_revision == 1
+                    && !managed.creation_effect.is_nil()
+                    && valid_digest(&managed.desired_sha256),
+                "invalid managed content plan"
+            );
+            match (managed.action, &managed.baseline) {
+                (ExportAction::Create, None) => ensure!(
+                    managed.creation_effect == self.id,
+                    "creation marker changed"
+                ),
+                (ExportAction::Update, Some(baseline)) => ensure!(
+                    !baseline.object.is_nil()
+                        && self.candidate == Some(baseline.object)
+                        && (1..=1024).contains(&baseline.block.len())
+                        && !baseline.block.chars().any(char::is_control)
+                        && valid_digest(&baseline.identity_sha256),
+                    "invalid managed update baseline"
+                ),
+                _ => bail!("managed action lacks exact baseline"),
+            }
+            ensure!(
+                match (&managed.confirmed_sha256, association.outcome) {
+                    (Some(hash), Outcome::Completed) => valid_digest(hash),
+                    (None, outcome) => outcome != Outcome::Completed,
+                    _ => false,
+                },
+                "unverified managed content baseline"
+            );
+            if let Some(baseline) = &managed.baseline {
+                if association.outcome == Outcome::Completed {
+                    ensure!(
+                        self.verified_body_block.as_deref() == Some(&baseline.block),
+                        "managed group changed"
+                    );
+                }
+            }
+        }
         if association.outcome == Outcome::Completed {
             ensure!(
                 self.candidate.map(|id| id.to_string()) == association.native_note
@@ -283,10 +368,60 @@ impl ExportAssociation {
                 ensure!(valid, "invalid Capacities export transition");
             } else {
                 ensure!(
-                    matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
-                        && self.outcome == Outcome::Prepared,
-                    "Capacities attempt cannot start another create"
+                    self.outcome == Outcome::Prepared,
+                    "new Capacities attempt not prepared"
                 );
+                if let Some(after_managed) = &after.managed {
+                    if after_managed.action == ExportAction::Update {
+                        let before_managed = before
+                            .managed
+                            .as_ref()
+                            .context("legacy content cannot be converted")?;
+                        let baseline = if old.outcome == Outcome::Completed {
+                            CapacitiesBaseline {
+                                object: before.candidate.context("missing original object")?,
+                                block: before
+                                    .verified_body_block
+                                    .clone()
+                                    .context("missing original group")?,
+                                identity_sha256: before_managed
+                                    .confirmed_sha256
+                                    .clone()
+                                    .context("missing confirmed tree")?,
+                            }
+                        } else {
+                            ensure!(
+                                matches!(old.outcome, Outcome::Canceled | Outcome::Failed),
+                                "unresolved managed update"
+                            );
+                            before_managed
+                                .baseline
+                                .clone()
+                                .context("no original update baseline")?
+                        };
+                        ensure!(
+                            after_managed.baseline.as_ref() == Some(&baseline)
+                                && after_managed.creation_effect == before_managed.creation_effect
+                                && after.grant_id == before.grant_id,
+                            "managed successor lost original custody"
+                        );
+                    } else {
+                        ensure!(
+                            matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
+                                && before
+                                    .managed
+                                    .as_ref()
+                                    .is_none_or(|m| m.action == ExportAction::Create),
+                            "managed successor cannot duplicate a note"
+                        );
+                    }
+                } else {
+                    ensure!(
+                        matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
+                            && before.managed.is_none(),
+                        "Capacities attempt cannot start another create"
+                    );
+                }
             }
             return Ok(());
         }

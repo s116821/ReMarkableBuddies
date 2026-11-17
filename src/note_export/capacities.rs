@@ -1,10 +1,14 @@
-//! Capacities REST create and exact-ID readback for explicitly prepared notes.
+//! Capacities REST create, managed-group updates and exact-ID readback.
+mod content;
 use super::{
     run::{dispatch, event, pending, report, selection_current, store_state, Owner},
     *,
 };
 use crate::{
-    conversation::{CapacitiesAttempt, Ledger, Outcome, CAPACITIES_BACKEND, CAPACITIES_PAGE},
+    conversation::{
+        CapacitiesAttempt, CapacitiesBaseline, CapacitiesManaged, ExportAction, Ledger, Outcome,
+        CAPACITIES_BACKEND, CAPACITIES_PAGE,
+    },
     storage::{digest, Namespace},
 };
 use reqwest::{
@@ -65,6 +69,11 @@ struct Object {
     properties: BTreeMap<String, Value>,
     #[serde(default)]
     blocks: BTreeMap<String, Vec<Value>>,
+}
+
+struct VerifiedBody {
+    id: String,
+    identity_sha256: Option<String>,
 }
 
 impl CapacitiesDestination {
@@ -204,6 +213,19 @@ impl CapacitiesDestination {
 
     async fn preflight(&self, budget: Budget) -> Result<()> {
         self.verify_space(budget).await?;
+        self.writable_page(true, budget).await?;
+        for tag in &self.tags {
+            let found: ObjectIdentity = self
+                .request(Method::GET, "object", Some(*tag), None, budget)
+                .await?;
+            if found.id.is_nil() || found.id != *tag || found.structure_id != "RootTag" {
+                return Err(Failure::Conflict);
+            }
+        }
+        Ok(())
+    }
+
+    async fn writable_page(&self, creating: bool, budget: Budget) -> Result<()> {
         let shapes: Structures = self
             .request(Method::GET, "space/structures", None, None, budget)
             .await?;
@@ -212,19 +234,18 @@ impl CapacitiesDestination {
             .iter()
             .filter(|shape| shape.id == CAPACITIES_PAGE);
         let page = pages.next().ok_or(Failure::Unsupported)?;
+        let mut content = page
+            .property_definitions
+            .iter()
+            .filter(|p| p.id == "content");
         if pages.next().is_some()
-            || !writable(page, "title", "title")
-            || (!self.tags.is_empty() && !writable(page, "tags", "entity"))
+            || !content.next().is_some_and(|p| p.writable)
+            || content.next().is_some()
+            || (creating
+                && (!writable(page, "title", "title")
+                    || (!self.tags.is_empty() && !writable(page, "tags", "entity"))))
         {
             return Err(Failure::Unsupported);
-        }
-        for tag in &self.tags {
-            let found: ObjectIdentity = self
-                .request(Method::GET, "object", Some(*tag), None, budget)
-                .await?;
-            if found.id != *tag || found.structure_id != "RootTag" {
-                return Err(Failure::Conflict);
-            }
         }
         Ok(())
     }
@@ -239,12 +260,51 @@ impl CapacitiesDestination {
         Ok(found.id)
     }
 
+    async fn write(
+        &self,
+        payload: Value,
+        attempt: &CapacitiesAttempt,
+        budget: Budget,
+    ) -> Result<Uuid> {
+        if let Some(baseline) = attempt.managed.as_ref().and_then(|m| m.baseline.as_ref()) {
+            let _: Value = self
+                .request(Method::PATCH, "blocks/block", None, Some(payload), budget)
+                .await?;
+            // The acknowledgement cannot authorize rebinding to a different object.
+            Ok(baseline.object)
+        } else {
+            self.create(payload, budget).await
+        }
+    }
+
+    async fn preflight_plan(&self, attempt: &CapacitiesAttempt, budget: Budget) -> Result<()> {
+        if let Some(baseline) = attempt.managed.as_ref().and_then(|m| m.baseline.as_ref()) {
+            self.verify_space(budget).await?;
+            self.writable_page(false, budget).await?;
+            let object: Object = self
+                .request(Method::GET, "object", Some(baseline.object), None, budget)
+                .await?;
+            let blocks = object_content(&object, attempt, baseline.object)?;
+            let group = blocks
+                .iter()
+                .find(|b| b["id"].as_str() == Some(&baseline.block))
+                .ok_or(Failure::Conflict)?;
+            let verified = content::verify_group(group)?;
+            if verified.identity_sha256 != baseline.identity_sha256 {
+                return Err(Failure::Conflict);
+            }
+            Ok(())
+        } else {
+            self.preflight(budget).await
+        }
+    }
+
     async fn read_candidate(
         &self,
         attempt: &CapacitiesAttempt,
         id: Uuid,
         budget: Budget,
-    ) -> Result<String> {
+    ) -> Result<VerifiedBody> {
         self.verify_space(budget).await?;
         let found: Object = self
             .request(Method::GET, "object", Some(id), None, budget)
@@ -292,7 +352,41 @@ impl CapacitiesDestination {
             return fallback(ExportStatus::Refused, Some(Failure::InvalidInput));
         }
         let id = CapacitiesAttempt::association_id(note.conversation, self.space, note.correlation);
-        let (payload, attempt) = match prepare(note, self.space, &self.tags, self.grant_id) {
+        let initial = match ledger.export_association(note.conversation, id) {
+            Ok(current) => current,
+            Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
+        };
+        let original_prepared = initial.as_ref().is_some_and(|a| {
+            a.outcome == Outcome::Prepared
+                && a.capacities
+                    .as_ref()
+                    .is_some_and(|p| p.id == note.effect_operation)
+        });
+        let historical = match if original_prepared {
+            Ok(None)
+        } else {
+            ledger.historical_export_attempt(note.conversation, id, note.effect_operation)
+        } {
+            Ok(found) => found,
+            Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
+        };
+        if historical.is_none() && !original_prepared {
+            if let Some(current) = initial.as_ref().filter(|a| {
+                !matches!(
+                    a.outcome,
+                    Outcome::Completed | Outcome::Failed | Outcome::Canceled
+                )
+            }) {
+                return report(current, ExportStatus::ReconcileRequired);
+            }
+        }
+        let (payload, attempt) = match prepare(
+            note,
+            self.space,
+            &self.tags,
+            self.grant_id,
+            historical.as_ref().or(initial.as_ref()),
+        ) {
             Ok(plan) => plan,
             Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
         };
@@ -326,8 +420,8 @@ impl CapacitiesDestination {
             Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
             _ => {}
         }
-        match ledger.historical_export_attempt(note.conversation, id, attempt.id) {
-            Ok(Some(found)) => {
+        match historical {
+            Some(found) => {
                 if !matches_plan(&found, note, &attempt) {
                     return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
                 }
@@ -345,8 +439,7 @@ impl CapacitiesDestination {
                     .readback(ledger, found, &mut canceled, budget, None)
                     .await;
             }
-            Ok(None) => {}
-            Err(_) => return fallback(ExportStatus::Refused, Some(Failure::Storage)),
+            None => {}
         }
         let expected = (|| {
             let root = ledger.expected(Namespace::Conversation, note.conversation)?;
@@ -357,21 +450,21 @@ impl CapacitiesDestination {
         let Ok((root, heads, current)) = expected else {
             return fallback(ExportStatus::Refused, Some(Failure::Storage));
         };
+        if current != initial {
+            return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
+        }
         if let Some(old) = current {
             if old.source_scope != note.source_scope || old.capacities.is_none() {
                 return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
             }
             match old.outcome {
-                Outcome::Completed => {
-                    return fallback(ExportStatus::Refused, Some(Failure::Unsupported))
-                }
-                Outcome::Canceled | Outcome::Failed => {}
+                Outcome::Completed | Outcome::Canceled | Outcome::Failed => {}
                 _ => return report(&old, ExportStatus::ReconcileRequired),
             }
         }
 
         if control.is_none() {
-            match pending(self.preflight(budget), &mut canceled, budget).await {
+            match pending(self.preflight_plan(&attempt, budget), &mut canceled, budget).await {
                 Ok(Some(())) => {}
                 Ok(None) => return fallback(ExportStatus::CanceledNoEffect, None),
                 Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
@@ -432,7 +525,11 @@ impl CapacitiesDestination {
                 if let Some(c) = control.as_deref_mut() {
                     c.observation.destination_polled = true;
                 }
-                self.preflight(budget).await
+                self.preflight_plan(
+                    association.capacities.as_ref().expect("Capacities plan"),
+                    budget,
+                )
+                .await
             };
             match pending(preflight, &mut canceled, budget).await {
                 Ok(Some(())) => {}
@@ -442,7 +539,11 @@ impl CapacitiesDestination {
         }
 
         let (result, polled) = dispatch(
-            self.create(payload, budget),
+            self.write(
+                payload,
+                association.capacities.as_ref().expect("Capacities plan"),
+                budget,
+            ),
             &mut canceled,
             budget,
             &mut || {
@@ -483,7 +584,16 @@ impl CapacitiesDestination {
                 .await
             }
             result if polled => {
-                transition(&mut association, Outcome::ReconcileRequired, "uncertain");
+                let stage = if association
+                    .capacities
+                    .as_ref()
+                    .is_some_and(|a| a.candidate.is_some())
+                {
+                    "candidate"
+                } else {
+                    "uncertain"
+                };
+                transition(&mut association, Outcome::ReconcileRequired, stage);
                 if store_state(ledger, association.clone()).is_err() {
                     return with_failure(
                         &association,
@@ -551,7 +661,7 @@ impl CapacitiesDestination {
         budget: Budget,
         observation: Option<&mut ExportObservation>,
     ) -> ExportReport {
-        let Some(attempt) = association.capacities.as_mut() else {
+        let Some(attempt) = association.capacities.as_ref() else {
             return with_failure(&association, ExportStatus::Conflict, Failure::Conflict);
         };
         if attempt.space != self.space || attempt.grant_id != self.grant_id {
@@ -574,7 +684,24 @@ impl CapacitiesDestination {
         };
         match pending(read, canceled, budget).await {
             Ok(Some(block)) => {
-                attempt.verified_body_block = Some(block);
+                // A crash after an update was sent can leave Prepared with its
+                // already-known original target. Persist the missing candidate
+                // transition before completing from read-only evidence.
+                if association.outcome == Outcome::Prepared {
+                    transition(&mut association, Outcome::ReconcileRequired, "candidate");
+                    if store_state(ledger, association.clone()).is_err() {
+                        return with_failure(
+                            &association,
+                            ExportStatus::ReconcileRequired,
+                            Failure::Storage,
+                        );
+                    }
+                }
+                let attempt = association.capacities.as_mut().expect("Capacities plan");
+                attempt.verified_body_block = Some(block.id);
+                if let Some(managed) = &mut attempt.managed {
+                    managed.confirmed_sha256 = block.identity_sha256;
+                }
                 association.native_note = Some(id.to_string());
                 transition(&mut association, Outcome::Completed, "completed");
                 if store_state(ledger, association.clone()).is_err() {
@@ -703,6 +830,120 @@ fn prepare(
     space: Uuid,
     tags: &BTreeSet<Uuid>,
     grant_id: Option<Uuid>,
+    prior: Option<&ExportAssociation>,
+) -> Result<(Value, CapacitiesAttempt)> {
+    let old = prior.and_then(|a| a.capacities.as_ref());
+    if old.is_some_and(|a| a.id == note.effect_operation && a.evidence_version < 3) {
+        return prepare_legacy(note, space, tags, grant_id);
+    }
+    let group = content::group(&note.markdown)?;
+    let desired_sha256 = content::semantic_digest(&group)?;
+    let original = old.filter(|a| a.id == note.effect_operation);
+    let (creation_effect, baseline) = if let Some(original) = original {
+        let managed = original.managed.as_ref().ok_or(Failure::Conflict)?;
+        (managed.creation_effect, managed.baseline.clone())
+    } else if let Some(prior) = prior {
+        let old = old.ok_or(Failure::Conflict)?;
+        match prior.outcome {
+            Outcome::Completed => {
+                let managed = old.managed.as_ref().ok_or(Failure::Unsupported)?;
+                if old.grant_id != grant_id {
+                    return Err(Failure::Conflict);
+                }
+                (
+                    managed.creation_effect,
+                    Some(CapacitiesBaseline {
+                        object: old.candidate.ok_or(Failure::Conflict)?,
+                        block: old.verified_body_block.clone().ok_or(Failure::Conflict)?,
+                        identity_sha256: managed
+                            .confirmed_sha256
+                            .clone()
+                            .ok_or(Failure::Conflict)?,
+                    }),
+                )
+            }
+            Outcome::Failed | Outcome::Canceled => {
+                if let Some(managed) = old
+                    .managed
+                    .as_ref()
+                    .filter(|m| m.action == ExportAction::Update)
+                {
+                    if old.grant_id != grant_id {
+                        return Err(Failure::Conflict);
+                    }
+                    (managed.creation_effect, managed.baseline.clone())
+                } else {
+                    (note.effect_operation, None)
+                }
+            }
+            _ => return Err(Failure::Conflict),
+        }
+    } else {
+        (note.effect_operation, None)
+    };
+    let payload = if let Some(baseline) = &baseline {
+        json!({"id":baseline.object, "propertyId":"content", "blockId":baseline.block, "block":group})
+    } else {
+        let mut properties = json!({"title":{"type":"title","title":{"value":note.title}}});
+        if !tags.is_empty() {
+            properties["tags"] = json!({"type":"entity","entity":tags.iter().map(|id|json!({"id":id})).collect::<Vec<_>>()});
+        }
+        json!({"structureId": CAPACITIES_PAGE, "properties":properties,"blocks":{"content":[
+            {"type":"TextBlock","tokens":[{"type":"TextToken","text":marker(note.correlation,creation_effect),"style":{}}],
+             "blocks":[],"hierarchy":{"key":"Base","val":0}}, group
+        ]}})
+    };
+    let encoded = serde_json::to_vec(&payload).map_err(|_| Failure::InvalidInput)?;
+    if encoded.len() > MAX_INPUT {
+        return Err(Failure::InvalidInput);
+    }
+    let mut attempt = CapacitiesAttempt {
+        evidence_version: 3,
+        id: note.effect_operation,
+        space,
+        structure: CAPACITIES_PAGE.to_owned(),
+        correlation: note.correlation,
+        payload_sha256: digest(&encoded),
+        body_sha256: digest(note.markdown.as_bytes()),
+        tags: tags.clone(),
+        grant_id,
+        candidate: baseline.as_ref().map(|b| b.object),
+        verified_body_block: None,
+        managed: Some(CapacitiesManaged {
+            mapping_revision: 1,
+            action: if baseline.is_some() {
+                ExportAction::Update
+            } else {
+                ExportAction::Create
+            },
+            creation_effect,
+            desired_sha256,
+            baseline,
+            confirmed_sha256: None,
+        }),
+    };
+    // Terminal history keeps its exact verified facts; no new plan is inferred
+    // from a newer association when replaying an original effect identity.
+    if let Some(original) = original {
+        attempt.candidate = original.candidate;
+        attempt.verified_body_block = original.verified_body_block.clone();
+        attempt
+            .managed
+            .as_mut()
+            .expect("managed plan")
+            .confirmed_sha256 = original
+            .managed
+            .as_ref()
+            .and_then(|m| m.confirmed_sha256.clone());
+    }
+    Ok((payload, attempt))
+}
+
+fn prepare_legacy(
+    note: &PreparedNote,
+    space: Uuid,
+    tags: &BTreeSet<Uuid>,
+    grant_id: Option<Uuid>,
 ) -> Result<(Value, CapacitiesAttempt)> {
     let mut properties = json!({"title": {"type": "title", "title": {"value": note.title}}});
     if !tags.is_empty() {
@@ -735,44 +976,63 @@ fn prepare(
         grant_id,
         candidate: None,
         verified_body_block: None,
+        managed: None,
     };
     Ok((payload, attempt))
 }
 
-fn verify_object(object: &Object, attempt: &CapacitiesAttempt, id: Uuid) -> Result<String> {
+fn object_content<'a>(
+    object: &'a Object,
+    attempt: &CapacitiesAttempt,
+    id: Uuid,
+) -> Result<&'a Vec<Value>> {
     if object.identity.id != id || object.identity.structure_id != attempt.structure {
         return Err(Failure::Conflict);
     }
-    let title = object.properties.get("title").ok_or(Failure::Conflict)?;
-    if title["type"] != "title"
-        || !title["title"]["value"]
-            .as_str()
-            .is_some_and(|title| !title.trim().is_empty())
+    if attempt
+        .managed
+        .as_ref()
+        .is_none_or(|m| m.action == ExportAction::Create)
     {
-        return Err(Failure::Conflict);
-    }
-    if !attempt.tags.is_empty() {
-        let tags = object.properties.get("tags").ok_or(Failure::Conflict)?;
-        if tags["type"] != "entity" {
+        let title = object.properties.get("title").ok_or(Failure::Conflict)?;
+        if title["type"] != "title"
+            || !title["title"]["value"]
+                .as_str()
+                .is_some_and(|title| !title.trim().is_empty())
+        {
             return Err(Failure::Conflict);
         }
-        let entries = tags["entity"].as_array().ok_or(Failure::Conflict)?;
-        let ids = entries
-            .iter()
-            .map(|entry| {
-                entry["id"]
-                    .as_str()
-                    .and_then(|id| Uuid::parse_str(id).ok())
-                    .ok_or(Failure::Conflict)
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        if !attempt.tags.is_subset(&ids) {
-            return Err(Failure::Conflict);
+        if !attempt.tags.is_empty() {
+            let tags = object.properties.get("tags").ok_or(Failure::Conflict)?;
+            if tags["type"] != "entity" {
+                return Err(Failure::Conflict);
+            }
+            let entries = tags["entity"].as_array().ok_or(Failure::Conflict)?;
+            let ids = entries
+                .iter()
+                .map(|entry| {
+                    entry["id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .ok_or(Failure::Conflict)
+                })
+                .collect::<Result<BTreeSet<_>>>()?;
+            if !attempt.tags.is_subset(&ids) {
+                return Err(Failure::Conflict);
+            }
         }
     }
 
     let content = object.blocks.get("content").ok_or(Failure::Conflict)?;
-    let expected = marker(attempt.correlation, attempt.id);
+    if attempt.managed.is_some() {
+        let mut ids = BTreeSet::new();
+        unique_ids(content, &mut ids, 0)?;
+    }
+    let creation_effect = attempt
+        .managed
+        .as_ref()
+        .map_or(attempt.id, |m| m.creation_effect);
+    let expected = marker(attempt.correlation, creation_effect);
     let mut markers = content.iter().filter(|block| {
         block["type"] == "TextBlock" && block["tokens"].as_array().is_some_and(|tokens| {
             matches!(tokens.as_slice(), [token] if token["type"] == "TextToken" && token["text"] == expected)
@@ -782,10 +1042,66 @@ fn verify_object(object: &Object, attempt: &CapacitiesAttempt, id: Uuid) -> Resu
         return Err(Failure::Conflict);
     };
     let marker_id = block_id(marker)?;
-    if markers.next().is_some() {
+    if markers.next().is_some()
+        || content
+            .iter()
+            .filter(|b| b["id"].as_str() == Some(marker_id))
+            .count()
+            != 1
+    {
         return Err(Failure::Conflict);
     }
+    Ok(content)
+}
 
+fn unique_ids(blocks: &[Value], ids: &mut BTreeSet<String>, depth: usize) -> Result<()> {
+    if depth > 32 {
+        return Err(Failure::Conflict);
+    }
+    for block in blocks {
+        if ids.len() >= 4096 || !ids.insert(block_id(block)?.to_owned()) {
+            return Err(Failure::Conflict);
+        }
+        if let Some(children) = block.get("blocks") {
+            unique_ids(
+                children.as_array().ok_or(Failure::Conflict)?,
+                ids,
+                depth + 1,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_object(object: &Object, attempt: &CapacitiesAttempt, id: Uuid) -> Result<VerifiedBody> {
+    let content = object_content(object, attempt, id)?;
+    if let Some(managed) = &attempt.managed {
+        let mut matched = None;
+        for group in content.iter().filter(|b| b["type"] == "GroupBlock") {
+            if managed
+                .baseline
+                .as_ref()
+                .is_some_and(|b| group["id"].as_str() != Some(&b.block))
+            {
+                continue;
+            }
+            let verified = match content::verify_group(group) {
+                Ok(value) => value,
+                Err(failure) if managed.baseline.is_some() => return Err(failure),
+                Err(_) => continue,
+            };
+            if verified.semantic_sha256 == managed.desired_sha256 {
+                if matched.is_some() {
+                    return Err(Failure::Conflict);
+                }
+                matched = Some(VerifiedBody {
+                    id: verified.id,
+                    identity_sha256: Some(verified.identity_sha256),
+                });
+            }
+        }
+        return matched.ok_or(Failure::Conflict);
+    }
     let mut bodies = content.iter().filter(|block| {
         block["type"] == "CodeBlock"
             && block["lang"] == "markdown"
@@ -794,22 +1110,19 @@ fn verify_object(object: &Object, attempt: &CapacitiesAttempt, id: Uuid) -> Resu
                 .is_some_and(|body| digest(body.as_bytes()) == attempt.body_sha256)
     });
     let body_id = block_id(bodies.next().ok_or(Failure::Conflict)?)?;
-    if body_id == marker_id
-        || bodies.next().is_some()
+    if bodies.next().is_some()
         || content
             .iter()
-            .filter(|block| block["id"].as_str() == Some(body_id))
-            .count()
-            != 1
-        || content
-            .iter()
-            .filter(|block| block["id"].as_str() == Some(marker_id))
+            .filter(|b| b["id"].as_str() == Some(body_id))
             .count()
             != 1
     {
         return Err(Failure::Conflict);
     }
-    Ok(body_id.to_owned())
+    Ok(VerifiedBody {
+        id: body_id.to_owned(),
+        identity_sha256: None,
+    })
 }
 
 fn block_id(block: &Value) -> Result<&str> {
@@ -826,9 +1139,10 @@ fn matches_plan(
 ) -> bool {
     association.source_scope == note.source_scope
         && association.source_revision == note.source_revision
-        && association.capacities.as_ref().is_some_and(|old| {
-            old.payload_sha256 == attempt.payload_sha256 && old.grant_id == attempt.grant_id
-        })
+        && association
+            .capacities
+            .as_ref()
+            .is_some_and(|old| old.same_plan(attempt))
 }
 
 fn transition(association: &mut ExportAssociation, outcome: Outcome, stage: &str) {
@@ -856,4 +1170,86 @@ fn with_failure(
     let mut result = report(association, status);
     result.failure = Some(failure);
     result
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_versions_keep_literal_readback_and_refuse_implicit_group_migration() {
+        for grant in [None, Some(Uuid::new_v4())] {
+            let note = PreparedNote {
+                conversation: Uuid::new_v4(),
+                correlation: Uuid::new_v4(),
+                effect_operation: Uuid::new_v4(),
+                source_scope: "fixture".into(),
+                source_revision: "1".into(),
+                title: "Title".into(),
+                markdown: "# Legacy **source**".into(),
+            };
+            let (mut payload, mut attempt) =
+                prepare_legacy(&note, Uuid::new_v4(), &BTreeSet::new(), grant).unwrap();
+            assert_eq!(
+                attempt.evidence_version,
+                if grant.is_some() { 2 } else { 1 }
+            );
+            assert!(attempt.managed.is_none());
+            let object_id = Uuid::new_v4();
+            payload["id"] = json!(object_id);
+            payload["blocks"]["content"][0]["id"] = json!("legacy-marker");
+            payload["blocks"]["content"][1]["id"] = json!("legacy-body");
+            // An unrelated legacy sibling must not acquire the new managed-tree
+            // shape requirements during an original readback.
+            payload["blocks"]["content"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "id":"old-unrelated", "type":"TextBlock", "blocks":"legacy-extension"
+                }));
+            let object: Object = serde_json::from_value(payload).unwrap();
+            let verified = verify_object(&object, &attempt, object_id).unwrap();
+            assert_eq!(verified.id, "legacy-body");
+            assert!(verified.identity_sha256.is_none());
+            attempt.candidate = Some(object_id);
+            attempt.verified_body_block = Some(verified.id);
+            let association = ExportAssociation {
+                id: CapacitiesAttempt::association_id(
+                    note.conversation,
+                    attempt.space,
+                    note.correlation,
+                ),
+                conversation: note.conversation,
+                backend: CAPACITIES_BACKEND.into(),
+                native_note: Some(object_id.to_string()),
+                source_scope: note.source_scope.clone(),
+                source_revision: note.source_revision.clone(),
+                operation: CapacitiesAttempt::stage_id(attempt.id, "completed"),
+                outcome: Outcome::Completed,
+                attempt: None,
+                capacities: Some(attempt.clone()),
+            };
+            let (_, historical) = prepare(
+                &note,
+                attempt.space,
+                &BTreeSet::new(),
+                grant,
+                Some(&association),
+            )
+            .unwrap();
+            assert!(historical.same_plan(&attempt));
+            let mut new = note.clone();
+            new.effect_operation = Uuid::new_v4();
+            assert!(matches!(
+                prepare(
+                    &new,
+                    attempt.space,
+                    &BTreeSet::new(),
+                    grant,
+                    Some(&association)
+                ),
+                Err(Failure::Unsupported)
+            ));
+        }
+    }
 }

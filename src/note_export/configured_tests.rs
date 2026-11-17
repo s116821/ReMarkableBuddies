@@ -74,6 +74,7 @@ fn original_command_uses_retained_grant_in_ready_notebook_and_refuses_ambiguity(
         grant_id: Some(original_grant),
         candidate: None,
         verified_body_block: None,
+        managed: None,
     };
     let publish = |ledger: &Ledger, association: ExportAssociation| {
         let expected_root = ledger
