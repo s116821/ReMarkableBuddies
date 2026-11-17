@@ -5,6 +5,104 @@ use serde::{Deserialize, Serialize};
 
 pub const EXPORT_SCHEMA: u32 = 2;
 
+pub(crate) const CAPACITIES_BACKEND: &str = "capacities";
+pub(crate) const CAPACITIES_PAGE: &str = "RootPage";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesAttempt {
+    pub evidence_version: u32,
+    pub id: Uuid,
+    pub space: Uuid,
+    pub structure: String,
+    pub correlation: Uuid,
+    pub payload_sha256: String,
+    pub body_sha256: String,
+    pub tags: BTreeSet<Uuid>,
+    pub candidate: Option<Uuid>,
+    pub verified_body_block: Option<String>,
+}
+
+impl CapacitiesAttempt {
+    pub fn association_id(conversation: Uuid, space: Uuid, correlation: Uuid) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "urn:remarkable-buddies:export:capacities:v1:{space}:{conversation}:{correlation}"
+            )
+            .as_bytes(),
+        )
+    }
+
+    pub(crate) fn stage_id(effect: Uuid, stage: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("urn:remarkable-buddies:capacities-export-command:v1:{effect}:{stage}")
+                .as_bytes(),
+        )
+    }
+
+    fn same_plan(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.space == other.space
+            && self.structure == other.structure
+            && self.correlation == other.correlation
+            && self.payload_sha256 == other.payload_sha256
+            && self.body_sha256 == other.body_sha256
+            && self.tags == other.tags
+    }
+
+    fn validate(&self, association: &ExportAssociation) -> Result<()> {
+        let stage = match association.outcome {
+            Outcome::Prepared if self.candidate.is_none() => "prepared",
+            Outcome::ReconcileRequired if self.candidate.is_none() => "uncertain",
+            Outcome::ReconcileRequired => "candidate",
+            Outcome::Completed => "completed",
+            Outcome::Canceled if self.candidate.is_none() => "canceled-no-send",
+            Outcome::Failed if self.candidate.is_none() => "failed-no-send",
+            _ => bail!("invalid Capacities export stage"),
+        };
+        ensure!(
+            association.backend == CAPACITIES_BACKEND
+                && self.evidence_version == 1
+                && association.attempt.is_none()
+                && self.structure == CAPACITIES_PAGE
+                && !association.conversation.is_nil()
+                && !self.space.is_nil()
+                && !self.correlation.is_nil()
+                && association.conversation != self.correlation
+                && !self.id.is_nil()
+                && association.id
+                    == Self::association_id(association.conversation, self.space, self.correlation)
+                && association.operation == Self::stage_id(self.id, stage)
+                && (1..=1024).contains(&association.source_scope.len())
+                && (1..=1024).contains(&association.source_revision.len())
+                && valid_digest(&self.payload_sha256)
+                && valid_digest(&self.body_sha256)
+                && self.tags.len() <= 16
+                && self.tags.iter().all(|id| !id.is_nil())
+                && self.candidate.is_none_or(|id| !id.is_nil()),
+            "invalid Capacities export scope"
+        );
+        if association.outcome == Outcome::Completed {
+            ensure!(
+                self.candidate.map(|id| id.to_string()) == association.native_note
+                    && self.candidate.is_some()
+                    && self.verified_body_block.as_ref().is_some_and(|id| {
+                        (1..=1024).contains(&id.len()) && !id.chars().any(char::is_control)
+                    }),
+                "unverified Capacities export completion"
+            );
+        } else {
+            ensure!(
+                association.native_note.is_none() && self.verified_body_block.is_none(),
+                "unverified Capacities export claims native binding"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExportAction {
@@ -56,6 +154,13 @@ impl ExportAttempt {
 
 impl ExportAssociation {
     pub(crate) fn validate_attempt(&self) -> Result<()> {
+        if let Some(attempt) = &self.capacities {
+            return attempt.validate(self);
+        }
+        ensure!(
+            self.backend != CAPACITIES_BACKEND,
+            "missing Capacities evidence"
+        );
         let Some(a) = &self.attempt else {
             return Ok(());
         };
@@ -142,6 +247,41 @@ impl ExportAssociation {
                 && old.source_scope == self.source_scope,
             "export immutable scope changed"
         );
+        if self.capacities.is_some() || old.capacities.is_some() {
+            let (before, after) = old
+                .capacities
+                .as_ref()
+                .zip(self.capacities.as_ref())
+                .context("Capacities schema changed")?;
+            ensure!(
+                before.correlation == after.correlation
+                    && before.space == after.space
+                    && before.structure == after.structure,
+                "Capacities destination changed"
+            );
+            if before.id == after.id {
+                ensure!(
+                    before.same_plan(after) && old.source_revision == self.source_revision,
+                    "Capacities attempt plan changed"
+                );
+                let valid = match (&old.outcome, &self.outcome) {
+                    (Outcome::Prepared, Outcome::Canceled | Outcome::Failed) => true,
+                    (Outcome::Prepared, Outcome::ReconcileRequired) => true,
+                    (Outcome::ReconcileRequired, Outcome::Completed) => {
+                        before.candidate.is_some() && before.candidate == after.candidate
+                    }
+                    _ => false,
+                };
+                ensure!(valid, "invalid Capacities export transition");
+            } else {
+                ensure!(
+                    matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
+                        && self.outcome == Outcome::Prepared,
+                    "Capacities attempt cannot start another create"
+                );
+            }
+            return Ok(());
+        }
         match (&old.attempt, &self.attempt) {
             (None, None) => {
                 ensure!(
@@ -261,11 +401,13 @@ impl Ledger {
         let snapshot =
             self.store
                 .snapshot_revisions_matching(&[Namespace::ExportAssociation], 8, |e| {
+                    let payload = &e.payload["record"];
                     e.record_id == correlation
-                        && e.payload["record"]["attempt"]["id"]
-                            .as_str()
-                            .and_then(|text| Uuid::parse_str(text).ok())
-                            == Some(effect)
+                        && [&payload["attempt"]["id"], &payload["capacities"]["id"]]
+                            .into_iter()
+                            .any(|id| {
+                                id.as_str().and_then(|s| Uuid::parse_str(s).ok()) == Some(effect)
+                            })
                 })?;
         if snapshot.is_empty() {
             return Ok(None);
@@ -285,11 +427,16 @@ impl Ledger {
                     first.backend == a.backend
                         && first.source_scope == a.source_scope
                         && first.source_revision == a.source_revision
-                        && first
+                        && (first
                             .attempt
                             .as_ref()
                             .zip(a.attempt.as_ref())
-                            .is_some_and(|(before, after)| before.same_plan(after)),
+                            .is_some_and(|(before, after)| before.same_plan(after))
+                            || first
+                                .capacities
+                                .as_ref()
+                                .zip(a.capacities.as_ref())
+                                .is_some_and(|(before, after)| before.same_plan(after))),
                     "historical export plan conflict"
                 );
             } else {

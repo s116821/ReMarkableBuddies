@@ -1,4 +1,5 @@
 //! Explicit prepared-content exports. Historical retries never dispatch again.
+pub mod capacities;
 pub mod command;
 pub mod mem;
 mod run;
@@ -34,6 +35,7 @@ pub enum Failure {
     Storage,
     Conflict,
     MissingCredentials,
+    MissingCapacitiesCredentials,
     Authentication,
     RateLimited,
     Unsupported,
@@ -48,6 +50,7 @@ impl std::fmt::Display for Failure {
             Self::Storage => "export state could not be committed",
             Self::Conflict => "export identity or remote content conflict",
             Self::MissingCredentials => "Mem credential is unavailable",
+            Self::MissingCapacitiesCredentials => "Capacities credential is unavailable",
             Self::Authentication => "destination authentication was refused",
             Self::RateLimited => "destination request limit was reached",
             Self::Unsupported => "destination operation is unsupported",

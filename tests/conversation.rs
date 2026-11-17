@@ -572,6 +572,7 @@ fn uncertain_export_discovery_requires_exact_unique_marker() {
         operation,
         outcome: Outcome::ReconcileRequired,
         attempt: None,
+        capacities: None,
     };
     assert_eq!(
         association.title_marker(),
