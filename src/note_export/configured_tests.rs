@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    config::capacities::{tests::grant_fixture, ExportConnection},
+    config::capacities::{
+        tests::{grant_fixture, Temp},
+        ExportConnection,
+    },
     conversation::CapacitiesAttempt,
     storage::{digest, Namespace, StorePaths},
 };
@@ -13,7 +16,7 @@ use std::{
 
 #[test]
 fn original_command_uses_retained_grant_in_ready_notebook_and_refuses_ambiguity() {
-    let root = tempfile::tempdir().unwrap();
+    let root = Temp::new();
     let active_space = Uuid::new_v4();
     let active_grant = Uuid::new_v4();
     let original_space = Uuid::new_v4();
@@ -159,7 +162,7 @@ fn original_command_uses_retained_grant_in_ready_notebook_and_refuses_ambiguity(
 
 #[test]
 fn selected_capacities_requires_private_configuration_before_initializing_store() {
-    let root = tempfile::tempdir().unwrap();
+    let root = Temp::new();
     let config = json!({
         "paths": {"data": root.path().join("data"), "cache": root.path().join("cache"), "credentials": root.path().join("credentials")},
         "product_settings": {"export_destination": "capacities"}

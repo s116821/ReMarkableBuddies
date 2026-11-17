@@ -163,9 +163,30 @@ pub(crate) mod tests {
     use serde_json::{json, Value};
     use std::{
         fs,
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    pub(crate) struct Temp(PathBuf);
+
+    impl Temp {
+        pub(crate) fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("buddy-capacities-{}", Uuid::new_v4()));
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self(path)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     pub(crate) fn grant_fixture(id: Uuid, space: Uuid, expires_at: u64) -> Value {
         json!({
@@ -183,8 +204,7 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_private_file_admits_only_the_original_current_oauth_grant() {
-        let root = tempfile::tempdir().unwrap();
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = Temp::new();
         let id = Uuid::new_v4();
         let space = Uuid::new_v4();
         let now = SystemTime::now()
