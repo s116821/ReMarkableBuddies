@@ -161,9 +161,9 @@ impl CapacitiesAttempt {
                 _ => bail!("managed action lacks exact baseline"),
             }
             ensure!(
-                match (&managed.confirmed_sha256, association.outcome) {
+                match (&managed.confirmed_sha256, &association.outcome) {
                     (Some(hash), Outcome::Completed) => valid_digest(hash),
-                    (None, outcome) => outcome != Outcome::Completed,
+                    (None, outcome) => *outcome != Outcome::Completed,
                     _ => false,
                 },
                 "unverified managed content baseline"
