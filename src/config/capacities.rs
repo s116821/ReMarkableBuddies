@@ -4,7 +4,11 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use std::{collections::BTreeSet, fmt, path::Path};
 
 #[cfg(target_os = "linux")]
+pub mod command;
+#[cfg(target_os = "linux")]
 pub mod lifecycle;
+#[cfg(target_os = "linux")]
+mod oauth;
 
 #[derive(Clone, Serialize)]
 pub struct ExportConnection {

@@ -141,6 +141,14 @@ pub struct GrantOwner {
 
 impl GrantOwner {
     pub fn open(root: &Path, id: Uuid) -> Result<Self> {
+        Self::open_with(root, id, true)?.ok_or(Failure::Storage)
+    }
+
+    pub(super) fn open_existing(root: &Path, id: Uuid) -> Result<Option<Self>> {
+        Self::open_with(root, id, false)
+    }
+
+    fn open_with(root: &Path, id: Uuid, create: bool) -> Result<Option<Self>> {
         if id.is_nil() {
             return Err(Failure::InvalidInput);
         }
@@ -149,15 +157,25 @@ impl GrantOwner {
             false,
         );
         let lock_path = root.join(format!("capacities-grant-{id}.lock"));
-        let lock = OpenOptions::new()
+        let record_path = root.join(format!("capacities-grant-{id}.json"));
+        let lock = match OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
+            .create(create)
             .truncate(false)
             .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
             .open(&lock_path)
-            .map_err(|_| Failure::Storage)?;
+        {
+            Ok(value) => value,
+            Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+                return match fs::symlink_metadata(&record_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    _ => Err(Failure::Storage),
+                };
+            }
+            Err(_) => return Err(Failure::Storage),
+        };
         let meta = lock.metadata().map_err(|_| Failure::Storage)?;
         if !meta.is_file()
             || meta.nlink() != 1
@@ -176,13 +194,13 @@ impl GrantOwner {
             id,
             root: root.to_owned(),
             root_identity,
-            record_path: root.join(format!("capacities-grant-{id}.json")),
+            record_path,
             lock_path,
             lock_identity,
             lock,
         };
         held.current()?;
-        Ok(held)
+        Ok(Some(held))
     }
 
     fn current(&self) -> Result<()> {
@@ -340,8 +358,16 @@ impl GrantOwner {
 
     /// A caller may exchange once only after this fresh durable fence returns.
     pub fn begin_exchange(self, enrollment: Enrollment) -> Result<Exchange> {
+        self.begin_exchange_retained(enrollment)
+            .map_err(|(_, failure)| failure)
+    }
+
+    pub(super) fn begin_exchange_retained(
+        self,
+        enrollment: Enrollment,
+    ) -> std::result::Result<Exchange, (Box<Self>, Failure)> {
         if !enrollment.valid() {
-            return Err(Failure::InvalidInput);
+            return Err((Box::new(self), Failure::InvalidInput));
         }
         let record = Record {
             lifecycle_version: 1,
@@ -350,7 +376,10 @@ impl GrantOwner {
             target_config_sha256: None,
             state: State::PendingExchange {},
         };
-        let sha256 = self.publish(None, &record)?;
+        let sha256 = match self.publish(None, &record) {
+            Ok(sha256) => sha256,
+            Err(failure) => return Err((Box::new(self), failure)),
+        };
         Ok(Exchange {
             owner: self,
             record,
@@ -366,10 +395,35 @@ impl GrantOwner {
         operation_id: Uuid,
         config_sha256: &str,
     ) -> Result<()> {
-        let mut snapshot = self
+        self.activate_current(operation_id, config_sha256, || Ok(()))
+    }
+
+    pub(super) fn activate_current(
+        &self,
+        operation_id: Uuid,
+        config_sha256: &str,
+        current: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let mut snapshot = self.staged_snapshot(operation_id, config_sha256)?;
+        let State::Staged { grant } = snapshot.record.state else {
+            return Err(Failure::Conflict);
+        };
+        current()?;
+        snapshot.record.state = State::Active { grant };
+        self.publish(Some(&snapshot.sha256), &snapshot.record)?;
+        Ok(())
+    }
+
+    pub(super) fn check_staged(&self, operation_id: Uuid, config_sha256: &str) -> Result<()> {
+        self.staged_snapshot(operation_id, config_sha256)
+            .map(|_| ())
+    }
+
+    fn staged_snapshot(&self, operation_id: Uuid, config_sha256: &str) -> Result<Snapshot> {
+        let snapshot = self
             .durable_snapshot(files::sync_dir)?
             .ok_or(Failure::MissingCapacitiesCredentials)?;
-        let State::Staged { grant } = snapshot.record.state else {
+        let State::Staged { grant } = &snapshot.record.state else {
             return Err(Failure::Conflict);
         };
         if snapshot
@@ -383,9 +437,7 @@ impl GrantOwner {
         {
             return Err(Failure::Conflict);
         }
-        snapshot.record.state = State::Active { grant };
-        self.publish(Some(&snapshot.sha256), &snapshot.record)?;
-        Ok(())
+        Ok(snapshot)
     }
 
     pub fn begin_rotation(self, space_id: Uuid, operation_id: Uuid) -> Result<Rotation> {
@@ -504,6 +556,20 @@ impl Exchange {
         grant_bytes: &[u8],
         target_config_sha256: String,
     ) -> Result<GrantOwner> {
+        self.stage_in_place(space_id, grant_bytes, target_config_sha256)?;
+        Ok(self.owner)
+    }
+
+    pub(super) fn owner(&self) -> &GrantOwner {
+        &self.owner
+    }
+
+    pub(super) fn stage_in_place(
+        &mut self,
+        space_id: Uuid,
+        grant_bytes: &[u8],
+        target_config_sha256: String,
+    ) -> Result<()> {
         if !self.dispatched {
             return Err(Failure::Conflict);
         }
@@ -515,7 +581,7 @@ impl Exchange {
         self.record.target_config_sha256 = Some(target_config_sha256);
         self.record.state = State::Staged { grant };
         self.owner.publish(Some(&self.sha256), &self.record)?;
-        Ok(self.owner)
+        Ok(())
     }
 }
 
