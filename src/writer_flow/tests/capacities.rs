@@ -204,7 +204,7 @@ fn interrupted_guarded_preparation_direct_retry_is_unresolved_without_http() {
             }
         },
     );
-    assert_eq!(first.status, Status::Refused);
+    assert_eq!(first.status, Status::ReconcileRequired);
     assert!(!first.observation.destination_polled && !first.observation.write_polled);
     let f = f.reopen();
     let (_, correlation, effect) = request.identities();
