@@ -1,4 +1,5 @@
 //! Deliberate host Writer/export orchestration. No device or native admission.
+use crate::note_export::dispatch::{unresolved, LegacyDestination, OwnedDestination};
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Outcome, WriterExportInput, WriterFlowAdmission},
@@ -234,6 +235,44 @@ pub(crate) fn run_with_events<E: LLMEngine>(
     canceled: watch::Receiver<bool>,
     events: &mut Events<'_>,
 ) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        request,
+        preference,
+        canceled,
+        events,
+    )
+}
+/// Writer ownership and selection guards, using Capacities' provider-assigned identity.
+pub fn run_capacities<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &note_export::capacities::CapacitiesDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        destination,
+        request,
+        preference,
+        canceled,
+        &mut |_, _| {},
+    )
+}
+pub(crate) fn run_destination_with_events<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+    events: &mut Events<'_>,
+) -> Report {
     let mut result = Report::refused(request, Failure::Storage);
     if request.preflight().is_err() {
         result.failure = Some(Failure::InvalidInput);
@@ -265,9 +304,8 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         return result;
     }
     if matches!(request, Request::ReconcileExport { .. }) {
-        let export = runtime.block_on(note_export::reconcile_with_owner(
+        let export = runtime.block_on(destination.reconcile_owned(
             ledger,
-            destination,
             request.conversation(),
             result.correlation,
             canceled,
@@ -285,13 +323,11 @@ pub(crate) fn run_with_events<E: LLMEngine>(
             return result;
         }
     };
-    match ledger.export_association(request.conversation(), result.correlation) {
-        Ok(Some(old))
-            if old.outcome != Outcome::Completed
-                && !old.attempt.as_ref().is_some_and(|a| {
-                    a.no_send && matches!(old.outcome, Outcome::Failed | Outcome::Canceled)
-                }) =>
-        {
+    match ledger.export_association(
+        request.conversation(),
+        destination.association_id(request.conversation(), result.correlation),
+    ) {
+        Ok(Some(old)) if unresolved(&old) => {
             result.status = Status::ReconcileRequired;
             return result;
         }
@@ -301,14 +337,17 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         }
         _ => {}
     }
-    let fingerprint =
-        match serde_json::to_vec(&("writer-flow-intent-v1", request, destination.backend())) {
-            Ok(value) => digest(&value),
-            Err(_) => {
-                result.failure = Some(Failure::InvalidInput);
-                return result;
-            }
-        };
+    let fingerprint = match serde_json::to_vec(&(
+        "writer-flow-intent-v1",
+        request,
+        destination.intent_binding(),
+    )) {
+        Ok(value) => digest(&value),
+        Err(_) => {
+            result.failure = Some(Failure::InvalidInput);
+            return result;
+        }
+    };
     result.trace.push(Phase::BeforeAdmission);
     events(Phase::BeforeAdmission, ledger);
     if *canceled.borrow() {
@@ -432,9 +471,8 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         event: &mut export_event,
         deadline: None,
     };
-    let export = runtime.block_on(note_export::export_with_owner(
+    let export = runtime.block_on(destination.export_owned(
         ledger,
-        destination,
         &note,
         canceled,
         &export_owner,

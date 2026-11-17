@@ -8,6 +8,9 @@ use tokio::sync::watch;
 
 pub(crate) struct Owner<'a>(&'a AtomicBool);
 impl<'a> Owner<'a> {
+    pub(super) fn belongs_to(&self, ledger: &Ledger) -> bool {
+        std::ptr::eq(self.0, &ledger.store().export_active)
+    }
     pub(crate) fn acquire(ledger: &'a Ledger) -> Option<Self> {
         let active = &ledger.store().export_active;
         active
@@ -38,12 +41,19 @@ pub(crate) struct ExportControl<'a> {
     pub event: &'a mut (dyn FnMut(ExportPhase, &Ledger) + Send),
     pub deadline: Option<std::time::Instant>,
 }
-fn event(control: &mut Option<&mut ExportControl<'_>>, phase: ExportPhase, ledger: &Ledger) {
+pub(super) fn event(
+    control: &mut Option<&mut ExportControl<'_>>,
+    phase: ExportPhase,
+    ledger: &Ledger,
+) {
     if let Some(control) = control.as_deref_mut() {
         (control.event)(phase, ledger);
     }
 }
-fn selection_current(control: &mut Option<&mut ExportControl<'_>>, ledger: &Ledger) -> bool {
+pub(super) fn selection_current(
+    control: &mut Option<&mut ExportControl<'_>>,
+    ledger: &Ledger,
+) -> bool {
     let Some(control) = control.as_deref_mut() else {
         return true;
     };
@@ -60,7 +70,7 @@ impl Drop for Owner<'_> {
     }
 }
 
-async fn pending<T>(
+pub(super) async fn pending<T>(
     future: impl Future<Output = Result<T>>,
     canceled: &mut watch::Receiver<bool>,
     budget: Budget,
@@ -82,12 +92,12 @@ async fn pending<T>(
     }
 }
 
-async fn dispatch(
-    future: impl Future<Output = Result<RemoteNote>>,
+pub(super) async fn dispatch<T>(
+    future: impl Future<Output = Result<T>>,
     canceled: &mut watch::Receiver<bool>,
     budget: Budget,
     before_poll: &mut (dyn FnMut() -> Result<()> + Send),
-) -> (Result<Option<RemoteNote>>, bool) {
+) -> (Result<Option<T>>, bool) {
     let polled = AtomicBool::new(false);
     let poll_canceled = canceled.clone();
     let observed = async {
@@ -105,13 +115,21 @@ async fn dispatch(
     (result, polled.load(Ordering::Acquire))
 }
 
-fn report(a: &ExportAssociation, status: ExportStatus) -> ExportReport {
-    let id = a.attempt.as_ref().map_or(a.operation, |attempt| attempt.id);
-    let mut result = ExportReport::new(status, a.id, id);
+pub(super) fn report(a: &ExportAssociation, status: ExportStatus) -> ExportReport {
+    let (correlation, effect) = a.capacities.as_ref().map_or_else(
+        || {
+            (
+                a.id,
+                a.attempt.as_ref().map_or(a.operation, |attempt| attempt.id),
+            )
+        },
+        |attempt| (attempt.correlation, attempt.id),
+    );
+    let mut result = ExportReport::new(status, correlation, effect);
     result.native_note = a.native_note.clone();
     result
 }
-fn store_state(ledger: &Ledger, a: ExportAssociation) -> Result<bool> {
+pub(super) fn store_state(ledger: &Ledger, a: ExportAssociation) -> Result<bool> {
     let root = ledger
         .expected(Namespace::Conversation, a.conversation)
         .map_err(|_| Failure::Storage)?;
@@ -500,6 +518,7 @@ pub(crate) async fn export_with_owner(
         operation: attempt.stage_id("prepared"),
         outcome: Outcome::Prepared,
         attempt: Some(attempt),
+        capacities: None,
     };
     event(&mut control, ExportPhase::BeforeAdmission, ledger);
     if control.is_some() && *canceled.borrow() {

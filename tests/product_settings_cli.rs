@@ -1,11 +1,15 @@
 //! Actual host command admission; no model, Mem, tablet or service operation.
-use remarkable_reader_buddy::storage::{Store, StorePaths, Uuid};
+use remarkable_reader_buddy::{
+    conversation::{ExportAction, ExportAssociation, ExportAttempt, Ledger, Outcome},
+    storage::{digest, Namespace, Store, StorePaths, Uuid},
+};
 use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::Arc,
 };
 
 struct Fixture {
@@ -225,24 +229,75 @@ fn backend_off_blocks_joined_work_before_model_and_allows_original_reconciliatio
         "unsupported"
     );
     f.no_store();
-    // With no token, allowed original-only reconciliation stops at the historical
-    // credential gate. No remote lookup or new effect can occur in this test.
+    // Original-only requests require an existing association before looking
+    // for its retained provider's credentials.
     for writer in [false, true] {
         let f = Fixture::new(
             json!({"reader_enabled":false,"writer_enabled":writer,"export_destination":"disabled"}),
         );
-        let reconcile = json!({"command":"reconcile-export","conversation":conversation,"correlation":correlation});
-        assert_eq!(
-            f.report(&["--writer-note"], &reconcile)["failure"],
-            "missing-credentials"
-        );
-        let reconcile =
-            json!({"command":"reconcile","conversation":conversation,"correlation":correlation});
-        assert_eq!(
-            f.report(&["--export-note"], &reconcile)["failure"],
-            "missing-credentials"
-        );
+        let reconcile = [
+            ("--writer-note", "reconcile-export"),
+            ("--export-note", "reconcile"),
+        ];
+        for (flag, command) in reconcile {
+            let request =
+                json!({"command":command,"conversation":conversation,"correlation":correlation});
+            assert_eq!(f.report(&[flag], &request)["failure"], "storage");
+        }
         f.no_store();
+
+        let ledger = Ledger::new(Arc::new(Store::open(f.paths.clone()).unwrap()));
+        ledger.create(conversation, operation, 1).unwrap();
+        let attempt = ExportAttempt {
+            id: effect,
+            action: ExportAction::Create,
+            body_sha256: digest(b"synthetic"),
+            target: Uuid::new_v4().to_string(),
+            baseline: None,
+            confirmed_version: None,
+            no_send: false,
+        };
+        let original = ExportAssociation {
+            id: correlation,
+            conversation,
+            backend: "mem".into(),
+            native_note: None,
+            source_scope: "synthetic".into(),
+            source_revision: "r1".into(),
+            operation: attempt.stage_id("prepared"),
+            outcome: Outcome::Prepared,
+            attempt: Some(attempt),
+            capacities: None,
+        };
+        ledger
+            .associate_export(
+                original.operation,
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                ledger
+                    .expected(Namespace::ExportAssociation, correlation)
+                    .unwrap(),
+                original.clone(),
+            )
+            .unwrap();
+        drop(ledger);
+
+        for (flag, command) in reconcile {
+            let request =
+                json!({"command":command,"conversation":conversation,"correlation":correlation});
+            assert_eq!(
+                f.report(&[flag], &request)["failure"],
+                "missing-credentials"
+            );
+        }
+        let ledger = Ledger::new(Arc::new(Store::open(f.paths.clone()).unwrap()));
+        assert_eq!(
+            ledger
+                .export_association(conversation, correlation)
+                .unwrap(),
+            Some(original)
+        );
     }
 }
 

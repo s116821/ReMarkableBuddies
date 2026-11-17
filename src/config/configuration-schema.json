@@ -267,6 +267,7 @@
             "export_destination": {
               "enum": [
                 "mem",
+                "capacities",
                 "disabled"
               ],
               "default": "mem"
@@ -279,6 +280,28 @@
         }
       ],
       "description": "Absent and explicit null parent remain distinct declarations even though both use effective defaults."
+    },
+    "capacities_export": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "space_id", "grant_id", "tags"],
+          "properties": {
+            "schema_version": {"const": 1},
+            "space_id": {"type": "string", "format": "uuid"},
+            "grant_id": {"type": "string", "format": "uuid"},
+            "tags": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "uuid"}
+            }
+          }
+        },
+        {"type": "null"}
+      ],
+      "description": "Local Capacities connection selection excluded from portable preferences. Contains identifiers only."
     }
   },
   "$defs": {

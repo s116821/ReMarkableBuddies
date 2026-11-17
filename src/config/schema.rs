@@ -42,7 +42,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        keys.extend(["research_policy", "product_settings"]);
+        keys.extend(["research_policy", "product_settings", "capacities_export"]);
         assert_eq!(
             keys,
             schema["properties"]

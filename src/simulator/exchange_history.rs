@@ -217,6 +217,7 @@ fn seed(ledger: &Ledger, exchanges: usize) -> Result<(Uuid, PageOwner, Uuid, Uui
         operation: Uuid::new_v4(),
         outcome: Outcome::Completed,
         attempt: None,
+        capacities: None,
     };
     let export_id = export.id;
     ledger.associate_export(export.operation, root()?, Default::default(), export)?;
