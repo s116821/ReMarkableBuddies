@@ -101,6 +101,91 @@ impl Fixture {
     }
 }
 
+fn capture_original(fixture: &Fixture, boot: Option<Uuid>) -> CaptureReport {
+    let frame = serde_json::to_vec(&json!({
+        "contract_version": 1,
+        "selector": "capture",
+        "budget_ms": 30000,
+        "binding": {
+            "connection_id": fixture.binding.connection_id,
+            "boot_id": fixture.binding.boot_id
+        }
+    }))
+    .unwrap();
+    let (_signal, canceled) = watch::channel(false);
+    capture(
+        Some(fixture.path.clone()),
+        CaptureRequest::parse(&frame).unwrap(),
+        Instant::now(),
+        canceled,
+        boot,
+    )
+}
+
+#[test]
+fn capture_proves_actual_existing_actor_boot_and_config_without_creating_storage() {
+    let missing = Fixture::new(false);
+    let report = capture_original(&missing, Some(missing.binding.boot_id));
+    assert_eq!(
+        serde_json::to_value(report).unwrap(),
+        json!({
+            "contract_version": 1, "status": "unresolved"
+        })
+    );
+    assert!(!missing.paths.data.exists());
+    assert!(!missing.paths.credentials.exists());
+
+    let existing = Fixture::new(true);
+    assert_eq!(
+        capture_original(&existing, Some(Uuid::new_v4())).status,
+        "unresolved"
+    );
+    let report = capture_original(&existing, Some(existing.binding.boot_id));
+    assert_eq!(
+        serde_json::to_value(&report).unwrap(),
+        json!({
+            "contract_version": 1, "status": "captured",
+            "tablet_id": existing.binding.tablet_id,
+            "connection_id": existing.binding.connection_id,
+            "boot_id": existing.binding.boot_id,
+            "config_sha256": existing.binding.config_sha256
+        })
+    );
+    assert!(Store::open_existing(existing.paths.clone()).is_err());
+    drop(report);
+    assert!(Store::open_existing(existing.paths.clone()).is_ok());
+    assert!(!existing.grant_path("lock").exists());
+    assert!(config_matches(
+        &existing.path,
+        &existing.binding.config_sha256
+    ));
+}
+
+#[test]
+fn launched_executable_stamp_requires_exact_bounded_bytes_before_readiness() {
+    let bytes = b"synthetic executable witness";
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let size = bytes.len() as u64;
+    let mut frame = Vec::new();
+    executable_stamp(&bytes[..], size, deadline, &mut frame).unwrap();
+    assert_eq!(
+        frame,
+        format!("capacities-actor-exe-v1 {}\n", digest(bytes)).into_bytes()
+    );
+
+    for (bad_size, until) in [
+        (0, deadline),
+        (size - 1, deadline),
+        (size + 1, deadline),
+        (MAX_EXECUTABLE + 1, deadline),
+        (size, Instant::now()),
+    ] {
+        frame.clear();
+        assert!(executable_stamp(&bytes[..], bad_size, until, &mut frame).is_err());
+        assert!(frame.is_empty());
+    }
+}
+
 #[tokio::test]
 async fn unregistered_exchange_and_absent_original_status_do_not_create_storage() {
     let empty = Fixture::new(false);

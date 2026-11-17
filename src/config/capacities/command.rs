@@ -15,9 +15,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
+    ffi::OsStr,
     fs::File,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -27,6 +29,10 @@ use tokio::sync::watch;
 const MAX_BODY: usize = 32 * 1024;
 const MAX_MILLIS: u64 = 30_000;
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
+const ATTEST_ENV: &str = "REMARKABLE_BUDDIES_CAPACITIES_ATTEST";
+const ATTEST_PREFIX: &str = "capacities-actor-exe-v1";
+const MAX_EXECUTABLE: u64 = 128 * 1024 * 1024;
+const ATTEST_LIMIT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -122,6 +128,61 @@ impl Request {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureRequest {
+    contract_version: u32,
+    selector: String,
+    budget_ms: u64,
+    binding: CaptureBinding,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureBinding {
+    connection_id: String,
+    boot_id: String,
+}
+
+impl CaptureRequest {
+    fn parse(frame: &[u8]) -> Option<Self> {
+        if frame.len() > MAX_BODY {
+            return None;
+        }
+        let raw = strict_json(frame).ok()?;
+        if raw["selector"] != "capture" || !raw["binding"].is_object() {
+            return None;
+        }
+        let request: Self = serde_json::from_value(raw).ok()?;
+        let boot_id = Uuid::parse_str(&request.binding.boot_id).ok()?;
+        (request.contract_version == 1
+            && request.selector == "capture"
+            && (1..=MAX_MILLIS).contains(&request.budget_ms)
+            && valid_digest(&request.binding.connection_id)
+            && !boot_id.is_nil()
+            && boot_id.to_string() == request.binding.boot_id)
+            .then_some(request)
+    }
+}
+
+#[derive(Serialize)]
+struct CaptureFacts {
+    tablet_id: Uuid,
+    connection_id: String,
+    boot_id: Uuid,
+    config_sha256: String,
+}
+
+#[derive(Serialize)]
+struct CaptureReport {
+    contract_version: u32,
+    status: &'static str,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    facts: Option<CaptureFacts>,
+    #[serde(skip)]
+    _store: Option<Custody>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum Outcome {
@@ -179,13 +240,17 @@ impl Report {
     }
 
     fn write_to(self, output: &mut impl Write) -> anyhow::Result<()> {
-        let mut frame = serde_json::to_vec(&self).map_err(|_| anyhow::anyhow!("output-failure"))?;
-        frame.push(b'\n');
-        output
-            .write_all(&frame)
-            .and_then(|()| output.flush())
-            .map_err(|_| anyhow::anyhow!("output-failure"))
+        write_frame(&self, output)
     }
+}
+
+fn write_frame(value: &impl Serialize, output: &mut impl Write) -> anyhow::Result<()> {
+    let mut frame = serde_json::to_vec(value).map_err(|_| anyhow::anyhow!("output-failure"))?;
+    frame.push(b'\n');
+    output
+        .write_all(&frame)
+        .and_then(|()| output.flush())
+        .map_err(|_| anyhow::anyhow!("output-failure"))
 }
 
 struct Document {
@@ -241,6 +306,49 @@ fn durable_config_matches(path: &Path, expected: &str) -> bool {
             .parent()
             .is_some_and(|parent| files::sync_dir(parent).is_ok())
         && config_matches(path, expected)
+}
+
+fn capture(
+    path: Option<PathBuf>,
+    request: CaptureRequest,
+    started: Instant,
+    canceled: watch::Receiver<bool>,
+    boot: Option<Uuid>,
+) -> CaptureReport {
+    let mut report = CaptureReport {
+        contract_version: 1,
+        status: "unresolved",
+        facts: None,
+        _store: None,
+    };
+    let budget = Budget::new(started + Duration::from_millis(request.budget_ms), canceled);
+    let Some(boot_id) = boot.filter(|id| id.to_string() == request.binding.boot_id) else {
+        return report;
+    };
+    if budget.current().is_err() {
+        return report;
+    }
+    let Some(doc) = Document::load(path) else {
+        return report;
+    };
+    let Ok(store) = Store::open_existing_for_capacities_capture(doc.config.paths.clone()) else {
+        return report;
+    };
+    let tablet_id = store.actor_id;
+    let Ok(custody) = Custody::acquire(Arc::new(store)) else {
+        return report;
+    };
+    report._store = Some(custody);
+    if durable_config_matches(&doc.path, &doc.sha256) && budget.current().is_ok() {
+        report.status = "captured";
+        report.facts = Some(CaptureFacts {
+            tablet_id,
+            connection_id: request.binding.connection_id,
+            boot_id,
+            config_sha256: doc.sha256,
+        });
+    }
+    report
 }
 
 enum Settlement {
@@ -572,11 +680,65 @@ fn read_frame(deadline: Instant) -> std::result::Result<Vec<u8>, Failure> {
     }
 }
 
+fn executable_stamp(
+    input: impl Read,
+    size: u64,
+    deadline: Instant,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let unavailable = || io::Error::other("actor attestation unavailable");
+    if !(1..=MAX_EXECUTABLE).contains(&size) {
+        return Err(unavailable());
+    }
+    let mut input = input.take(size + 1);
+    let mut hasher = Sha256::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    let mut total = 0_u64;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(unavailable());
+        }
+        let read = input.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&chunk[..read]);
+        total += read as u64;
+    }
+    if total != size || Instant::now() >= deadline {
+        return Err(unavailable());
+    }
+    writeln!(output, "{ATTEST_PREFIX} {:x}", hasher.finalize())?;
+    output.flush()
+}
+
+fn attest_running_executable(output: &mut impl Write) -> io::Result<()> {
+    let deadline = Instant::now() + ATTEST_LIMIT;
+    // /proc/self/exe binds the running ELF through an atomic name replacement.
+    // The kernel excludes normal writes to its executable inode while it runs.
+    let file = File::open("/proc/self/exe")?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("actor attestation unavailable"));
+    }
+    executable_stamp(file, metadata.len(), deadline, output)
+}
+
 pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result<()> {
+    let attested = std::env::var_os(ATTEST_ENV).as_deref() == Some(OsStr::new("1"));
+    if attested {
+        attest_running_executable(output)
+            .map_err(|_| anyhow::anyhow!("actor attestation unavailable"))?;
+    }
     let started = Instant::now();
     let Ok(frame) = read_frame(started + Duration::from_millis(MAX_MILLIS)) else {
         return Report::new(None).write_to(output);
     };
+    if attested
+        && !Request::parse(&frame).is_some_and(|request| request.selector == Selector::Exchange)
+    {
+        return Report::new(None).write_to(output);
+    }
     // Runtime::block_on polls the actor on the calling thread. The worker keeps
     // cancellation and the IO driver running during synchronous disk custody.
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
@@ -587,29 +749,28 @@ pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result
         return Report::new(None).write_to(output);
     };
     let registration = Registration::production();
-    let report = runtime.block_on(async {
+    runtime.block_on(async {
         use tokio::signal::unix::{signal, SignalKind};
         let Ok(mut interrupt) = signal(SignalKind::interrupt()) else {
-            return Report::new(None);
+            return Report::new(None).write_to(output);
         };
         let (sender, canceled) = watch::channel(false);
         let watcher = tokio::spawn(async move {
             let _ = interrupt.recv().await;
             let _ = sender.send(true);
         });
-        let report = handle(
-            path,
-            &frame,
-            started,
-            canceled,
-            registration.as_ref(),
-            local_boot(),
-        )
-        .await;
+        let boot = local_boot();
+        let result = if let Some(request) = CaptureRequest::parse(&frame) {
+            let report = capture(path, request, started, canceled, boot);
+            write_frame(&report, output)
+        } else {
+            handle(path, &frame, started, canceled, registration.as_ref(), boot)
+                .await
+                .write_to(output)
+        };
         watcher.abort();
-        report
-    });
-    report.write_to(output)
+        result
+    })
 }
 
 #[cfg(test)]

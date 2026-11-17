@@ -175,6 +175,19 @@ impl Store {
             |store, generation| store.recover(generation),
         )
     }
+    /// Identity-only capture under the existing lease and generation admission.
+    /// The empty index has no export or payload authority. Exchange and status
+    /// must still open and recover the actual Store before any grant action.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_existing_for_capacities_capture(paths: StorePaths) -> Result<Self, Refusal> {
+        Self::open_existing_using(
+            paths,
+            false,
+            NotebookAdmission::Preferences,
+            |_, _| Ok(()),
+            |_, _| Ok(super::Index::default()),
+        )
+    }
     /// Opt-in mode maintenance only. Preserve legacy callers' format refusal.
     pub(crate) fn open_existing_for_mode(paths: StorePaths) -> Result<Self, Refusal> {
         Self::open_existing_inner(paths, true)
