@@ -128,11 +128,18 @@ impl Request {
     }
 }
 
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum CaptureSelector {
+    Capture,
+    CaptureConnection,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CaptureRequest {
     contract_version: u32,
-    selector: String,
+    selector: CaptureSelector,
     budget_ms: u64,
     binding: CaptureBinding,
 }
@@ -150,13 +157,12 @@ impl CaptureRequest {
             return None;
         }
         let raw = strict_json(frame).ok()?;
-        if raw["selector"] != "capture" || !raw["binding"].is_object() {
+        if !raw["binding"].is_object() {
             return None;
         }
         let request: Self = serde_json::from_value(raw).ok()?;
         let boot_id = Uuid::parse_str(&request.binding.boot_id).ok()?;
         (request.contract_version == 1
-            && request.selector == "capture"
             && (1..=MAX_MILLIS).contains(&request.budget_ms)
             && valid_digest(&request.binding.connection_id)
             && !boot_id.is_nil()
@@ -171,6 +177,16 @@ struct CaptureFacts {
     connection_id: String,
     boot_id: Uuid,
     config_sha256: String,
+    // Omitted for the original capture. The connection selector distinguishes
+    // an unset saved enrollment from a failed capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection: Option<Option<CaptureConnection>>,
+}
+
+#[derive(Serialize)]
+struct CaptureConnection {
+    grant_id: Uuid,
+    space_id: Uuid,
 }
 
 #[derive(Serialize)]
@@ -346,6 +362,15 @@ fn capture(
             connection_id: request.binding.connection_id,
             boot_id,
             config_sha256: doc.sha256,
+            connection: (request.selector == CaptureSelector::CaptureConnection).then(|| {
+                doc.config
+                    .capacities_export
+                    .as_ref()
+                    .map(|connection| CaptureConnection {
+                        grant_id: connection.grant_id,
+                        space_id: connection.space_id,
+                    })
+            }),
         });
     }
     report

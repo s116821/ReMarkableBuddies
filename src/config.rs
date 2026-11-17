@@ -128,17 +128,37 @@ impl Default for Config {
 }
 impl Config {
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
+        Self::load_document(path).map(|(config, _, _)| config)
+    }
+
+    pub(crate) fn load_with_saved_revision(
+        path: Option<PathBuf>,
+    ) -> Result<(Self, Option<SavedRevision>)> {
+        let (config, path, bytes) = Self::load_document(path)?;
+        Ok((
+            config,
+            bytes.map(|bytes| SavedRevision {
+                path,
+                sha256: crate::storage::digest(&bytes),
+            }),
+        ))
+    }
+
+    fn load_document(path: Option<PathBuf>) -> Result<(Self, PathBuf, Option<Vec<u8>>)> {
         let explicit = path.is_some();
         let path =
             path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into());
-        let config = if path.exists() {
-            files::json(&path, MAX_RECORD as u64)?
+        let (config, bytes) = if path.exists() {
+            let bytes = files::read(&path, MAX_RECORD as u64)?;
+            let config = serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
+            (config, Some(bytes))
         } else {
             ensure!(!explicit, "selected configuration is missing");
-            Self::default()
+            (Self::default(), None)
         };
         Self::validate(&config)?;
-        Ok(config)
+        Ok((config, path, bytes))
     }
     pub fn validate(&self) -> Result<()> {
         self.paths.validate()?;
@@ -216,6 +236,21 @@ impl Config {
     /// Pure saved declaration/default capture; no file or runtime lookup.
     pub fn research_policy_snapshot(&self) -> Result<research_settings::ResearchPolicySnapshot> {
         research_settings::ResearchPolicySnapshot::capture(self)
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SavedRevision {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl SavedRevision {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn current(&self) -> bool {
+        files::read(&self.path, MAX_RECORD as u64)
+            .is_ok_and(|bytes| crate::storage::digest(&bytes) == self.sha256)
     }
 }
 

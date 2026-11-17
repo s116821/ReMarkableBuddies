@@ -104,10 +104,10 @@ impl Fixture {
     }
 }
 
-fn capture_original(fixture: &Fixture, boot: Option<Uuid>) -> CaptureReport {
+fn capture_fixture(fixture: &Fixture, selector: &str, boot: Option<Uuid>) -> CaptureReport {
     let frame = serde_json::to_vec(&json!({
         "contract_version": 1,
-        "selector": "capture",
+        "selector": selector,
         "budget_ms": 30000,
         "binding": {
             "connection_id": fixture.binding.connection_id,
@@ -128,7 +128,7 @@ fn capture_original(fixture: &Fixture, boot: Option<Uuid>) -> CaptureReport {
 #[test]
 fn capture_proves_actual_existing_actor_boot_and_config_without_creating_storage() {
     let missing = Fixture::new(false);
-    let report = capture_original(&missing, Some(missing.binding.boot_id));
+    let report = capture_fixture(&missing, "capture", Some(missing.binding.boot_id));
     assert_eq!(
         serde_json::to_value(report).unwrap(),
         json!({
@@ -140,10 +140,10 @@ fn capture_proves_actual_existing_actor_boot_and_config_without_creating_storage
 
     let existing = Fixture::new(true);
     assert_eq!(
-        capture_original(&existing, Some(Uuid::new_v4())).status,
+        capture_fixture(&existing, "capture", Some(Uuid::new_v4())).status,
         "unresolved"
     );
-    let report = capture_original(&existing, Some(existing.binding.boot_id));
+    let report = capture_fixture(&existing, "capture", Some(existing.binding.boot_id));
     assert_eq!(
         serde_json::to_value(&report).unwrap(),
         json!({
@@ -162,6 +162,56 @@ fn capture_proves_actual_existing_actor_boot_and_config_without_creating_storage
         &existing.path,
         &existing.binding.config_sha256
     ));
+}
+
+#[test]
+fn capture_connection_reports_only_the_saved_selection_under_original_custody() {
+    let fixture = Fixture::new(true);
+    let read = |selector| capture_fixture(&fixture, selector, Some(fixture.binding.boot_id));
+    let mut expected = json!({
+        "contract_version": 1,
+        "status": "captured",
+        "tablet_id": fixture.binding.tablet_id,
+        "connection_id": fixture.binding.connection_id,
+        "boot_id": fixture.binding.boot_id,
+        "config_sha256": fixture.binding.config_sha256,
+        "connection": null
+    });
+    assert_eq!(
+        serde_json::to_value(read("capture-connection")).unwrap(),
+        expected
+    );
+
+    let original = fs::read(&fixture.path).unwrap();
+    let mut config: Value = serde_json::from_slice(&original).unwrap();
+    let grant = fixture.binding.grant_id;
+    let space = Uuid::new_v4();
+    config["capacities_export"] = json!({
+        "schema_version": 1,
+        "grant_id": grant,
+        "space_id": space,
+        "tags": [Uuid::new_v4()]
+    });
+    let selected = serde_json::to_vec(&config).unwrap();
+    fs::write(&fixture.path, &selected).unwrap();
+    expected["config_sha256"] = json!(digest(&selected));
+    expected["connection"] = json!({ "grant_id": grant, "space_id": space });
+    let report = read("capture-connection");
+    assert_eq!(serde_json::to_value(&report).unwrap(), expected);
+    assert!(Store::open_existing(fixture.paths.clone()).is_err());
+    assert!(!fixture.grant_path("lock").exists());
+    assert!(!fixture.grant_path("json").exists());
+    assert_eq!(fs::read(&fixture.path).unwrap(), selected);
+    drop(report);
+
+    expected.as_object_mut().unwrap().remove("connection");
+    assert_eq!(serde_json::to_value(read("capture")).unwrap(), expected);
+    config["capacities_export"]["grant_id"] = json!(Uuid::nil());
+    fs::write(&fixture.path, serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(read("capture-connection")).unwrap(),
+        json!({ "contract_version": 1, "status": "unresolved" })
+    );
 }
 
 #[test]

@@ -384,3 +384,142 @@ fn committed_disable_requires_current_config_and_deadline_after_durable_readback
         Err(Failure::Conflict)
     ));
 }
+
+#[test]
+fn configured_cli_refuses_foreign_grant_before_publication() {
+    use crate::{
+        conversation::{CapacitiesAttempt, Ledger},
+        note_export::{command, ExportStatus},
+    };
+
+    let f = Enrolled::new();
+    let mut config: Value = serde_json::from_slice(&f.config).unwrap();
+    let paths = StorePaths {
+        data: f.fixture.paths.data.with_file_name("foreign-data"),
+        cache: f.fixture.paths.cache.with_file_name("foreign-cache"),
+        credentials: f
+            .fixture
+            .paths
+            .credentials
+            .with_file_name("foreign-credentials"),
+    };
+    let conversation = Uuid::new_v4();
+    let correlation = Uuid::new_v4();
+    let ledger = Ledger::new(Arc::new(Store::open(paths.clone()).unwrap()));
+    assert_ne!(
+        ledger.store().actor_id.to_string(),
+        f.fixture.binding.tablet_id
+    );
+    ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
+    drop(ledger);
+    let source = f.fixture.grant_path("json");
+    let copied = paths.credentials.join(source.file_name().unwrap());
+    fs::copy(&source, &copied).unwrap();
+    fs::set_permissions(&copied, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    config["paths"] = json!(paths);
+    config["product_settings"] = json!({"writer_enabled":true,"export_destination":"capacities"});
+    fs::write(&f.fixture.path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+    let frame = serde_json::to_vec(&json!({
+        "command":"export",
+        "note":{
+            "conversation":conversation,
+            "correlation":correlation,
+            "effect_operation":Uuid::new_v4(),
+            "source_scope":"fixture",
+            "source_revision":"1",
+            "title":"Fixture",
+            "markdown":"Fixture body."
+        }
+    }))
+    .unwrap();
+    let report = command::run(Some(f.fixture.path.clone()), &mut frame.as_slice());
+    assert_eq!(report.status, ExportStatus::Refused);
+    assert_eq!(report.failure, Some(Failure::Authentication));
+    let ledger = Ledger::new(Arc::new(Store::open(paths).unwrap()));
+    let id = CapacitiesAttempt::association_id(conversation, f.space, correlation);
+    assert!(ledger
+        .export_association(conversation, id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn configured_send_time_rotates_expired_held_grant_under_original_config_only() {
+    use crate::config::capacities::configured::Access;
+    let f = Enrolled::new();
+    let (_, saved) = Config::load_with_saved_revision(Some(f.fixture.path.clone())).unwrap();
+    let (registration, server) = maintenance_provider(Provider::Refresh {
+        verified_space: Some(f.space),
+        lost_install_ack: None,
+    })
+    .await;
+    let mut access = Access::open_registered(
+        &f.fixture.paths,
+        saved,
+        f.space,
+        f.fixture.binding.grant_id,
+        true,
+        Some(registration),
+    )
+    .unwrap();
+    // Admission occurs while the credential is fresh. Move its expiry in
+    // this fixture so send-time sees the post-generation state without sleep.
+    let actor = Uuid::parse_str(&f.fixture.binding.tablet_id).unwrap();
+    access.admit(Some(actor), true).unwrap();
+    let (_sender, canceled) = watch::channel(false);
+    assert!(matches!(
+        access
+            .current(
+                Uuid::new_v4(),
+                Instant::now() + Duration::from_secs(10),
+                canceled.clone(),
+                || Ok(())
+            )
+            .await,
+        Err(Failure::Authentication)
+    ));
+    let path = f.fixture.grant_path("json");
+    let mut record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    *record.pointer_mut("/state/grant/expires_at").unwrap() = json!(1);
+    files::atomic(&path, &serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut changed = f.config.clone();
+    changed.push(b' ');
+    fs::write(&f.fixture.path, &changed).unwrap();
+    assert!(matches!(
+        access
+            .current(actor, deadline, canceled.clone(), || Ok(()))
+            .await,
+        Err(Failure::Conflict)
+    ));
+    fs::write(&f.fixture.path, &f.config).unwrap();
+    assert!(matches!(
+        access
+            .current(actor, Instant::now(), canceled.clone(), || Ok(()))
+            .await,
+        Err(Failure::Deadline)
+    ));
+    let replacement = access
+        .current(actor, deadline, canceled.clone(), || Ok(()))
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(replacement.expose(), "replacement-access");
+    assert!(matches!(
+        GrantOwner::open(&f.fixture.paths.credentials, f.fixture.binding.grant_id),
+        Err(Failure::Conflict)
+    ));
+
+    // No second token POST for this export. Fresh access now reads the
+    // replacement under that same original grant ID and owner.
+    assert_eq!(
+        access
+            .current(actor, deadline, canceled, || Ok(()))
+            .await
+            .unwrap()
+            .expose(),
+        "replacement-access"
+    );
+}

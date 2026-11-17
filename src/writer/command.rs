@@ -215,7 +215,8 @@ fn run_flow(
     };
     let result = (|| -> std::result::Result<_, FlowFailure> {
         request.preflight().map_err(|_| FlowFailure::InvalidInput)?;
-        let config = Config::load(config_path).map_err(|_| FlowFailure::Storage)?;
+        let (config, saved) =
+            Config::load_with_saved_revision(config_path).map_err(|_| FlowFailure::Storage)?;
         if !matches!(request, writer_flow::Request::ReconcileExport { .. })
             && !config.admits_writer(true)
         {
@@ -252,15 +253,22 @@ fn run_flow(
             writer_flow::Request::ReconcileExport {
                 conversation,
                 correlation,
-            } => ConfiguredDestination::original(&config, *conversation, *correlation)
-                .map_err(destination_failure)?,
+            } => ConfiguredDestination::original(
+                &config,
+                saved.as_ref(),
+                *conversation,
+                *correlation,
+            )
+            .map_err(destination_failure)?,
             _ => {
-                let destination =
-                    ConfiguredDestination::selected(&config).map_err(destination_failure)?;
-                let ledger = Ledger::new(Arc::new(
-                    Store::open(config.paths).map_err(|_| FlowFailure::Storage)?,
-                ));
-                (ledger, destination)
+                let mut destination =
+                    ConfiguredDestination::selected(&config, saved.as_ref(), None)
+                        .map_err(destination_failure)?;
+                let store = Store::open(config.paths).map_err(|_| FlowFailure::Storage)?;
+                destination
+                    .admit_actor(&store)
+                    .map_err(destination_failure)?;
+                (Ledger::new(Arc::new(store)), destination)
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()

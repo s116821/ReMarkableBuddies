@@ -176,6 +176,98 @@ fn capacities_admission_cancellation_never_polls_destination() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn configured_capacities_resolves_credential_after_writer_admission() {
+    use crate::{
+        config::{
+            capacities::{tests::grant_fixture, ExportConnection},
+            Config,
+        },
+        note_export::dispatch::ConfiguredDestination,
+    };
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    let f = Fixture::new();
+    let space = Uuid::new_v4();
+    let grant = Uuid::new_v4();
+    let paths = f.ledger.store().paths.clone();
+    fs::set_permissions(&paths.credentials, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = paths
+        .credentials
+        .join(format!("capacities-grant-{grant}.json"));
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 900;
+    fs::write(
+        &path,
+        serde_json::to_vec(&grant_fixture(grant, space, expires)).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let config = Config {
+        paths,
+        product_settings: Some(Some(
+            serde_json::from_value(serde_json::json!({
+                "export_destination": "capacities"
+            }))
+            .unwrap(),
+        )),
+        capacities_export: Some(ExportConnection {
+            schema_version: 1,
+            space_id: space,
+            grant_id: grant,
+            tags: vec![],
+        }),
+        ..Config::default()
+    };
+    let destination =
+        ConfiguredDestination::selected(&config, None, Some(f.ledger.store())).unwrap();
+    let request = f.request();
+    let (tx, rx) = watch::channel(false);
+    let report = run_destination_with_events(
+        &f.ledger,
+        &mut model(),
+        &destination,
+        &request,
+        &pref(),
+        rx,
+        &mut |phase, _| {
+            if phase == Phase::BeforeDestinationPoll {
+                tx.send(true).unwrap();
+            }
+        },
+    );
+    assert_eq!(report.status, Status::Canceled);
+    assert_eq!(report.observation.no_send_recorded, Some(true));
+    assert!(!report.observation.destination_polled);
+    assert!(!report.observation.write_polled);
+
+    // Current credential expiry does not turn an exact retained flow replay into OAuth.
+    fs::write(
+        &path,
+        serde_json::to_vec(&grant_fixture(grant, space, 1)).unwrap(),
+    )
+    .unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let replay = run_destination_with_events(
+        &f.ledger,
+        &mut model(),
+        &destination,
+        &request,
+        &pref(),
+        rx,
+        &mut |phase, _| assert_ne!(phase, Phase::BeforeDestinationPoll),
+    );
+    assert_eq!(replay.status, Status::Historical);
+}
+
 #[test]
 fn interrupted_guarded_preparation_direct_retry_is_unresolved_without_http() {
     let f = Fixture::new();

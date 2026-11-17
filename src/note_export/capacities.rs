@@ -5,6 +5,7 @@ use super::{
     *,
 };
 use crate::{
+    config::capacities::configured::Access,
     conversation::{
         CapacitiesAttempt, CapacitiesBaseline, CapacitiesManaged, ExportAction, Ledger, Outcome,
         CAPACITIES_BACKEND, CAPACITIES_PAGE,
@@ -20,14 +21,16 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use tokio::sync::watch;
 
+const API_ORIGIN: &str = "https://api.capacities.io/";
 const MAX_RESPONSE: usize = 1024 * 1024;
 
 pub struct CapacitiesDestination {
-    client: Client,
+    client: Option<Client>,
     origin: Url,
     space: Uuid,
     tags: BTreeSet<Uuid>,
     grant_id: Option<Uuid>,
+    deadline: Option<std::time::Instant>,
 }
 
 #[derive(Deserialize)]
@@ -79,7 +82,21 @@ struct VerifiedBody {
 impl CapacitiesDestination {
     /// The caller supplies an authorized REST access token for its selected space.
     pub fn new(token: &str, space: Uuid, tags: BTreeSet<Uuid>) -> Result<Self> {
-        Self::build("https://api.capacities.io/", token, space, tags, false)
+        Self::build(API_ORIGIN, token, space, tags, false)
+    }
+
+    pub(super) fn configured(space: Uuid, grant_id: Uuid, tags: BTreeSet<Uuid>) -> Result<Self> {
+        if grant_id.is_nil() {
+            return Err(Failure::MissingCapacitiesCredentials);
+        }
+        Ok(Self {
+            client: None,
+            origin: Url::parse(API_ORIGIN).map_err(|_| Failure::InvalidInput)?,
+            space,
+            tags,
+            grant_id: Some(grant_id),
+            deadline: None,
+        })
     }
 
     pub(super) fn enrolled(
@@ -87,12 +104,14 @@ impl CapacitiesDestination {
         space: Uuid,
         grant_id: Uuid,
         tags: BTreeSet<Uuid>,
+        deadline: std::time::Instant,
     ) -> Result<Self> {
         if grant_id.is_nil() {
             return Err(Failure::MissingCapacitiesCredentials);
         }
         let mut destination = Self::new(token, space, tags)?;
         destination.grant_id = Some(grant_id);
+        destination.deadline = Some(deadline);
         Ok(destination)
     }
 
@@ -148,11 +167,12 @@ impl CapacitiesDestination {
             .build()
             .map_err(|_| Failure::Transport)?;
         Ok(Self {
-            client,
+            client: Some(client),
             origin,
             space,
             tags,
             grant_id: None,
+            deadline: None,
         })
     }
 
@@ -170,6 +190,8 @@ impl CapacitiesDestination {
         }
         let mut request = self
             .client
+            .as_ref()
+            .ok_or(Failure::Authentication)?
             .request(method, url)
             .timeout(budget.request_timeout()?);
         if let Some(payload) = payload {
@@ -322,17 +344,18 @@ impl CapacitiesDestination {
         let Some(owner) = Owner::acquire(ledger) else {
             return ExportReport::new(ExportStatus::Busy, note.correlation, note.effect_operation);
         };
-        self.owned_export(ledger, note, canceled, &owner, None)
+        self.owned_export(ledger, note, canceled, &owner, None, None)
             .await
     }
 
-    async fn owned_export(
+    pub(super) async fn owned_export(
         &self,
         ledger: &Ledger,
         note: &PreparedNote,
         mut canceled: watch::Receiver<bool>,
         owner: &ExportOwner<'_>,
         mut control: Option<&mut ExportControl<'_>>,
+        mut access: Option<&mut Access>,
     ) -> ExportReport {
         let fallback = |status, failure| {
             let mut report = ExportReport::new(status, note.correlation, note.effect_operation);
@@ -390,7 +413,7 @@ impl CapacitiesDestination {
             Ok(plan) => plan,
             Err(failure) => return fallback(ExportStatus::Refused, Some(failure)),
         };
-        let budget = Budget::default();
+        let budget = self.budget();
         let budget = Budget {
             end: control
                 .as_deref()
@@ -424,7 +447,7 @@ impl CapacitiesDestination {
             if !matches_plan(&found, note, &attempt) {
                 return fallback(ExportStatus::Conflict, Some(Failure::Conflict));
             }
-            if control.is_some() {
+            if control.is_some() || access.is_some() {
                 return if matches!(
                     found.outcome,
                     Outcome::Completed | Outcome::Failed | Outcome::Canceled
@@ -460,7 +483,7 @@ impl CapacitiesDestination {
             }
         }
 
-        if control.is_none() {
+        if control.is_none() && access.is_none() {
             match pending(self.preflight_plan(&attempt, budget), &mut canceled, budget).await {
                 Ok(Some(())) => {}
                 Ok(None) => return fallback(ExportStatus::CanceledNoEffect, None),
@@ -513,20 +536,75 @@ impl CapacitiesDestination {
         }
 
         event(&mut control, ExportPhase::AfterAdmission, ledger);
-        if control.is_some() {
+        let authorized;
+        let destination = if let Some(access) = access.as_deref_mut() {
+            if *canceled.borrow() || canceled.has_changed().is_err() {
+                return no_send(ledger, association, None, &mut control);
+            }
+            if !selection_current(&mut control, ledger) {
+                return no_send(ledger, association, Some(Failure::Conflict), &mut control);
+            }
+            let selection = || {
+                if control.as_deref().is_some_and(|c| {
+                    !c.guard
+                        .as_ref()
+                        .is_some_and(|guard| guard.current(ledger).unwrap_or(false))
+                }) {
+                    Err(Failure::Conflict)
+                } else {
+                    Ok(())
+                }
+            };
+            let token = match access
+                .current(
+                    ledger.store().actor_id,
+                    budget.end,
+                    canceled.clone(),
+                    selection,
+                )
+                .await
+            {
+                Ok(token) => token,
+                Err(failure) => {
+                    let failure =
+                        (!*canceled.borrow() && canceled.has_changed().is_ok()).then_some(failure);
+                    return no_send(ledger, association, failure, &mut control);
+                }
+            };
+            authorized = match Self::enrolled(
+                token.expose(),
+                self.space,
+                self.grant_id.expect("configured grant"),
+                self.tags.clone(),
+                budget.end,
+            ) {
+                Ok(destination) => destination,
+                Err(failure) => return no_send(ledger, association, Some(failure), &mut control),
+            };
+            &authorized
+        } else {
+            self
+        };
+        if control.is_some() || access.is_some() {
             event(&mut control, ExportPhase::BeforeDestinationPoll, ledger);
             if !selection_current(&mut control, ledger) {
                 return no_send(ledger, association, Some(Failure::Conflict), &mut control);
+            }
+            if let Some(access) = access.as_deref() {
+                if let Err(failure) = access.config_current() {
+                    return no_send(ledger, association, Some(failure), &mut control);
+                }
             }
             let preflight = async {
                 if let Some(c) = control.as_deref_mut() {
                     c.observation.destination_polled = true;
                 }
-                self.preflight_plan(
-                    association.capacities.as_ref().expect("Capacities plan"),
-                    budget,
-                )
-                .await
+                destination
+                    .preflight_plan(
+                        association.capacities.as_ref().expect("Capacities plan"),
+                        budget,
+                    )
+                    .await
             };
             match pending(preflight, &mut canceled, budget).await {
                 Ok(Some(())) => {}
@@ -536,7 +614,7 @@ impl CapacitiesDestination {
         }
 
         let (result, polled) = dispatch(
-            self.write(
+            destination.write(
                 payload,
                 association.capacities.as_ref().expect("Capacities plan"),
                 budget,
@@ -546,7 +624,7 @@ impl CapacitiesDestination {
             &mut || {
                 event(&mut control, ExportPhase::BeforeWritePoll, ledger);
                 if selection_current(&mut control, ledger) {
-                    Ok(())
+                    access.as_deref().map_or(Ok(()), Access::config_current)
                 } else {
                     Err(Failure::Conflict)
                 }
@@ -571,14 +649,15 @@ impl CapacitiesDestination {
                         Failure::Storage,
                     );
                 }
-                self.readback(
-                    ledger,
-                    association,
-                    &mut canceled,
-                    budget,
-                    control.as_deref_mut().map(|c| &mut *c.observation),
-                )
-                .await
+                destination
+                    .readback(
+                        ledger,
+                        association,
+                        &mut canceled,
+                        budget,
+                        control.as_deref_mut().map(|c| &mut *c.observation),
+                    )
+                    .await
             }
             result if polled => {
                 let stage = if association
@@ -644,10 +723,19 @@ impl CapacitiesDestination {
             ledger,
             association,
             &mut canceled,
-            Budget::default(),
+            self.budget(),
             observation,
         )
         .await
+    }
+
+    fn budget(&self) -> Budget {
+        let default = Budget::default();
+        Budget {
+            end: self
+                .deadline
+                .map_or(default.end, |end| end.min(default.end)),
+        }
     }
 
     async fn readback(
@@ -664,11 +752,8 @@ impl CapacitiesDestination {
         if attempt.space != self.space || attempt.grant_id != self.grant_id {
             return with_failure(&association, ExportStatus::Conflict, Failure::Conflict);
         }
-        if matches!(
-            association.outcome,
-            Outcome::Completed | Outcome::Failed | Outcome::Canceled
-        ) {
-            return terminal(&association);
+        if let Some(local) = local_reconciliation(&association) {
+            return local;
         }
         let Some(id) = attempt.candidate else {
             return report(&association, ExportStatus::ReconcileRequired);
@@ -718,6 +803,20 @@ impl CapacitiesDestination {
     }
 }
 
+pub(super) fn local_reconciliation(association: &ExportAssociation) -> Option<ExportReport> {
+    if matches!(
+        association.outcome,
+        Outcome::Completed | Outcome::Failed | Outcome::Canceled
+    ) {
+        return Some(terminal(association));
+    }
+    association
+        .capacities
+        .as_ref()
+        .filter(|attempt| attempt.candidate.is_none())
+        .map(|_| report(association, ExportStatus::ReconcileRequired))
+}
+
 impl super::dispatch::OwnedDestination for CapacitiesDestination {
     fn backend(&self) -> &str {
         CAPACITIES_BACKEND
@@ -726,19 +825,7 @@ impl super::dispatch::OwnedDestination for CapacitiesDestination {
         CapacitiesAttempt::association_id(conversation, self.space, correlation)
     }
     fn intent_binding(&self) -> String {
-        // Fixed UUID/ordered UUID set serialization cannot fail; no token enters the intent.
-        if let Some(grant) = self.grant_id {
-            serde_json::to_string(&(
-                CAPACITIES_BACKEND,
-                self.space,
-                CAPACITIES_PAGE,
-                &self.tags,
-                grant,
-            ))
-        } else {
-            serde_json::to_string(&(CAPACITIES_BACKEND, self.space, CAPACITIES_PAGE, &self.tags))
-        }
-        .expect("Capacities intent primitives")
+        intent_binding(self.space, &self.tags, self.grant_id)
     }
     async fn export_owned(
         &self,
@@ -748,7 +835,7 @@ impl super::dispatch::OwnedDestination for CapacitiesDestination {
         owner: &ExportOwner<'_>,
         control: Option<&mut ExportControl<'_>>,
     ) -> ExportReport {
-        self.owned_export(ledger, note, canceled, owner, control)
+        self.owned_export(ledger, note, canceled, owner, control, None)
             .await
     }
     async fn reconcile_owned(
@@ -770,6 +857,16 @@ impl super::dispatch::OwnedDestination for CapacitiesDestination {
         )
         .await
     }
+}
+
+pub(super) fn intent_binding(space: Uuid, tags: &BTreeSet<Uuid>, grant: Option<Uuid>) -> String {
+    // Fixed UUID/ordered UUID set serialization cannot fail; no token enters the intent.
+    if let Some(grant) = grant {
+        serde_json::to_string(&(CAPACITIES_BACKEND, space, CAPACITIES_PAGE, tags, grant))
+    } else {
+        serde_json::to_string(&(CAPACITIES_BACKEND, space, CAPACITIES_PAGE, tags))
+    }
+    .expect("Capacities intent primitives")
 }
 
 fn no_send(

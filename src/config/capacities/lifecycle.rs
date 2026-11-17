@@ -1,5 +1,7 @@
 //! Linux-only, per-grant ownership and durable OAuth fences. No HTTP operations.
-use super::{private_text, AccessTokenLease, Grant, MAX_GRANT};
+#[cfg(test)]
+use super::AccessTokenLease;
+use super::{private_text, Grant, MAX_GRANT};
 use crate::{
     config::{
         inspection::strict_json,
@@ -349,7 +351,23 @@ impl GrantOwner {
         Ok(snapshot)
     }
 
+    #[cfg(test)]
     pub(super) fn access_token(self, space_id: Uuid, may_write: bool) -> Result<AccessTokenLease> {
+        let (grant, _) = self.active_grant(space_id, may_write)?;
+        if grant.expires_at <= now()? {
+            return Err(Failure::Authentication);
+        }
+        Ok(AccessTokenLease {
+            token: Secret(grant.access_token),
+            _owner: self,
+        })
+    }
+
+    pub(super) fn active_grant(
+        &self,
+        space_id: Uuid,
+        may_write: bool,
+    ) -> Result<(Grant, Option<Enrollment>)> {
         let snapshot = self
             .durable_snapshot(files::sync_dir)?
             .ok_or(Failure::MissingCapacitiesCredentials)?;
@@ -357,15 +375,11 @@ impl GrantOwner {
             return Err(Failure::Authentication);
         };
         if grant.space_id != space_id
-            || grant.expires_at <= now()?
             || (may_write && !grant.scopes.iter().any(|scope| scope == "api:write"))
         {
             return Err(Failure::Authentication);
         }
-        Ok(AccessTokenLease {
-            token: Secret(grant.access_token),
-            _owner: self,
-        })
+        Ok((grant, snapshot.record.enrollment))
     }
 
     /// A caller may exchange once only after this fresh durable fence returns.
@@ -699,6 +713,10 @@ impl Rotation {
         &self.owner
     }
 
+    pub(super) fn into_owner(self) -> GrantOwner {
+        self.owner
+    }
+
     pub(super) fn scopes(&self) -> &[String] {
         &self.scopes
     }
@@ -878,7 +896,7 @@ fn replacement(bytes: &[u8], id: Uuid, space_id: Uuid) -> Result<Grant> {
     Ok(grant)
 }
 
-fn now() -> Result<u64> {
+pub(super) fn now() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Failure::Authentication)?

@@ -2,12 +2,12 @@
 //! Neither variant acquires a second owner or manufactures provider revisions.
 use super::*;
 use crate::{
-    config::{self, product::ExportDestination, Config},
-    conversation::{ExportAssociation, Ledger, Outcome},
+    config::{capacities::configured::Access, product::ExportDestination, Config, SavedRevision},
+    conversation::{CapacitiesAttempt, ExportAssociation, Ledger, Outcome, CAPACITIES_BACKEND},
     storage::Store,
 };
 use std::{collections::BTreeSet, sync::Arc};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex};
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "configured_tests.rs"]
@@ -90,10 +90,14 @@ impl<D: NoteDestination> OwnedDestination for LegacyDestination<'_, D> {
 /// Only existing command composition instantiates credentials from saved policy.
 pub(crate) enum ConfiguredDestination {
     Mem(mem::MemDestination),
-    Capacities {
-        destination: capacities::CapacitiesDestination,
-        _lease: Box<config::capacities::AccessTokenLease>,
-    },
+    Capacities(Box<ConfiguredCapacities>),
+}
+
+pub(crate) struct ConfiguredCapacities {
+    space: Uuid,
+    grant: Uuid,
+    tags: BTreeSet<Uuid>,
+    access: Mutex<Access>,
 }
 
 impl ConfiguredDestination {
@@ -104,22 +108,30 @@ impl ConfiguredDestination {
 
     fn capacities(
         config: &Config,
+        saved: Option<&SavedRevision>,
         space: Uuid,
         grant: Uuid,
         tags: BTreeSet<Uuid>,
         may_write: bool,
+        existing: Option<&Store>,
     ) -> Result<Self> {
-        let lease =
-            config::capacities::access_token(&config.paths.credentials, space, grant, may_write)?;
-        let destination =
-            capacities::CapacitiesDestination::enrolled(lease.expose(), space, grant, tags)?;
-        Ok(Self::Capacities {
-            destination,
-            _lease: Box::new(lease),
-        })
+        let access = Access::open(&config.paths, saved.cloned(), space, grant, may_write)?;
+        if may_write {
+            access.admit(existing.map(|store| store.actor_id), true)?;
+        }
+        Ok(Self::Capacities(Box::new(ConfiguredCapacities {
+            space,
+            grant,
+            tags,
+            access: Mutex::new(access),
+        })))
     }
 
-    pub(crate) fn selected(config: &Config) -> Result<Self> {
+    pub(crate) fn selected(
+        config: &Config,
+        saved: Option<&SavedRevision>,
+        existing: Option<&Store>,
+    ) -> Result<Self> {
         match config.export_destination() {
             ExportDestination::Mem => Self::mem(),
             ExportDestination::Disabled => Err(Failure::Unsupported),
@@ -130,17 +142,27 @@ impl ConfiguredDestination {
                     .ok_or(Failure::MissingCapacitiesCredentials)?;
                 Self::capacities(
                     config,
+                    saved,
                     connection.space_id,
                     connection.grant_id,
                     connection.tags.iter().copied().collect(),
                     true,
+                    existing,
                 )
             }
         }
     }
 
+    pub(crate) fn admit_actor(&mut self, store: &Store) -> Result<()> {
+        match self {
+            Self::Mem(_) => Ok(()),
+            Self::Capacities(binding) => binding.access.get_mut().admit_actor(store.actor_id),
+        }
+    }
+
     pub(crate) fn original(
         config: &Config,
+        saved: Option<&SavedRevision>,
         conversation: Uuid,
         correlation: Uuid,
     ) -> Result<(Ledger, Self)> {
@@ -158,7 +180,25 @@ impl ConfiguredDestination {
                     let grant = attempt
                         .grant_id
                         .ok_or(Failure::MissingCapacitiesCredentials)?;
-                    Self::capacities(config, attempt.space, grant, attempt.tags.clone(), false)?
+                    let mut destination = Self::capacities(
+                        config,
+                        saved,
+                        attempt.space,
+                        grant,
+                        attempt.tags.clone(),
+                        false,
+                        Some(ledger.store()),
+                    )?;
+                    if capacities::local_reconciliation(association).is_some() {
+                        let Self::Capacities(binding) = &mut destination else {
+                            unreachable!()
+                        };
+                        binding
+                            .access
+                            .get_mut()
+                            .admit(Some(ledger.store().actor_id), false)?;
+                    }
+                    destination
                 }
                 _ => return Err(Failure::Unsupported),
             },
@@ -168,19 +208,30 @@ impl ConfiguredDestination {
     }
 }
 
+fn credential_report(correlation: Uuid, effect: Uuid, failure: Failure) -> ExportReport {
+    let status = if failure == Failure::Conflict {
+        ExportStatus::Conflict
+    } else {
+        ExportStatus::Refused
+    };
+    let mut report = ExportReport::new(status, correlation, effect);
+    report.failure = Some(failure);
+    report
+}
+
 impl OwnedDestination for ConfiguredDestination {
     fn backend(&self) -> &str {
         match self {
             Self::Mem(destination) => destination.backend(),
-            Self::Capacities { destination, .. } => destination.backend(),
+            Self::Capacities(_) => CAPACITIES_BACKEND,
         }
     }
 
     fn association_id(&self, conversation: Uuid, correlation: Uuid) -> Uuid {
         match self {
             Self::Mem(_) => correlation,
-            Self::Capacities { destination, .. } => {
-                destination.association_id(conversation, correlation)
+            Self::Capacities(destination) => {
+                CapacitiesAttempt::association_id(conversation, destination.space, correlation)
             }
         }
     }
@@ -188,7 +239,11 @@ impl OwnedDestination for ConfiguredDestination {
     fn intent_binding(&self) -> String {
         match self {
             Self::Mem(destination) => destination.backend().to_owned(),
-            Self::Capacities { destination, .. } => destination.intent_binding(),
+            Self::Capacities(destination) => capacities::intent_binding(
+                destination.space,
+                &destination.tags,
+                Some(destination.grant),
+            ),
         }
     }
 
@@ -206,9 +261,26 @@ impl OwnedDestination for ConfiguredDestination {
                     .export_owned(ledger, note, canceled, owner, control)
                     .await
             }
-            Self::Capacities { destination, .. } => {
+            Self::Capacities(binding) => {
+                let Ok(mut access) = binding.access.try_lock() else {
+                    return ExportReport::new(
+                        ExportStatus::Busy,
+                        note.correlation,
+                        note.effect_operation,
+                    );
+                };
+                let destination = match capacities::CapacitiesDestination::configured(
+                    binding.space,
+                    binding.grant,
+                    binding.tags.clone(),
+                ) {
+                    Ok(destination) => destination,
+                    Err(failure) => {
+                        return credential_report(note.correlation, note.effect_operation, failure)
+                    }
+                };
                 destination
-                    .export_owned(ledger, note, canceled, owner, control)
+                    .owned_export(ledger, note, canceled, owner, control, Some(&mut access))
                     .await
             }
         }
@@ -236,7 +308,52 @@ impl OwnedDestination for ConfiguredDestination {
                     )
                     .await
             }
-            Self::Capacities { destination, .. } => {
+            Self::Capacities(binding) => {
+                if !owner.belongs_to(ledger) {
+                    return credential_report(correlation, Uuid::nil(), Failure::Storage);
+                }
+                let id =
+                    CapacitiesAttempt::association_id(conversation, binding.space, correlation);
+                let Ok(Some(association)) = ledger.export_association(conversation, id) else {
+                    return credential_report(correlation, Uuid::nil(), Failure::Storage);
+                };
+                if !association.capacities.as_ref().is_some_and(|attempt| {
+                    attempt.space == binding.space && attempt.grant_id == Some(binding.grant)
+                }) {
+                    return credential_report(correlation, Uuid::nil(), Failure::Conflict);
+                }
+                if let Some(local) = capacities::local_reconciliation(&association) {
+                    return local;
+                }
+                let refuse = |failure| {
+                    let mut report =
+                        super::run::report(&association, ExportStatus::ReconcileRequired);
+                    report.failure = Some(failure);
+                    report
+                };
+                let Ok(mut access) = binding.access.try_lock() else {
+                    return ExportReport::new(ExportStatus::Busy, correlation, Uuid::nil());
+                };
+                let deadline = Budget::default().end;
+                let token = match access
+                    .current(ledger.store().actor_id, deadline, canceled.clone(), || {
+                        Ok(())
+                    })
+                    .await
+                {
+                    Ok(token) => token,
+                    Err(failure) => return refuse(failure),
+                };
+                let destination = match capacities::CapacitiesDestination::enrolled(
+                    token.expose(),
+                    binding.space,
+                    binding.grant,
+                    binding.tags.clone(),
+                    deadline,
+                ) {
+                    Ok(destination) => destination,
+                    Err(failure) => return refuse(failure),
+                };
                 destination
                     .reconcile_owned(
                         ledger,

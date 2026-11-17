@@ -1,10 +1,15 @@
 //! Private local Capacities enrollment selection and grant custody.
-use crate::{note_export::Failure, storage::Uuid};
+#[cfg(any(test, target_os = "linux"))]
+use crate::note_export::Failure;
+use crate::storage::Uuid;
 use serde::{de, Deserialize, Deserializer, Serialize};
-use std::{collections::BTreeSet, fmt, path::Path};
+#[cfg(test)]
+use std::path::Path;
+use std::{collections::BTreeSet, fmt};
 
 #[cfg(target_os = "linux")]
 pub mod command;
+pub(crate) mod configured;
 #[cfg(target_os = "linux")]
 pub mod lifecycle;
 #[cfg(target_os = "linux")]
@@ -125,24 +130,28 @@ fn private_text(value: &str, limit: usize) -> bool {
     !value.is_empty() && value.len() <= limit && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+#[cfg(test)]
 pub(crate) struct AccessTokenLease {
     token: super::Secret,
     #[cfg(target_os = "linux")]
     _owner: lifecycle::GrantOwner,
 }
 
+#[cfg(test)]
 impl AccessTokenLease {
     pub(crate) fn expose(&self) -> &str {
         self.token.expose()
     }
 }
 
+#[cfg(test)]
 impl fmt::Debug for AccessTokenLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[Capacities access token lease]")
     }
 }
 
+#[cfg(test)]
 pub(crate) fn access_token(
     root: &Path,
     space: Uuid,
