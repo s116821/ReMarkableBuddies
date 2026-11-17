@@ -75,10 +75,13 @@ impl CaptureIdentity {
 
     fn is_resident(&self) -> bool {
         #[cfg(feature = "development-resident-bootstrap")]
-        if self.resident.is_some() {
-            return true;
+        {
+            self.resident.is_some()
         }
-        false
+        #[cfg(not(feature = "development-resident-bootstrap"))]
+        {
+            false
+        }
     }
 
     fn check(&self) -> Result<()> {
