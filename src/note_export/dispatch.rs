@@ -92,7 +92,7 @@ pub(crate) enum ConfiguredDestination {
     Mem(mem::MemDestination),
     Capacities {
         destination: capacities::CapacitiesDestination,
-        _lease: config::capacities::AccessTokenLease,
+        _lease: Box<config::capacities::AccessTokenLease>,
     },
 }
 
@@ -115,7 +115,7 @@ impl ConfiguredDestination {
             capacities::CapacitiesDestination::enrolled(lease.expose(), space, grant, tags)?;
         Ok(Self::Capacities {
             destination,
-            _lease: lease,
+            _lease: Box::new(lease),
         })
     }
 
