@@ -1045,6 +1045,8 @@ mod tests {
                 "base-url",
                 "basic-settings-input",
                 "basic-settings-operation",
+                #[cfg(target_os = "linux")]
+                "capacities-oauth",
                 "configuration-operation",
                 "configuration-schema",
                 "conversation-input",
