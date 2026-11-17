@@ -763,6 +763,17 @@ pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result
         let result = if let Some(request) = CaptureRequest::parse(&frame) {
             let report = capture(path, request, started, canceled, boot);
             write_frame(&report, output)
+        } else if let Some(request) = grant_command::Request::parse(&frame) {
+            let report = grant_command::handle(
+                path,
+                request,
+                started,
+                canceled,
+                registration.as_ref(),
+                boot,
+            )
+            .await;
+            write_frame(&report, output)
         } else {
             handle(path, &frame, started, canceled, registration.as_ref(), boot)
                 .await
@@ -772,6 +783,9 @@ pub fn run_cli(path: Option<PathBuf>, output: &mut impl Write) -> anyhow::Result
         result
     })
 }
+
+#[path = "grant_command.rs"]
+mod grant_command;
 
 #[cfg(test)]
 #[path = "command_tests.rs"]

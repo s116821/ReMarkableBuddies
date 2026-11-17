@@ -64,6 +64,7 @@ pub struct Status {
     pub enrollment: Option<Enrollment>,
     pub operation_id: Option<Uuid>,
     pub target_config_sha256: Option<String>,
+    pub(super) revision: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +74,8 @@ struct Record {
     grant_id: Uuid,
     enrollment: Option<Enrollment>,
     target_config_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_rotation: Option<Uuid>,
     state: State,
 }
 
@@ -248,6 +251,7 @@ impl GrantOwner {
                 grant_id: self.id,
                 enrollment: None,
                 target_config_sha256: None,
+                last_rotation: None,
                 state: State::Active { grant },
             }
         };
@@ -292,16 +296,23 @@ impl GrantOwner {
             .map_or((Phase::Absent, None, None), |snapshot| {
                 snapshot.record.state.summary()
             });
-        let (enrollment, target_config_sha256) = snapshot
+        let (enrollment, target_config_sha256, revision, last_rotation) = snapshot
             .map(|snapshot| {
                 (
                     snapshot.record.enrollment,
                     snapshot.record.target_config_sha256,
+                    Some(snapshot.sha256),
+                    snapshot.record.last_rotation,
                 )
             })
             .unwrap_or_default();
-        let operation_id =
-            operation_id.or_else(|| enrollment.as_ref().map(|value| value.operation_id));
+        let operation_id = operation_id
+            .or(if phase == Phase::Active {
+                last_rotation
+            } else {
+                None
+            })
+            .or_else(|| enrollment.as_ref().map(|value| value.operation_id));
         Ok(Status {
             phase,
             grant_id: self.id,
@@ -309,6 +320,7 @@ impl GrantOwner {
             enrollment,
             operation_id,
             target_config_sha256,
+            revision,
         })
     }
 
@@ -374,6 +386,7 @@ impl GrantOwner {
             grant_id: self.id,
             enrollment: Some(enrollment),
             target_config_sha256: None,
+            last_rotation: None,
             state: State::PendingExchange {},
         };
         let sha256 = match self.publish(None, &record) {
@@ -441,21 +454,44 @@ impl GrantOwner {
     }
 
     pub fn begin_rotation(self, space_id: Uuid, operation_id: Uuid) -> Result<Rotation> {
-        let mut snapshot = self.required()?;
-        let State::Active { grant } = snapshot.record.state else {
-            return Err(Failure::Conflict);
+        self.begin_rotation_retained(space_id, operation_id, None)
+            .map_err(|(_, failure)| failure)
+    }
+
+    pub(super) fn begin_rotation_retained(
+        self,
+        space_id: Uuid,
+        operation_id: Uuid,
+        expected: Option<&str>,
+    ) -> std::result::Result<Rotation, (Box<Self>, Failure)> {
+        let prepare = || {
+            let mut snapshot = self.required()?;
+            if expected.is_some_and(|revision| revision != snapshot.sha256) {
+                return Err(Failure::Conflict);
+            }
+            let State::Active { grant } = snapshot.record.state else {
+                return Err(Failure::Conflict);
+            };
+            if grant.space_id != space_id
+                || operation_id.is_nil()
+                || snapshot.record.last_rotation == Some(operation_id)
+            {
+                return Err(Failure::InvalidInput);
+            }
+            snapshot.record.state = State::PendingRotation {
+                space_id,
+                operation_id,
+            };
+            let sha256 = self.publish(Some(&snapshot.sha256), &snapshot.record)?;
+            Ok((snapshot.record, sha256, grant))
         };
-        if grant.space_id != space_id || operation_id.is_nil() {
-            return Err(Failure::InvalidInput);
-        }
-        snapshot.record.state = State::PendingRotation {
-            space_id,
-            operation_id,
+        let (record, sha256, grant) = match prepare() {
+            Ok(prepared) => prepared,
+            Err(failure) => return Err((Box::new(self), failure)),
         };
-        let sha256 = self.publish(Some(&snapshot.sha256), &snapshot.record)?;
         Ok(Rotation {
             owner: self,
-            record: snapshot.record,
+            record,
             sha256,
             space_id,
             client_id: grant.client_id,
@@ -467,7 +503,18 @@ impl GrantOwner {
     }
 
     pub fn disable_local(&self, space_id: Uuid) -> Result<()> {
+        self.disable_local_current(space_id, None)
+    }
+
+    pub(super) fn disable_local_current(
+        &self,
+        space_id: Uuid,
+        expected: Option<&str>,
+    ) -> Result<()> {
         let mut snapshot = self.required()?;
+        if expected.is_some_and(|revision| revision != snapshot.sha256) {
+            return Err(Failure::Conflict);
+        }
         let revocation = match snapshot.record.state {
             State::Active { grant } if grant.space_id == space_id => Some(RevocationMaterial {
                 client_id: grant.client_id,
@@ -487,26 +534,58 @@ impl GrantOwner {
     }
 
     pub fn begin_revocation(self, space_id: Uuid, operation_id: Uuid) -> Result<Revocation> {
-        let mut snapshot = self.required()?;
-        let State::LocalDisabled {
-            space_id: current,
-            revocation: Some(revocation),
-        } = snapshot.record.state
-        else {
-            return Err(Failure::Conflict);
+        self.begin_revocation_retained(space_id, operation_id, None)
+            .map_err(|(_, failure)| failure)
+    }
+
+    pub(super) fn can_revoke(&self) -> bool {
+        self.required().is_ok_and(|snapshot| {
+            matches!(
+                snapshot.record.state,
+                State::LocalDisabled {
+                    revocation: Some(_),
+                    ..
+                }
+            )
+        })
+    }
+
+    pub(super) fn begin_revocation_retained(
+        self,
+        space_id: Uuid,
+        operation_id: Uuid,
+        expected: Option<&str>,
+    ) -> std::result::Result<Revocation, (Box<Self>, Failure)> {
+        let prepare = || {
+            let mut snapshot = self.required()?;
+            if expected.is_some_and(|revision| revision != snapshot.sha256) {
+                return Err(Failure::Conflict);
+            }
+            let State::LocalDisabled {
+                space_id: current,
+                revocation: Some(revocation),
+            } = snapshot.record.state
+            else {
+                return Err(Failure::Conflict);
+            };
+            if current != space_id || operation_id.is_nil() {
+                return Err(Failure::InvalidInput);
+            }
+            snapshot.record.state = State::RevocationPending {
+                space_id,
+                operation_id,
+                revocation,
+            };
+            let sha256 = self.publish(Some(&snapshot.sha256), &snapshot.record)?;
+            Ok((snapshot.record, sha256))
         };
-        if current != space_id || operation_id.is_nil() {
-            return Err(Failure::InvalidInput);
-        }
-        snapshot.record.state = State::RevocationPending {
-            space_id,
-            operation_id,
-            revocation,
+        let (record, sha256) = match prepare() {
+            Ok(prepared) => prepared,
+            Err(failure) => return Err((Box::new(self), failure)),
         };
-        let sha256 = self.publish(Some(&snapshot.sha256), &snapshot.record)?;
         Ok(Revocation {
             owner: self,
-            record: snapshot.record,
+            record,
             sha256,
             released: false,
         })
@@ -613,6 +692,18 @@ impl Rotation {
     }
 
     pub fn install(mut self, grant_bytes: &[u8]) -> Result<()> {
+        self.install_in_place(grant_bytes)
+    }
+
+    pub(super) fn owner(&self) -> &GrantOwner {
+        &self.owner
+    }
+
+    pub(super) fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
+    pub(super) fn install_in_place(&mut self, grant_bytes: &[u8]) -> Result<()> {
         if !self.released {
             return Err(Failure::Conflict);
         }
@@ -625,6 +716,10 @@ impl Rotation {
         {
             return Err(Failure::Conflict);
         }
+        let State::PendingRotation { operation_id, .. } = self.record.state else {
+            return Err(Failure::Conflict);
+        };
+        self.record.last_rotation = Some(operation_id);
         self.record.state = State::Active { grant };
         self.owner.publish(Some(&self.sha256), &self.record)?;
         Ok(())
@@ -661,6 +756,14 @@ impl Revocation {
 
     /// Call only after a positive provider receipt for this live request.
     pub fn confirm(mut self) -> Result<()> {
+        self.confirm_in_place()
+    }
+
+    pub(super) fn owner(&self) -> &GrantOwner {
+        &self.owner
+    }
+
+    pub(super) fn confirm_in_place(&mut self) -> Result<()> {
         if !self.released {
             return Err(Failure::Conflict);
         }
@@ -690,6 +793,7 @@ impl Record {
         if self.grant_id != id
             || space.is_some_and(|value| value.is_nil())
             || operation.is_some_and(|value| value.is_nil())
+            || self.last_rotation.is_some_and(|value| value.is_nil())
             || self.enrollment.as_ref().is_some_and(|value| !value.valid())
             || self
                 .target_config_sha256

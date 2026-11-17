@@ -13,6 +13,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+#[path = "grant_command_tests.rs"]
+mod grant_maintenance;
+
 struct Fixture {
     _temp: Temp,
     path: PathBuf,

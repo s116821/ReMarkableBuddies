@@ -1,5 +1,8 @@
 //! Fixed HTTPS OAuth transport. Test origins are constructor-only loopback.
-use super::{lifecycle::Exchange, private_text, Grant};
+use super::{
+    lifecycle::{Exchange, Revocation, Rotation},
+    private_text, Grant,
+};
 use crate::{config::inspection::strict_json, note_export::Failure, storage::Uuid};
 use reqwest::{header, Client, Response, Url};
 use serde::{de::DeserializeOwned, Deserialize};
@@ -125,6 +128,7 @@ struct Metadata {
     response_types_supported: Vec<String>,
     token_endpoint_auth_methods_supported: Vec<String>,
     scopes_supported: Vec<String>,
+    revocation_endpoint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -132,8 +136,15 @@ struct Tokens {
     access_token: String,
     refresh_token: String,
     expires_in: u64,
-    scope: String,
+    #[serde(default, deserialize_with = "optional_scope")]
+    scope: Option<String>,
     token_type: String,
+}
+
+fn optional_scope<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -144,6 +155,12 @@ struct Space {
 pub(super) struct OAuth<'a> {
     client: Client,
     registration: &'a Registration,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum GrantOperation {
+    Refresh,
+    Revoke,
 }
 
 impl<'a> OAuth<'a> {
@@ -163,6 +180,14 @@ impl<'a> OAuth<'a> {
     }
 
     pub(super) async fn verify_metadata(&self, budget: &Budget) -> Result<()> {
+        self.verify_metadata_for(budget, None).await
+    }
+
+    pub(super) async fn verify_metadata_for(
+        &self,
+        budget: &Budget,
+        operation: Option<GrantOperation>,
+    ) -> Result<()> {
         let url = self
             .registration
             .endpoint("/.well-known/oauth-authorization-server")?;
@@ -193,6 +218,20 @@ impl<'a> OAuth<'a> {
                 .all(|scope| advertised(&metadata.scopes_supported, scope))
         {
             return Err(Failure::Unsupported);
+        }
+        match operation {
+            Some(GrantOperation::Refresh)
+                if !advertised(&metadata.grant_types_supported, "refresh_token") =>
+            {
+                return Err(Failure::Unsupported);
+            }
+            Some(GrantOperation::Revoke)
+                if metadata.revocation_endpoint.as_deref()
+                    != Some(self.registration.endpoint("/oauth/revoke")?.as_str()) =>
+            {
+                return Err(Failure::Unsupported);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -229,10 +268,121 @@ impl<'a> OAuth<'a> {
             })
             .await?;
 
-        let scopes: Vec<_> = tokens.scope.split(' ').map(str::to_owned).collect();
+        let scopes = tokens
+            .scope
+            .as_ref()
+            .ok_or(Failure::Authentication)?
+            .split(' ')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        self.verified_grant(tokens, scopes, &SCOPES, id, budget)
+            .await
+    }
+
+    pub(super) async fn refresh(
+        &self,
+        permit: &mut Rotation,
+        id: Uuid,
+        space: Uuid,
+        budget: &Budget,
+        current_config: impl FnOnce() -> Result<()>,
+    ) -> Result<Grant> {
+        if permit.client_id() != self.registration.client_id {
+            return Err(Failure::Authentication);
+        }
+        let endpoint = self.registration.endpoint("/oauth/token")?;
+        let tokens: Tokens = budget
+            .request(async {
+                budget.current()?;
+                let body = form_body([
+                    ("grant_type", "refresh_token"),
+                    ("client_id", self.registration.client_id.as_str()),
+                    ("refresh_token", permit.release_refresh_token()?),
+                ]);
+                current_config()?;
+                budget.current()?;
+                decode(
+                    self.client
+                        .post(endpoint)
+                        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .body(body)
+                        .send()
+                        .await
+                        .map_err(map_transport)?,
+                )
+                .await
+            })
+            .await?;
+        let retained = permit.scopes();
+        let expected = retained.iter().map(String::as_str).collect::<Vec<_>>();
+        // RFC 6749 defines an omitted refresh response scope as unchanged.
+        let scopes = tokens.scope.as_ref().map_or_else(
+            || retained.to_vec(),
+            |scope| scope.split(' ').map(str::to_owned).collect(),
+        );
+        let grant = self
+            .verified_grant(tokens, scopes, &expected, id, budget)
+            .await?;
+        if grant.space_id != space {
+            return Err(Failure::Conflict);
+        }
+        Ok(grant)
+    }
+
+    pub(super) async fn revoke(
+        &self,
+        permit: &mut Revocation,
+        budget: &Budget,
+        current_config: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        if permit.client_id() != self.registration.client_id {
+            return Err(Failure::Authentication);
+        }
+        let endpoint = self.registration.endpoint("/oauth/revoke")?;
+        budget
+            .request(async {
+                budget.current()?;
+                let body = form_body([
+                    ("client_id", self.registration.client_id.as_str()),
+                    ("token_type_hint", "refresh_token"),
+                    ("token", permit.release_refresh_token()?),
+                ]);
+                current_config()?;
+                budget.current()?;
+                let mut response = self
+                    .client
+                    .post(endpoint)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(body)
+                    .send()
+                    .await
+                    .map_err(map_transport)?;
+                if response.status() != reqwest::StatusCode::OK
+                    || response.content_length().is_some_and(|size| size != 0)
+                {
+                    return Err(Failure::InvalidResponse);
+                }
+                while let Some(chunk) = response.chunk().await.map_err(map_transport)? {
+                    if !chunk.is_empty() {
+                        return Err(Failure::InvalidResponse);
+                    }
+                }
+                Ok(())
+            })
+            .await
+    }
+
+    async fn verified_grant(
+        &self,
+        tokens: Tokens,
+        scopes: Vec<String>,
+        expected: &[&str],
+        id: Uuid,
+        budget: &Budget,
+    ) -> Result<Grant> {
         let actual: BTreeSet<_> = scopes.iter().map(String::as_str).collect();
         if tokens.token_type != "Bearer"
-            || actual != SCOPES.into_iter().collect::<BTreeSet<_>>()
+            || actual != expected.iter().copied().collect::<BTreeSet<_>>()
             || actual.len() != scopes.len()
             || !(1..=3600).contains(&tokens.expires_in)
             || !private_text(&tokens.access_token, 4096)
