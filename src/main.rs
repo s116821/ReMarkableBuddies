@@ -98,6 +98,9 @@ pub struct Args {
     /// Explicit offline confirmed handwriting records; strict bounded JSON stdin
     #[arg(long, exclusive = true)]
     handwriting: bool,
+    /// Explicit unverified page transcription with selected confirmed examples
+    #[arg(long, exclusive = true)]
+    handwriting_transcription: bool,
     /// Saved role and export-backend declarations; no runtime activation
     #[arg(long, value_enum, conflicts_with_all = ["resident_stock_recovery", "handwriting", "research_settings_operation", "research_settings_input", "inspect_conversations", "conversation_operation", "conversation_input", "inspect_source_cache", "source_cache_operation", "source_cache_input", "credential_reference_operation", "credential_reference_input", "model_credential_operation", "model_credential_input", "memory_settings_operation", "memory_settings_input", "ordinary_export_operation", "ordinary_export_input", "model_settings_operation", "model_settings_input", "restore_operation", "restore_input", "basic_settings_operation", "basic_settings_input", "configuration_operation", "simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note", "writer_note"])]
     product_settings_operation: Option<config::product_settings::Operation>,
@@ -285,6 +288,17 @@ fn main() -> Result<()> {
     }
     if args.resident_stock_recovery {
         return stock_recovery();
+    }
+    if args.handwriting_transcription {
+        let report = remarkable_reader_buddy::handwriting_transcription::command::dispatch(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdin().lock(),
+        );
+        let succeeded = report
+            .write_to(&mut std::io::stdout().lock())
+            .map_err(|_| anyhow::anyhow!("output-failure"))?;
+        anyhow::ensure!(succeeded, "transcription-refused");
+        return Ok(());
     }
     if args.handwriting {
         let report = remarkable_reader_buddy::handwriting::command::run(
@@ -825,6 +839,21 @@ mod tests {
     use clap::CommandFactory;
     use log::{Level, LevelFilter, Log, Metadata};
     #[test]
+    fn handwriting_transcription_is_exclusive_before_any_runtime() {
+        assert!(Args::try_parse_from(["reader-buddy", "--handwriting-transcription"]).is_ok());
+        for extra in [
+            vec!["--handwriting"],
+            vec!["--writer-note"],
+            vec!["--model", "unused"],
+            vec!["--inspect-owned-data"],
+            vec!["--product-settings-operation", "inspect"],
+        ] {
+            let mut args = vec!["reader-buddy", "--handwriting-transcription"];
+            args.extend(extra);
+            assert!(Args::try_parse_from(args).is_err());
+        }
+    }
+    #[test]
     fn handwriting_is_exclusive_before_any_runtime() {
         assert!(Args::try_parse_from(["reader-buddy", "--handwriting"]).is_ok());
         for extra in [
@@ -1051,6 +1080,7 @@ mod tests {
                 "export-note",
                 "export-portable-configuration",
                 "handwriting",
+                "handwriting-transcription",
                 "inspect-conversations",
                 "inspect-owned-data",
                 "inspect-owned-data-v3",
@@ -1091,6 +1121,7 @@ mod tests {
         let args = Args::try_parse_from(["reader-buddy"]).unwrap();
         assert!(!args.resident_stock_recovery);
         assert!(!args.handwriting);
+        assert!(!args.handwriting_transcription);
         assert!(!args.inspect_conversations);
         assert!(args.conversation_operation.is_none());
         assert!(args.conversation_input.is_none());

@@ -76,7 +76,7 @@ fn literal_recipes_match_independently_frozen_vectors() {
 fn confirm_preserves_exact_sample_and_unicode_with_explicit_provenance() {
     let admitted = admitted(&request()).unwrap();
     let value = admitted.correction().unwrap();
-    assert_eq!(value.original_text, "1O N\n");
+    assert_eq!(value.original_text.as_deref(), Some("1O N\n"));
     assert_eq!(value.corrected_text, "10 N; m/s²\n");
     assert_eq!((value.width, value.height), (2, 1));
     value.verify_sample(admitted.sample().unwrap()).unwrap();
