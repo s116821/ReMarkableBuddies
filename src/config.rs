@@ -25,6 +25,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const DEFAULT_TRIGGER_CORNER: &str = "LR";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SyncPolicy {
@@ -348,7 +350,7 @@ pub fn resolve(config: &Config, cli: Overrides, env: Environment) -> Result<Effe
         cli.trigger_corner,
         None,
         config.trigger_corner.clone(),
-        Some("LL"),
+        Some(DEFAULT_TRIGGER_CORNER),
         &mut sources,
     )
     .unwrap();

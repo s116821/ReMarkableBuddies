@@ -169,7 +169,7 @@ based; operation call numbers are one based and span the whole scenario.
 | `active_page` | Starting page, default zero. |
 | `verified_navigation` | Default false retains legacy delays; true models an already verified backend completion result, not native rendering proof. |
 | `iterations` | 1–100 bounded Reader iterations. Optional `page` models the user selecting a source between iterations. `wait_for_trigger` defaults false. |
-| `trigger_corner` | UR/UL/LR/LL, default LL. |
+| `trigger_corner` | UR/UL/LR/LL, default LR (lower-right). |
 | `gestures` | One sequence per trigger wait. Frames contain increasing `at_ms` (within 60 seconds), `contact`, `x`, `y`. Coordinates represent complete slot-zero frames. A final active contact can reach its deadline without further movement. |
 | `replies` | Ordered objects containing exactly one `text` or `error`. Proposal and independent reading consume separate entries. Every declared reply must be consumed. |
 | `faults` | Objects with `operation`, `call`, `effect`. Every fault must be reached. |

@@ -5,13 +5,13 @@
         "y": 990,
         "at_ms": 0,
         "contact": true,
-        "x": 30
+        "x": 738
       },
       {
         "y": 990,
         "at_ms": 500,
         "contact": false,
-        "x": 30
+        "x": 738
       }
     ]
   ],
