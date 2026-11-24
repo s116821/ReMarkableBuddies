@@ -40,6 +40,12 @@ pub struct Refine {
 pub enum Request {
     GenerateNotebook(Box<Generate>),
     RefineNotebook(Box<Refine>),
+    #[serde(skip)]
+    GenerateAcquiredNotebook {
+        conversation: Uuid,
+        operation: Uuid,
+        request: String,
+    },
     GenerateNotebookAndExport {
         outer_operation: Uuid,
         generation: Box<Request>,
@@ -65,6 +71,7 @@ impl Request {
         match self.model() {
             Self::GenerateNotebook(r) => r.conversation,
             Self::RefineNotebook(r) => r.conversation,
+            Self::GenerateAcquiredNotebook { conversation, .. } => *conversation,
             _ => Uuid::nil(),
         }
     }
@@ -72,6 +79,7 @@ impl Request {
         match self.model() {
             Self::GenerateNotebook(r) => r.operation,
             Self::RefineNotebook(r) => r.operation,
+            Self::GenerateAcquiredNotebook { operation, .. } => *operation,
             _ => Uuid::nil(),
         }
     }
@@ -100,6 +108,7 @@ impl Request {
         match self.model() {
             Self::GenerateNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
             Self::RefineNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
+            Self::GenerateAcquiredNotebook { request, .. } => Ok((request, MAX_CALLS, None)),
             _ => anyhow::bail!("notebook model variant required"),
         }
     }
@@ -137,6 +146,7 @@ impl Request {
                         && !s.contains('\0')),
                 "invalid notebook generation input"
             ),
+            Self::GenerateAcquiredNotebook { .. } => (),
             Self::RefineNotebook(r) => ensure!(
                 !r.draft.is_nil() && r.draft != r.operation && r.draft != r.conversation,
                 "invalid notebook draft identity"
@@ -301,7 +311,10 @@ pub(crate) fn prepare_receiving(
 ) -> Result<runner::Input> {
     ensure!(
         request.joined().is_none()
-            && matches!(request, Request::GenerateNotebook(_)) == frozen.is_some(),
+            && matches!(
+                request,
+                Request::GenerateNotebook(_) | Request::GenerateAcquiredNotebook { .. }
+            ) == frozen.is_some(),
         "routed notebook requires an explicit frozen source and separate export admission"
     );
     match prepare_inner(
@@ -326,6 +339,10 @@ fn prepare_inner(
     memory: Option<&crate::memory::LocalMemory>,
 ) -> Result<Prepared> {
     request.preflight()?;
+    ensure!(
+        !matches!(request, Request::GenerateAcquiredNotebook { .. }) || routed.is_some(),
+        "acquired notebook requires the routed receiver"
+    );
     ensure!(
         ledger.store().unavailable_commits()? == 0,
         "incomplete notebook history"
@@ -441,6 +458,17 @@ fn prepare_inner(
                 &source,
                 input.selection.clone(),
                 input.guidance.clone(),
+            )?;
+            (source, archive, None)
+        }
+        Request::GenerateAcquiredNotebook { conversation, .. } => {
+            let source = frozen.context("acquired notebook source unavailable")?;
+            let archive = ArchivedNormalizedSource::from_notebook(
+                *conversation,
+                user_id,
+                &source,
+                TextScope::SuppliedNotebook,
+                None,
             )?;
             (source, archive, None)
         }
