@@ -316,6 +316,16 @@ fn ordinary_mode(store: &Store, config: &Config) -> std::result::Result<(), Ordi
         _ => Err(OrdinaryModeRefusal::Nonordinary),
     }
 }
+fn ordinary_source_targets(config: &Config) -> bool {
+    (config.reader_enabled()
+        || (cfg!(all(
+            target_os = "linux",
+            feature = "installed-resident-output"
+        )) && config.admits_writer(false)))
+        && !config.sync.enabled
+        && config.reader.selection.is_none()
+}
+
 /// Consume the startup-admitted Store once. Fresh ordinary roots are created
 /// only after credential validation; a raced nonlocal choice still refuses here.
 pub fn ordinary_store(
@@ -333,10 +343,7 @@ pub fn ordinary_store(
                     .map_err(|_| Box::new(Report::new("startup", Status::Unavailable)))?;
             }
             Arc::new(
-                (if config.reader_enabled()
-                    && !config.sync.enabled
-                    && config.reader.selection.is_none()
-                {
+                (if ordinary_source_targets(config) {
                     Store::open_source_target_startup(config)
                 } else {
                     Store::open(config.paths.clone())
@@ -379,11 +386,7 @@ fn selected_mode(
 pub fn startup(config: &Config) -> StartupDecision {
     // A pending target promotion must enter before ready-only preflight/open.
     // Legacy sync retains its supported non-target route.
-    if config.reader.selection.is_none()
-        && config.reader_enabled()
-        && !config.sync.enabled
-        && config.paths.data.join("identity.json").exists()
-    {
+    if ordinary_source_targets(config) && config.paths.data.join("identity.json").exists() {
         return match Store::open_source_target_startup(config) {
             Ok(store) => {
                 let store = Arc::new(store);
