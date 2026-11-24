@@ -40,6 +40,24 @@ impl WriterSelection {
         self.draft.revision_id
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn same_draft_and_source(&self, current: &Self) -> bool {
+        // Export admission publishes exact copies of these records as direct
+        // successors so it can guard them atomically with the effect.
+        let unchanged = |old: &Envelope, observed: &Envelope| {
+            old.envelope_version == observed.envelope_version
+                && old.domain_schema_version == observed.domain_schema_version
+                && old.namespace == observed.namespace
+                && old.record_id == observed.record_id
+                && old.kind == observed.kind
+                && old.payload == observed.payload
+                && old.media_descriptors == observed.media_descriptors
+                && (old.revision_id == observed.revision_id
+                    || (observed.parents.len() == 1 && observed.parents.contains(&old.revision_id)))
+        };
+        unchanged(&self.draft, &current.draft) && unchanged(&self.source, &current.source)
+    }
+
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {
         let value = Self {
             root: ExpectedHeads(BTreeSet::from([root.revision_id])),
@@ -191,11 +209,29 @@ impl WriterExportInput {
         association: &ExportAssociation,
     ) -> Result<String> {
         let draft = self.selection.draft_value()?;
+        let (correlation, effect) = if let Some(attempt) = &association.capacities {
+            association.validate_attempt()?;
+            ensure!(
+                association.id
+                    == CapacitiesAttempt::association_id(
+                        association.conversation,
+                        attempt.space,
+                        attempt.correlation
+                    ),
+                "foreign Capacities association key"
+            );
+            (attempt.correlation, attempt.id)
+        } else {
+            (
+                association.id,
+                association.attempt.as_ref().context("attempt missing")?.id,
+            )
+        };
         ensure!(
             self.grant.store == ledger.store().as_ref() as *const Store as usize
                 && self.grant.conversation == association.conversation
-                && self.grant.correlation == association.id
-                && self.grant.effect == association.attempt.as_ref().context("attempt missing")?.id
+                && self.grant.correlation == correlation
+                && self.grant.effect == effect
                 && self.grant.draft == draft.id,
             "foreign Writer flow grant"
         );

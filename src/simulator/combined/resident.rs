@@ -158,10 +158,6 @@ pub(super) fn seed(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/epub.rs"]
-mod epub_fixture;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -1442,7 +1438,7 @@ mod tests {
 
     #[test]
     fn ordinary_reader_epub_followup_preserves_archive_identity_and_section() -> Result<()> {
-        use super::epub_fixture::{book, package, xhtml, CONTAINER};
+        use crate::epub_fixture::{book, package, xhtml, CONTAINER};
         use crate::retrieval::epub;
         use std::sync::atomic::{AtomicBool, Ordering};
 

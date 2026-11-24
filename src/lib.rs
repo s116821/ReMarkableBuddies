@@ -1,5 +1,9 @@
 include!("development_pre_enter_guard.rs");
 
+#[cfg(test)]
+#[path = "../tests/fixtures/epub.rs"]
+mod epub_fixture;
+
 pub mod analysis;
 pub mod archive_maintenance;
 pub mod config;

@@ -583,7 +583,10 @@ fn maintained_combined_fixture_runs() {
 
 #[test]
 fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
-    use crate::retrieval::notebook::OrderedNotebookImages;
+    use crate::{
+        conversation::notebook::{NotebookStage, NotebookStageKind, NotebookStageOutcome},
+        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages},
+    };
     use writer::notebook::runner::Status;
 
     let fixture = SimulatorLedger::new();
@@ -611,6 +614,26 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         buddy_pages: &buddy_pages,
     };
     source.order_revision = Some(images.order_revision()?);
+    // Model the owner's saved-scene sampling independently of the rendered PNGs.
+    let saved_revision = |last_scene: &[u8]| -> Result<String> {
+        Ok(digest(&serde_json::to_vec(&(
+            source.document,
+            [
+                (source.page, Some(digest(b"first saved scene"))),
+                (blank, None),
+                (last, Some(digest(last_scene))),
+            ],
+            digest(b"fixture layout and template assets"),
+        ))?))
+    };
+    let receipt = NotebookSourceReceipt {
+        saved_source_revision: saved_revision(b"last saved scene")?,
+        ordered_image_sha256: images.image_digest()?,
+    };
+    let mut revised_source = source.clone();
+    revised_source.content_revision = Some(saved_revision(b"edited last saved scene")?);
+    source.content_revision = Some(receipt.saved_source_revision.clone());
+    assert_ne!(receipt.saved_source_revision, receipt.ordered_image_sha256);
     let config = Config::default();
     let mut dispatch = Dispatch::local(&config, &ledger)?;
     let mut observe = || Ok(source.clone());
@@ -618,30 +641,67 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     let ready = scope(&ledger, conversation, &source)?;
     let mut model = Model::default();
 
-    for wrong in [&originals[..2], &[originals[2], originals[1], originals[0]]] {
+    let edited_png = fixture_png(19)?;
+    let substituted = [originals[0], originals[1], (last, edited_png.as_slice())];
+    for (wrong, expected) in [
+        (&originals[..2], "complete ordered notebook source required"),
+        (
+            &[originals[2], originals[1], originals[0]],
+            "original notebook page order changed",
+        ),
+        (
+            &substituted,
+            "notebook images differ from acquisition receipt",
+        ),
+    ] {
         let images = OrderedNotebookImages {
             document: source.document,
             order: &order,
             originals: wrong,
             buddy_pages: &buddy_pages,
         };
-        assert!(dispatch
-            .whole_notebook(
-                &ledger,
-                &mut model,
-                request,
-                &images,
-                "fixture",
-                &ready,
-                &mut observe
-            )
-            .is_err());
+        let Err(error) = dispatch.whole_notebook(
+            &ledger,
+            &mut model,
+            request,
+            &images,
+            &receipt,
+            "fixture",
+            &ready,
+            &mut observe,
+        ) else {
+            anyhow::bail!("invalid notebook images were accepted");
+        };
+        assert_eq!(error.to_string(), expected);
         assert!(model.seen.is_empty());
         assert_eq!(
             ledger.expected(Namespace::Conversation, conversation)?,
             ready.root
         );
     }
+
+    let revised_scope = scope(&ledger, conversation, &revised_source)?;
+    let Err(error) = dispatch.whole_notebook(
+        &ledger,
+        &mut model,
+        request,
+        &images,
+        &receipt,
+        "fixture",
+        &revised_scope,
+        &mut || Ok(revised_source.clone()),
+    ) else {
+        anyhow::bail!("stale acquisition was accepted");
+    };
+    assert_eq!(
+        error.to_string(),
+        "notebook saved source differs from acquisition receipt"
+    );
+    assert!(model.seen.is_empty());
+    assert_eq!(
+        ledger.expected(Namespace::Conversation, conversation)?,
+        ready.root
+    );
 
     let transcript = json!({"pages": [
         {"page": 1, "status": "transcribed", "text": "First-page example."},
@@ -658,6 +718,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             &mut model,
             request,
             &images,
+            &receipt,
             "fixture",
             &unavailable,
             &mut observe
@@ -671,6 +732,51 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     model.seen.clear();
 
     let draft_text = "# Study note\n\nExamples from pages 1 and 4.";
+    let interrupted_conversation = Uuid::new_v4();
+    ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
+    let interrupted = scope(&ledger, interrupted_conversation, &source)?;
+    let reducer = NotebookStage::identity(interrupted.operation, NotebookStageKind::Reduce, 0);
+    let mut changed = false;
+    let mut observe_until_publication = || {
+        if let Some(envelope) = ledger.store().value(Namespace::Conversation, reducer)? {
+            let Record::NotebookStage(stage) = Ledger::decode(&envelope)? else {
+                anyhow::bail!("expected reducer stage");
+            };
+            if stage.outcome == Some(NotebookStageOutcome::Generated) {
+                changed = true;
+                return Ok(revised_source.clone());
+            }
+        }
+        Ok(source.clone())
+    };
+    let mut interrupted_model = Model::default();
+    interrupted_model.replies.extend([
+        transcript.to_string(),
+        "Ordered source coverage from pages 1 and 4.".into(),
+        draft_text.into(),
+    ]);
+    let (stopped, pending) = dispatch.whole_notebook(
+        &ledger,
+        &mut interrupted_model,
+        request,
+        &images,
+        &receipt,
+        "fixture",
+        &interrupted,
+        &mut observe_until_publication,
+    )?;
+    assert!(changed);
+    assert_eq!(interrupted_model.seen.len(), 3);
+    assert_eq!(stopped.status, Status::Canceled);
+    assert!(pending.is_none() && stopped.draft.is_none());
+    assert!(ledger
+        .store()
+        .value(
+            Namespace::Conversation,
+            writer::stage(interrupted.operation, "draft"),
+        )?
+        .is_none());
+
     model.replies.extend([
         transcript.to_string(),
         "Ordered source coverage from pages 1 and 4.".into(),
@@ -681,6 +787,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         &mut model,
         request,
         &images,
+        &receipt,
         "fixture",
         &ready,
         &mut observe,
@@ -711,6 +818,10 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         anyhow::bail!("notebook archive absent");
     };
     let normalized = archive.load(ledger.store())?;
+    assert_eq!(
+        normalized.document().source_sha256,
+        receipt.ordered_image_sha256
+    );
     assert_eq!(
         normalized
             .document()

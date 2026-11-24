@@ -144,6 +144,10 @@ pub struct Args {
         requires = "credential_reference_operation"
     )]
     credential_reference_input: Option<std::path::PathBuf>,
+    /// Linux-only private Capacities OAuth exchange, status or resume through bounded JSON stdin
+    #[cfg(target_os = "linux")]
+    #[arg(long, exclusive = true)]
+    capacities_oauth: bool,
     /// Protected declared credential only; confidential transport, no provider activation
     #[arg(long,value_enum,conflicts_with_all=["simulate","inspect_owned_data","api_key","model","base_url","trigger_corner","log_level","debug_dump","memory_operation","memory_input","sync_mode_operation","sync_mode_input","archive_operation","archive_input","personalization_operation","export_note","configuration_operation","basic_settings_operation","basic_settings_input","restore_operation","restore_input","model_settings_operation","model_settings_input","ordinary_export_operation","ordinary_export_input","memory_settings_operation","memory_settings_input"])]
     model_credential_operation: Option<config::model_credential::Operation>,
@@ -277,6 +281,13 @@ fn main() -> Result<()> {
         );
         report.write_to(&mut std::io::stdout().lock())?;
         return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if args.capacities_oauth {
+        return config::capacities::command::run_cli(
+            std::env::var_os("REMARKABLE_BUDDIES_CONFIG").map(Into::into),
+            &mut std::io::stdout().lock(),
+        );
     }
     if let Some(operation) = args.portable_configuration_operation {
         use config::portable::import;
@@ -1131,6 +1142,8 @@ mod tests {
                 "base-url",
                 "basic-settings-input",
                 "basic-settings-operation",
+                #[cfg(target_os = "linux")]
+                "capacities-oauth",
                 "configuration-operation",
                 "configuration-schema",
                 "conversation-input",

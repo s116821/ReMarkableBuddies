@@ -11,7 +11,9 @@ use crate::{
     },
     device::interaction::Interaction,
     retrieval::{
-        notebook::{NotebookText, OrderedNotebookImages, PageImage, SuppliedNotebook},
+        notebook::{
+            NotebookSourceReceipt, NotebookText, OrderedNotebookImages, PageImage, SuppliedNotebook,
+        },
         IndexKey, Provider,
     },
     storage::{Namespace, Uuid},
@@ -60,6 +62,8 @@ pub struct Dispatch<'a> {
     #[cfg(target_os = "linux")]
     regional_writer_model: Option<String>,
     input_events: std::collections::BTreeSet<Uuid>,
+    #[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) test_note_destination: Option<Arc<crate::writer_flow::tests::Destination>>,
 }
 
 impl<'a> Dispatch<'a> {
@@ -97,6 +101,8 @@ impl<'a> Dispatch<'a> {
             #[cfg(target_os = "linux")]
             regional_writer_model: None,
             input_events: Default::default(),
+            #[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+            test_note_destination: None,
         })
     }
 
@@ -686,8 +692,8 @@ impl<'a> Dispatch<'a> {
         })
     }
 
-    /// Consume complete images from the source owner. The caller keeps the
-    /// source revision pinned and re-observes it throughout this operation.
+    /// Consume a sealed acquisition. Both the admitted content revision and
+    /// every subsequent observation must cover the entire saved source.
     #[allow(
         dead_code,
         reason = "the installed source owner supplies only viewport pixels"
@@ -699,6 +705,7 @@ impl<'a> Dispatch<'a> {
         engine: &mut E,
         text: &str,
         images: &OrderedNotebookImages<'_>,
+        receipt: &NotebookSourceReceipt,
         model_profile: &str,
         admitted: &RequestScope,
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
@@ -712,6 +719,12 @@ impl<'a> Dispatch<'a> {
             images.document == admitted.source.document
                 && admitted.source.order_revision.as_deref() == Some(order_revision.as_str()),
             "notebook document or page order changed"
+        );
+        ensure!(
+            crate::storage::valid_digest(&receipt.saved_source_revision)
+                && admitted.source.content_revision.as_deref()
+                    == Some(receipt.saved_source_revision.as_str()),
+            "notebook saved source differs from acquisition receipt"
         );
         let request = Request::GenerateAcquiredNotebook {
             conversation: admitted.conversation,
@@ -730,10 +743,13 @@ impl<'a> Dispatch<'a> {
                 .is_none(),
             "routed notebook operation consumed"
         );
-        let normalized =
-            images.normalize(admitted.source.page, model_profile, engine, &mut |_| {
-                admitted.check(ledger, observe)
-            })?;
+        let normalized = images.normalize(
+            admitted.source.page,
+            &receipt.ordered_image_sha256,
+            model_profile,
+            engine,
+            &mut |_| admitted.check(ledger, observe),
+        )?;
         let bytes = serde_json::to_vec(&normalized)?;
         let frozen = ValidatedNotebook::from_bytes(&bytes, &crate::storage::digest(&bytes))?;
         self.notebook(ledger, engine, &request, Some(frozen), admitted, observe)

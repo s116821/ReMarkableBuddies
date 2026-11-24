@@ -86,7 +86,7 @@ pub(crate) fn assert_ordinary_pdf_reuse(
     revised: &[u8],
 ) -> Result<()> {
     let observe = |fixture: &Fixture| -> Result<ObservedOriginalPdf> {
-        OrdinaryPdfSource::pin_fixture(&fixture.root, &fixture.facts)?
+        OrdinaryBookSource::pin_fixture(&fixture.root, &fixture.facts, true, false)?
             .read(
                 &fixture.facts,
                 Instant::now() + Duration::from_secs(25),
@@ -167,12 +167,12 @@ impl Drop for Fixture {
 fn original_pdf_uses_exact_order_and_nonzero_redirect_and_brackets_bytes() {
     let fixture = Fixture::new();
     let observed = fixture.observe().unwrap();
-    assert_eq!(observed.pin.original_page(), 2);
+    assert_eq!(observed.pdf_page().unwrap().1, 2);
     let mut admitted = observed
         .recheck_capture(&fixture.facts, &fixture.facts, &mut || Ok(()))
         .unwrap();
     assert_eq!(
-        admitted.pdf_digest,
+        admitted.original_digest,
         digest(&fs::read(fixture.pdf_path()).unwrap())
     );
     admitted
@@ -300,7 +300,7 @@ fn original_pdf_large_reads_use_cadence_and_still_propagate_cancellation() {
     let mut bytes = SOURCE_BYTES;
     let error = observed
         .pin
-        .pdf
+        .original
         .read(None, &mut reads, &mut bytes, &mut progress)
         .unwrap_err();
     assert!(error.to_string().contains("scripted cadence cancellation"));

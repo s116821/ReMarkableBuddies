@@ -113,7 +113,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     handwriting: Option<crate::handwriting::runtime::Runtime>,
     handwriting_operation: Option<crate::handwriting::runtime::Capture>,
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    ordinary_pdf_cache: Option<super::resident_source::original_pdf::OrdinaryPdfCache>,
+    ordinary_book_cache: Option<super::resident_source::original_pdf::OrdinaryBookCache>,
 }
 struct ModelContent<'a, M: LLMEngine>(&'a mut M);
 impl<M: LLMEngine> Drop for ModelContent<'_, M> {
@@ -178,7 +178,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             handwriting: None,
             handwriting_operation: None,
             #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-            ordinary_pdf_cache: None,
+            ordinary_book_cache: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),
@@ -291,7 +291,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 2: Capture screenshot (of current/question page)
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let (acquired, observed_pdf) = ordinary_pdf::acquire(&mut self.workflow, local)?;
+        let (acquired, observed_book) = ordinary_pdf::acquire(&mut self.workflow, local)?;
         #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let acquired = self.workflow.acquire_reader_evidence()?;
         #[cfg(target_os = "linux")]
@@ -340,7 +340,28 @@ impl<M: LLMEngine> Orchestrator<M> {
                 match self.classify_source_submission(capture, dispatch)? {
                     SourceIntent::Reader => {}
                     SourceIntent::WriterCurrentPage { request } => {
-                        return self.run_resident_current_page_writer(request, capture, dispatch);
+                        return self
+                            .run_resident_current_page_writer(request, capture, dispatch, None);
+                    }
+                    SourceIntent::WriterExportCurrentPage {
+                        request,
+                        separate_note,
+                    } => {
+                        use current_page_writer::NoteExport;
+                        let export = if separate_note {
+                            NoteExport::Separate
+                        } else {
+                            NoteExport::CurrentPage
+                        };
+                        return self.run_resident_current_page_writer(
+                            request,
+                            capture,
+                            dispatch,
+                            Some(export),
+                        );
+                    }
+                    SourceIntent::ClarifyExport { request } => {
+                        return self.clarify_resident_export(&request, capture);
                     }
                     SourceIntent::WriterCircled { request, target } => {
                         return self
@@ -362,14 +383,14 @@ impl<M: LLMEngine> Orchestrator<M> {
             return Ok(());
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let observed_pdf = ordinary_pdf::classify(&mut self.workflow, observed_pdf?)?;
+        let observed_book = ordinary_pdf::classify(&mut self.workflow, observed_book?)?;
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let result = match observed_pdf {
-            Some(pdf) => self.run_ordinary_pdf(
+        let result = match observed_book {
+            Some(book) => self.run_ordinary_book(
                 &mut attempt,
-                pdf,
-                local.ok_or_else(|| anyhow::anyhow!("Ordinary PDF dispatch absent"))?,
+                book,
+                local.ok_or_else(|| anyhow::anyhow!("Ordinary Reader dispatch absent"))?,
             ),
             None => self.run_prepared(&mut attempt),
         };
@@ -668,6 +689,27 @@ impl<M: LLMEngine> Orchestrator<M> {
         produced: Option<crate::conversation::WriterSelection>,
         protect_source: bool,
     ) -> Result<()> {
+        self.present_resident_writer_result(
+            conversation,
+            capture,
+            association_before,
+            produced,
+            protect_source,
+            None,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn present_resident_writer_result(
+        &mut self,
+        conversation: crate::storage::Uuid,
+        capture: &crate::conversation::ResidentSourceCapture,
+        association_before: Option<&crate::conversation::HistoricalPageAssociation>,
+        produced: Option<crate::conversation::WriterSelection>,
+        protect_source: bool,
+        result: Option<&str>,
+    ) -> Result<()> {
         use super::resident_output::{format_exchange, ResidentOutputText};
         use crate::{conversation::Role, storage::Namespace, writer};
         use anyhow::Context;
@@ -710,6 +752,17 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .as_deref()
                 .context("Writer draft text unavailable")?,
         )?;
+        if let Some(result) = result {
+            let full = format_exchange(request, format_args!("{result}\n\n{title}\n\n{body}"));
+            let receipt = format!("{result}\n\nFull draft saved in Buddy history.\n");
+            return self.workflow.place_resident_writer_export(
+                &self.ledger,
+                conversation,
+                &full,
+                &receipt,
+                association.as_ref(),
+            );
+        }
         let text = format_exchange(request, format_args!("{title}\n\n{body}"));
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)

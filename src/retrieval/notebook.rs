@@ -40,6 +40,15 @@ pub(crate) struct OrderedNotebookImages<'a> {
     pub buddy_pages: &'a BTreeSet<Uuid>,
 }
 
+/// Evidence from the acquisition owner, sealed after verifying that the saved
+/// source revision remained unchanged around rendering these exact images.
+pub(crate) struct NotebookSourceReceipt {
+    /// Independently sampled from original saved scenes and their layout assets.
+    pub saved_source_revision: String,
+    /// Digest of the ordered PNG bytes from that acquisition.
+    pub ordered_image_sha256: String,
+}
+
 impl OrderedNotebookImages<'_> {
     /// The source owner uses this same identity when re-observing current order.
     pub(crate) fn order_revision(&self) -> Result<String> {
@@ -51,9 +60,29 @@ impl OrderedNotebookImages<'_> {
         ))?))
     }
 
+    pub(crate) fn image_digest(&self) -> Result<String> {
+        let options = Options::default();
+        ensure!(
+            (1..=options.max_pages).contains(&self.originals.len()),
+            "invalid notebook page count"
+        );
+        check_image_bytes(self.originals.iter().map(|(_, png)| *png), options)?;
+        let originals: Vec<_> = self
+            .originals
+            .iter()
+            .map(|(page, png)| (*page, digest(png)))
+            .collect();
+        Ok(digest(&serde_json::to_vec(&(
+            "native-ordered-notebook-pngs-v1",
+            self.order_revision()?,
+            originals,
+        ))?))
+    }
+
     pub(crate) fn normalize(
         &self,
         current_page: Uuid,
+        expected_image_digest: &str,
         model_profile: &str,
         engine: &mut dyn LLMEngine,
         progress: &mut dyn FnMut(Progress) -> Result<()>,
@@ -89,11 +118,12 @@ impl OrderedNotebookImages<'_> {
             originals.next().is_none() && self.buddy_pages.is_subset(&seen),
             "incomplete notebook page accounting"
         );
-        let NotebookText {
-            mut document,
-            images,
-            ..
-        } = normalize(
+        let image_digest = self.image_digest()?;
+        ensure!(
+            image_digest == expected_image_digest,
+            "notebook images differ from acquisition receipt"
+        );
+        let NotebookText { mut document, .. } = normalize(
             self.document,
             &pages,
             model_profile,
@@ -101,11 +131,7 @@ impl OrderedNotebookImages<'_> {
             options,
             progress,
         )?;
-        document.source_sha256 = digest(&serde_json::to_vec(&(
-            "native-ordered-notebook-images-v1",
-            self.order_revision()?,
-            images,
-        ))?);
+        document.source_sha256 = image_digest;
         Ok(document)
     }
 }
@@ -506,6 +532,24 @@ pub(crate) fn static_png(bytes: &[u8]) -> Result<()> {
 
 /// Exactly one call for a fully admitted set. Arbitrary engines are cooperative,
 /// not forcibly preemptible. This function never writes files or installs a cache.
+fn check_image_bytes<'a>(images: impl Iterator<Item = &'a [u8]>, options: Options) -> Result<()> {
+    let mut total = 0usize;
+    for png in images {
+        ensure!(
+            !png.is_empty() && png.len() <= options.max_page_bytes,
+            "notebook image exceeds bound"
+        );
+        total = total
+            .checked_add(png.len())
+            .ok_or_else(|| anyhow::anyhow!("notebook images exceed bound"))?;
+        ensure!(
+            total <= options.max_image_bytes,
+            "notebook images exceed bound"
+        );
+    }
+    Ok(())
+}
+
 fn admit_pages(
     pages: &[PageImage<'_>],
     options: Options,
@@ -517,24 +561,13 @@ fn admit_pages(
         "invalid notebook page count"
     );
     let mut seen = BTreeSet::new();
-    let mut total = 0usize;
     for p in pages {
         ensure!(
             p.page > 0 && seen.insert(p.page),
             "invalid notebook page mapping"
         );
-        ensure!(
-            !p.png.is_empty() && p.png.len() <= options.max_page_bytes,
-            "notebook image exceeds bound"
-        );
-        total = total
-            .checked_add(p.png.len())
-            .ok_or_else(|| anyhow::anyhow!("notebook images exceed bound"))?;
-        ensure!(
-            total <= options.max_image_bytes,
-            "notebook images exceed bound"
-        );
     }
+    check_image_bytes(pages.iter().map(|page| page.png), options)?;
     let mut source = Sha256::new();
     source.update(b"notebook-page-image-set-v1\0");
     source.update((pages.len() as u32).to_be_bytes());

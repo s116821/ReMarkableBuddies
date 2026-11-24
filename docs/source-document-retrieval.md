@@ -72,4 +72,18 @@ cargo run --example normalize_epub_source -- DOCUMENT_UUID book.epub > normalize
 The example prints bounded JSON only after complete normalization. It does not
 install an index, persist a cache, select a conversation source or call a model.
 Use `Index::build(result.document)` and keep its returned key for local queries.
-Reader integration and broader retrieval/research acceptance remain unfinished.
+
+### Asking about an open EPUB on the tablet
+
+To let ordinary Reader use the original text of the open book, set
+`reader.researched_epub` in the tablet's local configuration. For example,
+`{"reader":{"researched_epub":{}}}` enables book retrieval for a question
+that explicitly declines internet research. Questions that request web
+research also need a supported `research_model` and the usual research policy.
+
+On an original book page, circle the relevant content, write your question
+and submit with the lower-right finger hold. Reader searches the publication
+in reading order and can cite text from another chapter. Citations identify
+the section in the original EPUB. Handwritten note pages inserted into the book
+use the ordinary handwritten-page flow. A PDF-only configuration continues
+to apply only to PDF files.

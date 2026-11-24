@@ -495,9 +495,41 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected_root: ExpectedHeads,
+        turn: Turn,
+        evidence_id: Uuid,
+        capture: &ResidentSourceCapture,
+    ) -> Result<(PreparedResidentCapture, WriteResult)> {
+        self.prepare_resident_exchange(operation, expected_root, turn, evidence_id, capture, None)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn prepare_resident_writer_clarification(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        turn: Turn,
+        evidence_id: Uuid,
+        capture: &ResidentSourceCapture,
+        clarification: (&str, &str),
+    ) -> Result<(PreparedResidentCapture, WriteResult)> {
+        self.prepare_resident_exchange(
+            operation,
+            expected_root,
+            turn,
+            evidence_id,
+            capture,
+            Some(clarification),
+        )
+    }
+
+    fn prepare_resident_exchange(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
         mut turn: Turn,
         evidence_id: Uuid,
         capture: &ResidentSourceCapture,
+        clarification: Option<(&str, &str)>,
     ) -> Result<(PreparedResidentCapture, WriteResult)> {
         ensure!(
             turn.role == Role::User
@@ -513,7 +545,23 @@ impl Ledger {
             images: provider_images,
         } = capture.prepare_history(turn.conversation, turn.id, evidence_id)?;
         turn.sources = vec![evidence.id];
-        let fingerprint = Self::fingerprint(&("prepare-resident", &turn, &evidence))?;
+        let fingerprint = if let Some((request, reply)) = clarification {
+            ensure!(
+                turn.mode == Mode::Writer,
+                "Writer clarification requires a Writer request"
+            );
+            crate::writer::validate_request(request)?;
+            turn.outcome = Outcome::Interpreted;
+            turn.text = Some(request.into());
+            Self::fingerprint(&(
+                "prepare-resident-writer-clarification",
+                &turn,
+                &evidence,
+                reply,
+            ))?
+        } else {
+            Self::fingerprint(&("prepare-resident", &turn, &evidence))?
+        };
         if let Some(receipt) = self.replay(operation, &fingerprint)? {
             return Ok((self.stored_resident_images(evidence_id)?, receipt));
         }
@@ -542,7 +590,16 @@ impl Ledger {
             .checked_add(1)
             .context("sequence exhausted")?;
         root.updated_ms = turn.updated_ms;
-        let records = vec![
+        let answer = clarification.map(|(_, reply)| Turn {
+            id: crate::writer::stage(turn.exchange, "clarification"),
+            sequence: root.next_sequence,
+            role: Role::Assistant,
+            outcome: Outcome::Clarification,
+            text: Some(reply.into()),
+            sources: vec![],
+            ..turn.clone()
+        });
+        let mut records = vec![
             self.envelope(
                 Namespace::Conversation,
                 turn.id,
@@ -558,6 +615,20 @@ impl Ledger {
                 evidence.media()?,
             )?,
         ];
+        if let Some(answer) = answer {
+            Self::validate_turn(&answer)?;
+            root.next_sequence = root
+                .next_sequence
+                .checked_add(1)
+                .context("sequence exhausted")?;
+            records.push(self.envelope(
+                Namespace::Conversation,
+                answer.id,
+                ExpectedHeads::default(),
+                Record::Turn(answer),
+                vec![],
+            )?);
+        }
         let root = self.envelope(
             Namespace::Conversation,
             root.id,

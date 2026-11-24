@@ -1,5 +1,8 @@
 //! Ordinary Writer generation for the circled target on a newly captured source page.
-use super::{current_page_writer::PreparedWriterCapture, Dispatch, Orchestrator};
+use super::{
+    current_page_writer::{PreparedWriterCapture, WriterCapture},
+    Dispatch, Orchestrator,
+};
 use crate::{
     conversation::{target, Outcome, ResidentSourceCapture},
     llm::LLMEngine,
@@ -36,7 +39,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             expected,
             capture: retained,
             deadline,
-        } = self.prepare_installed_writer_capture(capture, operation, user_id)?;
+        } = self.prepare_installed_writer_capture(
+            capture,
+            operation,
+            user_id,
+            WriterCapture::Draft,
+        )?;
         let capture_id = retained.evidence.id;
         drop(retained);
         let mut frame = self.ledger.target_source_frame(conversation, capture_id)?;

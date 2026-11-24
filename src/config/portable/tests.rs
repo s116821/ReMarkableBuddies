@@ -214,3 +214,27 @@ impl Drop for Temp {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+#[test]
+fn portable_capacities_preference_excludes_connection_and_tag_identity() {
+    use crate::storage::Uuid;
+    let space = Uuid::new_v4();
+    let grant = Uuid::new_v4();
+    let tag = Uuid::new_v4();
+    let config = serde_json::json!({
+        "product_settings": {"export_destination": "capacities"},
+        "capacities_export": {"schema_version": 1, "space_id": space, "grant_id": grant, "tags": [tag]}
+    });
+    let projected = super::project(&serde_json::to_vec(&config).unwrap()).unwrap();
+    assert_eq!(
+        projected["settings"],
+        serde_json::json!({
+            "product_settings": {"export_destination": "capacities"}
+        })
+    );
+    let mut forged = projected;
+    forged["settings"]["capacities_export"] = config["capacities_export"].clone();
+    assert!(super::validate(&serde_json::to_vec(&forged).unwrap()).is_err());
+    let mut invalid = config;
+    invalid["capacities_export"]["tags"] = serde_json::json!([tag, tag]);
+    assert!(super::project(&serde_json::to_vec(&invalid).unwrap()).is_err());
+}

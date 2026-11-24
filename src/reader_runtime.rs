@@ -26,6 +26,9 @@ pub struct Configuration {
     /// Local opt-in only; never part of portable shared settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub researched_pdf: Option<ResearchedPdf>,
+    /// Ordinary local EPUB retrieval has its own opt-in and search declaration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub researched_epub: Option<ResearchedDocument>,
 }
 impl Configuration {
     pub fn validate(&self) -> Result<()> {
@@ -35,16 +38,21 @@ impl Configuration {
         if let Some(researched) = &self.researched_pdf {
             researched.validate()?;
         }
+        if let Some(researched) = &self.researched_epub {
+            researched.validate()?;
+        }
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct ResearchedPdf {
+pub struct ResearchedDocument {
     pub research_model: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for ResearchedPdf {
+pub type ResearchedPdf = ResearchedDocument;
+
+impl<'de> Deserialize<'de> for ResearchedDocument {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
@@ -52,7 +60,9 @@ impl<'de> Deserialize<'de> for ResearchedPdf {
         // explicit local opt-in must be an object, with duplicate fields refused.
         let raw = Box::<serde_json::value::RawValue>::deserialize(deserializer)?;
         if !raw.get().trim_start().starts_with('{') {
-            return Err(serde::de::Error::custom("researched_pdf must be an object"));
+            return Err(serde::de::Error::custom(
+                "researched document setting must be an object",
+            ));
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -66,7 +76,7 @@ impl<'de> Deserialize<'de> for ResearchedPdf {
     }
 }
 
-impl ResearchedPdf {
+impl ResearchedDocument {
     fn validate(&self) -> Result<()> {
         ensure!(
             self.research_model.as_deref().is_none_or(|model| {

@@ -1,4 +1,5 @@
 use super::*;
+mod capacities;
 use crate::{
     config::Personalization,
     conversation::TextScope,
@@ -132,7 +133,7 @@ struct Remote {
     discovery_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 #[derive(Default)]
-struct Destination(Mutex<Remote>);
+pub(crate) struct Destination(Mutex<Remote>);
 impl NoteDestination for Destination {
     fn backend(&self) -> &str {
         "fixture"
@@ -186,6 +187,14 @@ impl NoteDestination for Destination {
     }
 }
 impl Destination {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn lose_next_ack(&self) {
+        self.0.lock().unwrap().lose_ack = true;
+    }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn remote_note_count(&self) -> usize {
+        self.0.lock().unwrap().notes.len()
+    }
     fn write(
         &self,
         id: &str,
@@ -215,7 +224,7 @@ impl Destination {
             Ok(note)
         }
     }
-    fn counts(&self) -> (usize, usize, usize) {
+    pub(crate) fn counts(&self) -> (usize, usize, usize) {
         let s = self.0.lock().unwrap();
         (s.discovers, s.reads, s.writes)
     }
@@ -313,6 +322,68 @@ fn outer_and_export_admission_lost_ack_never_dispatch() {
         assert_eq!(d.counts(), (0, 0, 0));
     }
 }
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+#[test]
+fn installed_draft_bridge_checks_native_source_before_the_write() {
+    for stale in [false, true] {
+        let f = Fixture::new();
+        let generation = f.request();
+        let mut m = model();
+        let draft = writer::run(
+            &f.ledger,
+            &mut m,
+            generation.model().unwrap(),
+            &pref(),
+            &mut || false,
+        )
+        .draft
+        .unwrap();
+        let destination = Destination::default();
+        let request = Request::ExportDraft {
+            outer_operation: Uuid::new_v4(),
+            conversation: f.conversation,
+            draft,
+            correlation: Uuid::new_v4(),
+            effect_operation: Uuid::new_v4(),
+        };
+        let mut phases = Vec::new();
+        let output = run_guarded_draft_export(
+            &f.ledger,
+            &LegacyDestination(&destination),
+            &request,
+            &pref(),
+            |phase| {
+                phases.push(phase);
+                ensure!(
+                    !stale || phase != Phase::BeforeWritePoll,
+                    "source page changed"
+                );
+                Ok(())
+            },
+        );
+        assert!(phases.contains(&Phase::BeforeWritePoll));
+        assert_eq!(destination.counts().2, usize::from(!stale));
+        assert_eq!(output.observation.write_polled, !stale);
+        assert_eq!(
+            output.status,
+            if stale {
+                Status::Canceled
+            } else {
+                Status::Exported
+            }
+        );
+        let repeated = run_guarded_draft_export(
+            &f.ledger,
+            &LegacyDestination(&destination),
+            &request,
+            &pref(),
+            |_| Ok(()),
+        );
+        assert_eq!(repeated.status, Status::Historical);
+        assert_eq!(destination.counts().2, usize::from(!stale));
+    }
+}
+
 #[test]
 fn cancellation_at_final_write_hook_is_unpolled_and_durably_no_send() {
     let f = Fixture::new();

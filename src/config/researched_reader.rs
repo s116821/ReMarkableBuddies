@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn local_pdf_opt_in_requires_an_object_and_allows_ordinary_reader() {
+    fn local_document_opt_ins_require_objects_and_allow_ordinary_reader() {
         use crate::reader_runtime::ResearchedPdf;
         for raw in [
             "[]",
@@ -180,6 +180,7 @@ mod tests {
         }
         let mut config = configuration();
         assert!(config.reader.researched_pdf.is_none());
+        assert!(config.reader.researched_epub.is_none());
         assert_eq!(
             serde_json::to_value(&config.reader).unwrap(),
             serde_json::json!({"selection": null}),
@@ -188,6 +189,16 @@ mod tests {
         config.reader.researched_pdf = Some(serde_json::from_str("{}").unwrap());
         assert!(config.validate_values().is_ok());
         let raw = serde_json::json!({"reader":{"researched_pdf":[null]}});
+        assert!(serde_json::from_value::<Config>(raw).is_err());
+
+        let mut config = configuration();
+        config.reader = serde_json::from_value(serde_json::json!({"researched_epub":{}})).unwrap();
+        assert!(config.reader.researched_pdf.is_none());
+        assert!(config.reader.researched_epub.is_some());
+        assert!(config.validate_values().is_ok());
+        config.sync.enabled = true;
+        assert!(config.validate_values().is_err());
+        let raw = serde_json::json!({"reader":{"researched_epub":[null]}});
         assert!(serde_json::from_value::<Config>(raw).is_err());
     }
 

@@ -629,11 +629,13 @@ fn refused(request: &Request, failure: runner::Failure) -> Report {
     }
 }
 pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
+    use crate::note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure};
     let result = (|| -> std::result::Result<Report, runner::Failure> {
         request
             .preflight()
             .map_err(|_| runner::Failure::InvalidInput)?;
-        let config = Config::load(config_path).map_err(|_| runner::Failure::Storage)?;
+        let (config, saved) =
+            Config::load_with_saved_revision(config_path).map_err(|_| runner::Failure::Storage)?;
         if !config.admits_writer(request.joined().is_some()) {
             return Err(runner::Failure::Unsupported);
         }
@@ -657,14 +659,16 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             None
         };
+        let selected = |existing: Option<&Store>| {
+            ConfiguredDestination::selected(&config, saved.as_ref(), existing).map_err(|failure| {
+                match failure {
+                    ExportFailure::Unsupported => runner::Failure::Unsupported,
+                    _ => runner::Failure::MissingCredentials,
+                }
+            })
+        };
         let mut destination = if !config.memory.enabled && request.joined().is_some() {
-            Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            )
+            Some(selected(None)?)
         } else {
             None
         };
@@ -706,12 +710,20 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             let (store, prepared) =
                 Store::prepare_notebook_validated(config.paths.clone(), |ledger| {
+                    if let Some(destination) = destination.as_mut() {
+                        destination.admit_actor(ledger.store())?;
+                    }
                     prepare(ledger, &request, &preference)
                 })
-                .map_err(|error| match error.downcast_ref::<InputRefusal>() {
-                    Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
-                    Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
-                    _ => runner::Failure::Storage,
+                .map_err(|error| {
+                    if error.downcast_ref::<ExportFailure>().is_some() {
+                        return runner::Failure::MissingCredentials;
+                    }
+                    match error.downcast_ref::<InputRefusal>() {
+                        Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
+                        Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
+                        _ => runner::Failure::Storage,
+                    }
                 })?;
             let ledger = Ledger::new(Arc::new(store));
             (ledger, prepared, None)
@@ -754,13 +766,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             effective.base_url,
         );
         if destination.is_none() && request.joined().is_some() {
-            destination = Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            );
+            destination = Some(selected(Some(ledger.store()))?);
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -771,7 +777,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             let (sender,canceled)=tokio::sync::watch::channel(false);
             let mut worker=tokio::task::spawn_blocking(move|| {
                 let _memory = memory;
-                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run(&ledger,&mut model,&destination,*input,identity,canceled)))}
+                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run_destination_with_events(&ledger,&mut model,&destination,*input,identity,canceled,&mut |_, _| {})))}
                 else {Report::Generation(runner::run(&ledger,&mut model,*input,&mut||*canceled.borrow()).report)}
             });
             let joined=tokio::select! {result=&mut worker=>result,_=tokio::signal::ctrl_c()=>{let _=sender.send(true);worker.await}};

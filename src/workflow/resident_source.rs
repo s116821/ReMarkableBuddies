@@ -37,9 +37,9 @@ use std::{
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
 #[cfg(feature = "installed-resident-output")]
-type OrdinaryPdfCapture = (
+type OrdinaryBookCapture = (
     ResidentSourceCapture,
-    Result<Option<original_pdf::OrdinaryPdfSource>>,
+    Result<Option<original_pdf::OrdinaryBookSource>>,
 );
 
 #[derive(Debug)]
@@ -705,10 +705,12 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn acquire_ordinary_pdf(
+    pub(super) fn acquire_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-    ) -> Result<OrdinaryPdfCapture> {
+        pdf: bool,
+        epub: bool,
+    ) -> Result<OrdinaryBookCapture> {
         if self.gesture != Some(ResidentGesture::Reader) {
             return Ok((self.acquire(health)?, Ok(None)));
         }
@@ -722,23 +724,26 @@ impl ResidentSourceOwner {
                 // every byte read from either asset.
                 #[cfg(test)]
                 if let Some((root, _)) = &_owner.ordinary_pdf_fixture {
-                    return Ok(original_pdf::OrdinaryPdfSource::pin_fixture(root, facts).map(Some));
+                    return Ok(original_pdf::OrdinaryBookSource::pin_fixture(
+                        root, facts, pdf, epub,
+                    )
+                    .map(Some));
                 }
-                Ok(original_pdf::OrdinaryPdfSource::pin(facts).map(Some))
+                Ok(original_pdf::OrdinaryBookSource::pin(facts, pdf, epub).map(Some))
             },
         )
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn read_ordinary_pdf(
+    pub(super) fn read_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-        source: original_pdf::OrdinaryPdfSource,
-    ) -> Result<Option<original_pdf::ObservedOriginalPdf>> {
+        source: original_pdf::OrdinaryBookSource,
+    ) -> Result<Option<original_pdf::ObservedOriginalBook>> {
         let facts = self
             .captured_source
             .clone()
-            .context("Resident PDF capture facts absent")?;
+            .context("Resident Reader capture facts absent")?;
         let deadline = self.deadline.context("Resident source deadline absent")?;
         self.acquisition_current(health)?;
         source.read(&facts, deadline, &mut || {
@@ -747,20 +752,20 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn complete_ordinary_pdf(
+    pub(super) fn complete_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-        observed: original_pdf::ObservedOriginalPdf,
+        observed: original_pdf::ObservedOriginalBook,
         deadline: Instant,
-        retained: Option<original_pdf::OrdinaryPdfCache>,
+        retained: Option<original_pdf::OrdinaryBookCache>,
     ) -> Result<(
-        original_pdf::CapturedOriginalPdf,
-        Option<original_pdf::OrdinaryPdfCache>,
+        original_pdf::CapturedOriginalBook,
+        Option<original_pdf::OrdinaryBookCache>,
     )> {
         let facts = self
             .captured_source
             .clone()
-            .context("Resident PDF capture facts absent")?;
+            .context("Resident Reader capture facts absent")?;
         let acquired = self.deadline.context("Resident source deadline absent")?;
         let executable = std::path::Path::new(original_pdf::INSTALLED_EXECUTABLE);
         #[cfg(test)]
@@ -775,7 +780,7 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn ordinary_pdf_deadline(&self) -> Result<Instant> {
+    pub(super) fn ordinary_book_deadline(&self) -> Result<Instant> {
         let acquired = self.deadline.context("Resident source deadline absent")?;
         // Bound both readings, optional research and the final answer using
         // the original release's acquisition deadline.
@@ -1061,14 +1066,14 @@ fn unsettled_output_insertion(
 
 impl ResidentSourceOwner {
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn require_ordinary_pdf_current(
+    pub(super) fn require_ordinary_book_current(
         &mut self,
         health: &mut ServiceHealth,
         deadline: Instant,
     ) -> Result<()> {
         ensure!(
             self.captured_page_matches(health, deadline)?,
-            "Resident PDF source or page order changed"
+            "Reader source or page order changed"
         );
         Ok(())
     }
@@ -2340,7 +2345,7 @@ pub(crate) mod tests {
                 released(Instant::now()),
             ])
             .with_test_output(Box::new(RecognitionProbe {
-                writer_preview: Some(preview.clone()),
+                rendered_text: Some(preview.clone()),
                 ..RecognitionProbe::default()
             }));
         let mut workflow = Workflow::with_device(Box::new(backend), false);
@@ -2393,6 +2398,8 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     pub(crate) struct OrdinaryPdfFixtureRounds<'a> {
+        pub epub: bool,
+        pub rendered: Option<Rc<RefCell<Vec<String>>>>,
         pub source_targets: bool,
         pub count: usize,
         pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
@@ -2412,8 +2419,21 @@ pub(crate) mod tests {
         model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
         inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
     ) -> Result<(Vec<Result<()>>, Vec<Record>)> {
-        let mode = "reconnect-source-handoff-ordinary-pdf";
+        let mode = if rounds.rendered.is_some() {
+            anyhow::ensure!(
+                rounds.count == 1,
+                "The placement fixture starts from one original page"
+            );
+            "reconnect-source-handoff-writer-insert"
+        } else {
+            "reconnect-source-handoff-ordinary-pdf"
+        };
         let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
+        let setting = if rounds.epub {
+            "researched_epub"
+        } else {
+            "researched_pdf"
+        };
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
             "paths": StorePaths {
                 data: base.join("data"),
@@ -2422,7 +2442,7 @@ pub(crate) mod tests {
             },
             "model": "gpt-6.1-terra",
             "model_credential": "fixture_model_key",
-            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
+            "reader": { (setting): { "research_model": "gpt-5.6-terra" } },
             "research_policy": "required"
         }))?;
         config
@@ -2447,9 +2467,29 @@ pub(crate) mod tests {
             .context("Start ordinary PDF fixture resident session")?;
         let order_change = native.ordinary_pdf_order_change();
         let change_file_on_observe = Rc::new(Cell::new(false));
-        let pdf = root.join(format!("{document}.pdf"));
+        let extension = if rounds.epub { "epub" } else { "pdf" };
+        let pdf = root.join(format!("{document}.{extension}"));
         let owner = workflow.resident_source.as_mut().unwrap();
-        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.selection = if let Some(rendered) = &rounds.rendered {
+            let output = RecognitionProbe {
+                confirmed_source: true,
+                insertion_source: Some(page),
+                rendered_text: Some(rendered.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                super::super::selected_backend::RefusingBackend::with_resident_releases(vec![
+                    released(Instant::now()),
+                ])
+                .with_test_output(Box::new(output)),
+            );
+            InstalledReaderSelection::fixture_for_installed_output(
+                &base.join("output-profile"),
+                runtime.identity(),
+            )?
+        } else {
+            InstalledReaderSelection::fixture_with_installed_output()
+        };
         owner.ordinary_pdf_fixture = Some((root, executable));
         owner.session = Some(Box::new(OwnedSession {
             runtime,
@@ -2500,11 +2540,19 @@ pub(crate) mod tests {
                 events.starts_with(acquisition),
                 "unexpected fixture acquisition: {events:?}"
             );
-            let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
-            assert!(remainder.is_empty());
-            assert!(observations
-                .iter()
-                .all(|pair| *pair == ["reconnect", "observe"]));
+            if rounds.rendered.is_some() {
+                assert_eq!(
+                    events.iter().filter(|&&event| event == "insert").count(),
+                    1,
+                    "Expected one insertion after the original question page"
+                );
+            } else {
+                let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
+                assert!(remainder.is_empty());
+                assert!(observations
+                    .iter()
+                    .all(|pair| *pair == ["reconnect", "observe"]));
+            }
             events.clear();
         }
         let records = store
@@ -2938,11 +2986,13 @@ pub(crate) mod tests {
         conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
         refuse_new_reader_text: bool,
+        #[cfg(feature = "installed-resident-output")]
+        refuse_writer_text: bool,
         successor: Option<SuccessorProbe>,
         #[cfg(feature = "installed-resident-output")]
         insertion_source: Option<ConversationId>,
         #[cfg(feature = "installed-resident-output")]
-        writer_preview: Option<Rc<RefCell<Vec<String>>>>,
+        rendered_text: Option<Rc<RefCell<Vec<String>>>>,
     }
 
     struct SuccessorProbe {
@@ -2951,10 +3001,10 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    struct WriterPreview(Rc<RefCell<Vec<String>>>);
+    struct RecordedOutput(Rc<RefCell<Vec<String>>>);
 
     #[cfg(feature = "installed-resident-output")]
-    impl ResidentRenderer for WriterPreview {
+    impl ResidentRenderer for RecordedOutput {
         fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
             lease.step(|pulse| {
                 pulse()?;
@@ -3132,11 +3182,10 @@ pub(crate) mod tests {
                 text,
                 ResidentOutputText::Plain(_) | ResidentOutputText::WriterSourceDraft(_)
             ) {
-                return Ok(
-                    crate::workflow::resident_output::development::fits_test_keyboard(
+                return Ok(!self.refuse_writer_text
+                    && crate::workflow::resident_output::development::fits_test_keyboard(
                         text, new_page,
-                    ),
-                );
+                    ));
             }
             assert!(new_page && matches!(text, ResidentOutputText::Reader { .. }));
             Ok(!self.refuse_new_reader_text)
@@ -3168,7 +3217,7 @@ pub(crate) mod tests {
             );
             #[cfg(feature = "installed-resident-output")]
             if self.insertion_source.is_none()
-                && self.writer_preview.is_some()
+                && self.rendered_text.is_some()
                 && self
                     .successor
                     .as_ref()
@@ -3230,12 +3279,12 @@ pub(crate) mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
             #[cfg(feature = "installed-resident-output")]
-            if let Some(preview) = &self.writer_preview {
+            if let Some(preview) = &self.rendered_text {
                 if let Some(source) = self.insertion_source {
                     assert!(_newly_created);
                     assert_ne!(_target.page().page.as_bytes(), source.as_bytes());
                 }
-                return Ok(Box::new(WriterPreview(preview.clone())));
+                return Ok(Box::new(RecordedOutput(preview.clone())));
             }
             panic!("unexpected renderer request");
         }
@@ -3288,7 +3337,7 @@ pub(crate) mod tests {
             let written = Rc::new(RefCell::new(Vec::new()));
             let probe = RecognitionProbe {
                 confirmed_source: role == PageUse::ConfirmedNonBuddy,
-                writer_preview: (role == PageUse::RelevantBuddy).then(|| written.clone()),
+                rendered_text: (role == PageUse::RelevantBuddy).then(|| written.clone()),
                 ..RecognitionProbe::default()
             };
             workflow.device = Box::new(
