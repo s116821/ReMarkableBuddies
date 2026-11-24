@@ -13,6 +13,22 @@ const FIXED_PATH: &str = "/home/root/.config/remarkable-buddies/config.json";
 pub(super) enum Action {
     CheckInitial,
     CreateInitial,
+    CheckExistingDefault,
+    CreateExistingDefault,
+}
+
+#[cfg(target_os = "linux")]
+impl Action {
+    fn existing(self) -> bool {
+        matches!(
+            self,
+            Self::CheckExistingDefault | Self::CreateExistingDefault
+        )
+    }
+
+    fn checking(self) -> bool {
+        matches!(self, Self::CheckInitial | Self::CheckExistingDefault)
+    }
 }
 
 #[cfg_attr(test, derive(Debug))]

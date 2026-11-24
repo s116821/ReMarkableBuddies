@@ -171,7 +171,7 @@ pub struct Args {
     /// Exact-dash bounded JSON stdin for prepare/apply/status; never a file fallback
     #[arg(long, value_name = "INPUT", requires = "basic_settings_operation")]
     basic_settings_input: Option<std::path::PathBuf>,
-    /// Inspect saved declarations or explicitly create the first configuration without runtime or Store startup
+    /// Inspect saved declarations or explicitly create the first configuration without starting the runtime
     #[arg(long, value_enum, conflicts_with_all = ["simulate", "inspect_owned_data", "api_key", "model", "base_url", "trigger_corner", "log_level", "debug_dump", "memory_operation", "memory_input", "sync_mode_operation", "sync_mode_input", "archive_operation", "archive_input", "personalization_operation", "export_note"])]
     configuration_operation: Option<config::inspection::CliOperation>,
     /// Run a bounded local scenario (offline unless explicitly live)

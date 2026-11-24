@@ -1,7 +1,7 @@
 use super::{Action, State};
 use crate::{
     config::{inspection, Config},
-    storage::{StorePaths, MAX_RECORD},
+    storage::{sync::mode::ordinary_local, Store, StorePaths, MAX_RECORD},
 };
 use anyhow::{ensure, Context, Result};
 use nix::libc;
@@ -32,7 +32,7 @@ pub(super) fn run(action: Action, config: &Path) -> State {
         return State::Blocked;
     }
     Tree::open(Path::new("/"), Path::new("/home/root"), config)
-        .and_then(|tree| attempt(&tree, action, &Config::default()))
+        .and_then(|tree| run_in_tree(&tree, action, &Config::default()))
         .unwrap_or(State::Blocked)
 }
 
@@ -212,6 +212,19 @@ impl<'a> Tree<'a> {
         Ok(present)
     }
 
+    fn require_legacy_absent(&self) -> Result<()> {
+        let directory = self.home.join(".config/reader-buddy");
+        if let Some(chain) = self.walk(&directory, 0)? {
+            let parent = chain.last().expect("legacy config parent");
+            ensure!(
+                optional(open_at(parent, c"config.json", ENTRY, 0))?.is_none(),
+                "legacy configuration present"
+            );
+            self.current(&directory, &chain)?;
+        }
+        Ok(())
+    }
+
     fn read_saved(&self, parent: &File) -> Result<Option<(Metadata, Vec<u8>)>> {
         let Some(pinned) = optional(open_at(parent, c"config.json", ENTRY, 0))? else {
             return Ok(None);
@@ -307,16 +320,42 @@ impl Drop for Stage<'_> {
     }
 }
 
+fn run_in_tree(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> {
+    if !action.existing() {
+        return attempt(tree, action, defaults);
+    }
+    tree.require_legacy_absent()?;
+    if tree.has_saved_config()? {
+        return Ok(State::Present);
+    }
+    let store = Store::open_existing_for_personalization(defaults.paths.clone())?;
+    ensure!(
+        ordinary_local(&store)?,
+        "existing configuration requires local mode"
+    );
+    store.with_owned_local_io(|_, _| attempt(tree, action, defaults))
+}
+
 fn attempt(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> {
+    let check_scope = || {
+        if action.existing() {
+            tree.require_legacy_absent()
+        } else {
+            tree.check_empty_roots(&defaults.paths)
+        }
+    };
+    if action.existing() {
+        tree.require_legacy_absent()?;
+    }
     if tree.has_saved_config()? {
         return Ok(State::Present);
     }
 
     defaults.validate()?;
-    tree.check_empty_roots(&defaults.paths)?;
+    check_scope()?;
     let bytes = serde_json::to_vec(defaults)?;
     inspection::document(&bytes).map_err(|_| anyhow::anyhow!("invalid initial configuration"))?;
-    if action == Action::CheckInitial {
+    if action.checking() {
         return Ok(if tree.has_saved_config()? {
             State::Present
         } else {
@@ -331,6 +370,9 @@ fn attempt(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> 
     let present = tree.read_saved(parent)?.is_some();
     tree.current(tree.parent(), &chain)?;
     if present {
+        if action.existing() {
+            tree.require_legacy_absent()?;
+        }
         return Ok(State::Present);
     }
     let mut stage = Stage::new(parent)?;
@@ -341,7 +383,7 @@ fn attempt(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> 
     #[cfg(test)]
     tests::fault(tests::Fault::BeforePublication)?;
 
-    tree.check_empty_roots(&defaults.paths)?;
+    check_scope()?;
     tree.current(tree.parent(), &chain)?;
     ensure!(
         stage.owns_name()? && same_version(&staged, &stage.file.metadata()?),
@@ -352,6 +394,9 @@ fn attempt(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> 
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             let present = tree.read_saved(parent)?.is_some();
             tree.current(tree.parent(), &chain)?;
+            if action.existing() {
+                tree.require_legacy_absent()?;
+            }
             return Ok(if present {
                 State::Present
             } else {
@@ -382,6 +427,9 @@ fn attempt(tree: &Tree<'_>, action: Action, defaults: &Config) -> Result<State> 
             same_inode(&stage.file.metadata()?, &identity) && observed == bytes,
             "published configuration readback changed"
         );
+        if action.existing() {
+            tree.require_legacy_absent()?;
+        }
         tree.current(tree.parent(), &chain)
     };
     Ok(if readback().is_ok() {
