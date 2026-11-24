@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-ReMarkable Reader Buddy is a Rust application that provides AI-powered reading assistance on reMarkable tablets. It detects outlined content and handwritten questions, then displays answers on new pages.
+Buddy runs Reader and Writer in one Rust application on the tablet. Reader answers handwritten questions about marked content. Writer generates and refines note drafts from source text. The executable and systemd unit use the original `reader-buddy` name. [Writer draft commands](reference/writer-drafts.md)
 
 ### Project Structure
 

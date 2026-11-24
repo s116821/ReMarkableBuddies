@@ -1,5 +1,5 @@
 [Unit]
-Description=ReMarkable Reader Buddy
+Description=ReMarkableBuddies (Reader and Writer)
 After=home.mount xochitl.service network-online.target
 Wants=xochitl.service
 ConditionPathExists=/home/root/.config/reader-buddy/environment

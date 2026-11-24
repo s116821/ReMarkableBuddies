@@ -38,7 +38,7 @@ fn reader() -> String {
     "reader".into()
 }
 fn corner() -> String {
-    "LL".into()
+    crate::config::DEFAULT_TRIGGER_CORNER.into()
 }
 
 #[derive(Clone, Default, Deserialize)]
