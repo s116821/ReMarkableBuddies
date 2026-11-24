@@ -37,9 +37,9 @@ use std::{
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
 #[cfg(feature = "installed-resident-output")]
-type OrdinaryPdfCapture = (
+type OrdinaryBookCapture = (
     ResidentSourceCapture,
-    Result<Option<original_pdf::OrdinaryPdfSource>>,
+    Result<Option<original_pdf::OrdinaryBookSource>>,
 );
 
 #[derive(Debug)]
@@ -705,10 +705,12 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn acquire_ordinary_pdf(
+    pub(super) fn acquire_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-    ) -> Result<OrdinaryPdfCapture> {
+        pdf: bool,
+        epub: bool,
+    ) -> Result<OrdinaryBookCapture> {
         if self.gesture != Some(ResidentGesture::Reader) {
             return Ok((self.acquire(health)?, Ok(None)));
         }
@@ -722,23 +724,26 @@ impl ResidentSourceOwner {
                 // every byte read from either asset.
                 #[cfg(test)]
                 if let Some((root, _)) = &_owner.ordinary_pdf_fixture {
-                    return Ok(original_pdf::OrdinaryPdfSource::pin_fixture(root, facts).map(Some));
+                    return Ok(original_pdf::OrdinaryBookSource::pin_fixture(
+                        root, facts, pdf, epub,
+                    )
+                    .map(Some));
                 }
-                Ok(original_pdf::OrdinaryPdfSource::pin(facts).map(Some))
+                Ok(original_pdf::OrdinaryBookSource::pin(facts, pdf, epub).map(Some))
             },
         )
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn read_ordinary_pdf(
+    pub(super) fn read_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-        source: original_pdf::OrdinaryPdfSource,
-    ) -> Result<Option<original_pdf::ObservedOriginalPdf>> {
+        source: original_pdf::OrdinaryBookSource,
+    ) -> Result<Option<original_pdf::ObservedOriginalBook>> {
         let facts = self
             .captured_source
             .clone()
-            .context("Resident PDF capture facts absent")?;
+            .context("Resident Reader capture facts absent")?;
         let deadline = self.deadline.context("Resident source deadline absent")?;
         self.acquisition_current(health)?;
         source.read(&facts, deadline, &mut || {
@@ -747,20 +752,20 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn complete_ordinary_pdf(
+    pub(super) fn complete_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-        observed: original_pdf::ObservedOriginalPdf,
+        observed: original_pdf::ObservedOriginalBook,
         deadline: Instant,
-        retained: Option<original_pdf::OrdinaryPdfCache>,
+        retained: Option<original_pdf::OrdinaryBookCache>,
     ) -> Result<(
-        original_pdf::CapturedOriginalPdf,
-        Option<original_pdf::OrdinaryPdfCache>,
+        original_pdf::CapturedOriginalBook,
+        Option<original_pdf::OrdinaryBookCache>,
     )> {
         let facts = self
             .captured_source
             .clone()
-            .context("Resident PDF capture facts absent")?;
+            .context("Resident Reader capture facts absent")?;
         let acquired = self.deadline.context("Resident source deadline absent")?;
         let executable = std::path::Path::new(original_pdf::INSTALLED_EXECUTABLE);
         #[cfg(test)]
@@ -775,7 +780,7 @@ impl ResidentSourceOwner {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn ordinary_pdf_deadline(&self) -> Result<Instant> {
+    pub(super) fn ordinary_book_deadline(&self) -> Result<Instant> {
         let acquired = self.deadline.context("Resident source deadline absent")?;
         // Bound both readings, optional research and the final answer using
         // the original release's acquisition deadline.
@@ -1061,14 +1066,14 @@ fn unsettled_output_insertion(
 
 impl ResidentSourceOwner {
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn require_ordinary_pdf_current(
+    pub(super) fn require_ordinary_book_current(
         &mut self,
         health: &mut ServiceHealth,
         deadline: Instant,
     ) -> Result<()> {
         ensure!(
             self.captured_page_matches(health, deadline)?,
-            "Resident PDF source or page order changed"
+            "Reader source or page order changed"
         );
         Ok(())
     }
@@ -2393,6 +2398,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     pub(crate) struct OrdinaryPdfFixtureRounds<'a> {
+        pub epub: bool,
         pub source_targets: bool,
         pub count: usize,
         pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
@@ -2414,6 +2420,11 @@ pub(crate) mod tests {
     ) -> Result<(Vec<Result<()>>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
         let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
+        let setting = if rounds.epub {
+            "researched_epub"
+        } else {
+            "researched_pdf"
+        };
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
             "paths": StorePaths {
                 data: base.join("data"),
@@ -2422,7 +2433,7 @@ pub(crate) mod tests {
             },
             "model": "gpt-6.1-terra",
             "model_credential": "fixture_model_key",
-            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
+            "reader": { (setting): { "research_model": "gpt-5.6-terra" } },
             "research_policy": "required"
         }))?;
         config
@@ -2447,7 +2458,8 @@ pub(crate) mod tests {
             .context("Start ordinary PDF fixture resident session")?;
         let order_change = native.ordinary_pdf_order_change();
         let change_file_on_observe = Rc::new(Cell::new(false));
-        let pdf = root.join(format!("{document}.pdf"));
+        let extension = if rounds.epub { "epub" } else { "pdf" };
+        let pdf = root.join(format!("{document}.{extension}"));
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.ordinary_pdf_fixture = Some((root, executable));

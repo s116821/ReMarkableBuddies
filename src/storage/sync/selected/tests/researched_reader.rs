@@ -2,6 +2,8 @@
 //! These cases are mandatory in the hosted composed-reader step, not provider
 //! or installed/tablet/model-fidelity qualification.
 #![cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+#[cfg(feature = "installed-resident-output")]
+mod ordinary_epub;
 use super::corrections::CorrectionFixture;
 use super::*;
 use crate::{
@@ -1277,6 +1279,7 @@ fn assert_pdf_reuse_between_service_questions(
             fixture.0.clone(),
             executable.into(),
             OrdinaryPdfFixtureRounds {
+                epub: false,
                 source_targets: false,
                 count: questions.len(),
                 before_round: Some(&mut update_order),
@@ -1364,7 +1367,7 @@ fn assert_pdf_reuse_between_service_questions(
                 assert!(text.contains(&format!("[S1] Document {document}, page {page}")));
             } else {
                 let error = result.expect_err("Warm answer survived native order drift");
-                assert!(format!("{error:#}").contains("Resident PDF source or page order changed"));
+                assert!(format!("{error:#}").contains("Reader source or page order changed"));
                 assert!(answer.is_none());
             }
         }
@@ -1400,6 +1403,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
 
     let executable = retained_command();
     let large_page = ".".repeat(400 * 1024);
+    ordinary_epub::check_open_book(&executable).context(
+        "Exercise ordinary EPUB question and section citations with the retained binary",
+    )?;
     let oversized = pdf_pages(
         [large_page.as_str(); 6]
             .into_iter()
@@ -1501,6 +1507,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             root.clone(),
             executable.clone(),
             crate::workflow::OrdinaryPdfFixtureRounds {
+                epub: false,
                 source_targets: matches!(
                     case,
                     Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets
@@ -1686,7 +1693,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                     | Case::ProviderRefusalAfterNativeDrift
             ) {
                 assert!(
-                    cause.contains("Resident PDF source or page order changed"),
+                    cause.contains("Reader source or page order changed"),
                     "{cause}"
                 );
             }
@@ -1697,7 +1704,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                     | Case::FileDuringRefusalObserve
             ) {
                 assert_eq!(fs::read(path)?, b"changed during native Observe");
-                assert!(cause.contains("Original PDF file changed"), "{cause}");
+                assert!(cause.contains("Original document file changed"), "{cause}");
             }
             if replace_interpreted_turn {
                 assert!(

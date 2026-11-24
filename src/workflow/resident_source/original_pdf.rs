@@ -1,7 +1,7 @@
-//! Read-only original PDF custody around an admitted resident capture.
+//! Read-only original publication custody around an admitted resident capture.
 use crate::{
-    device::native_page::original_pdf_mapping,
-    retrieval::pdf_worker::{PendingIndex, PDF_BYTES},
+    device::native_page::{original_pdf_mapping, OriginalBookPage},
+    retrieval::pdf_worker::{PendingIndex, Publication, PDF_BYTES},
     storage::Uuid,
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -84,7 +84,7 @@ fn open_at(parent: &File, name: &OsStr, flags: i32) -> Result<File> {
         )
     };
     if fd < 0 {
-        return Err(io::Error::last_os_error()).context("Open original PDF input");
+        return Err(io::Error::last_os_error()).context("Open original document input");
     }
     Ok(unsafe { File::from_raw_fd(fd) })
 }
@@ -107,7 +107,7 @@ impl Directory {
     ) -> Result<Self> {
         ensure!(
             path.is_absolute() && path.components().count() <= 16,
-            "Invalid original PDF directory"
+            "Invalid original document directory"
         );
         let mut handles = Vec::new();
         let mut identities = Vec::new();
@@ -116,11 +116,11 @@ impl Directory {
             let file = match part {
                 Component::RootDir if handles.is_empty() => File::open("/")?,
                 Component::Normal(name) => open_at(
-                    handles.last().context("Original PDF root absent")?,
+                    handles.last().context("Original document root absent")?,
                     name,
                     libc::O_RDONLY | libc::O_DIRECTORY,
                 )?,
-                _ => bail!("Invalid original PDF directory component"),
+                _ => bail!("Invalid original document directory component"),
             };
             let metadata = file.metadata()?;
             ensure!(
@@ -128,17 +128,19 @@ impl Directory {
                     && (metadata.uid() == 0 || metadata.uid() == uid)
                     && (metadata.mode() & 0o022 == 0
                         || allow_fixture_temp && metadata.mode() & 0o1000 != 0),
-                "Original PDF directory is outside trusted ownership"
+                "Original document directory is outside trusted ownership"
             );
             identities.push(Identity::from(&metadata));
             handles.push(file);
         }
-        let identity = identities.last().context("Original PDF directory absent")?;
+        let identity = identities
+            .last()
+            .context("Original document directory absent")?;
         ensure!(
             identity.uid == uid
                 && gid.is_none_or(|expected| identity.gid == expected)
                 && identity.mode & 0o022 == 0,
-            "Original PDF directory owner changed"
+            "Original document directory owner changed"
         );
         Ok(Self {
             path: path.into(),
@@ -159,7 +161,7 @@ impl Directory {
         )?;
         ensure!(
             candidate.identities == self.identities,
-            "Original PDF directory changed"
+            "Original document directory changed"
         );
         Ok(candidate)
     }
@@ -167,7 +169,7 @@ impl Directory {
     fn leaf(&self) -> &File {
         self.handles
             .last()
-            .expect("validated original PDF directory")
+            .expect("validated original document directory")
     }
 }
 
@@ -189,7 +191,7 @@ impl Asset {
                 && metadata.nlink() == 1
                 && metadata.mode() & 0o022 == 0
                 && (1..=max as u64).contains(&metadata.len()),
-            "Original PDF input is outside trusted file bounds"
+            "Original document input is outside trusted file bounds"
         );
         // Reopen the already validated regular inode, rather than opening
         // the name again and risking a substituted device or FIFO.
@@ -200,7 +202,7 @@ impl Asset {
         let stamp = Stamp::from(&metadata);
         ensure!(
             Stamp::from(&file.metadata()?) == stamp,
-            "Original PDF file changed"
+            "Original document file changed"
         );
         Ok(Self { file, name, stamp })
     }
@@ -211,7 +213,7 @@ impl Asset {
         ensure!(
             Stamp::from(&self.file.metadata()?) == self.stamp
                 && Stamp::from(&named.metadata()?) == self.stamp,
-            "Original PDF file changed"
+            "Original document file changed"
         );
         Ok(())
     }
@@ -233,7 +235,7 @@ impl Asset {
             charge(reads, 1)?;
             let length = (size - offset).min(CHUNK_BYTES);
             let count = self.file.read_at(&mut chunk[..length], offset as u64)?;
-            ensure!(count > 0, "Original PDF input was truncated");
+            ensure!(count > 0, "Original document input was truncated");
             hash.update(&chunk[..count]);
             if let Some(bytes) = retain.as_mut() {
                 bytes.extend_from_slice(&chunk[..count]);
@@ -244,7 +246,7 @@ impl Asset {
         charge(reads, 1)?;
         ensure!(
             self.file.read_at(&mut [0], size as u64)? == 0,
-            "Original PDF input grew"
+            "Original document input grew"
         );
         progress.poll()?;
         Ok(format!("{:x}", hash.finalize()))
@@ -298,13 +300,18 @@ impl<'a> SourceProgress<'a> {
 }
 
 /// The request-local proof is a sampled file identity, with no native lease.
-pub struct OriginalPdfPin {
+pub(in crate::workflow) struct OriginalFilePin {
     directory: Directory,
     table: Asset,
-    pdf: Asset,
+    original: Asset,
     samples_left: usize,
-    original_page: u32,
     expires: Instant,
+}
+
+/// A selected PDF capture also proves its one-based page in the original PDF.
+pub struct OriginalPdfPin {
+    file: OriginalFilePin,
+    original_page: u32,
 }
 
 impl OriginalPdfPin {
@@ -312,41 +319,67 @@ impl OriginalPdfPin {
         self.original_page
     }
 
+    pub fn check(&mut self, deadline: Instant) -> Result<()> {
+        self.file.check(deadline)
+    }
+}
+
+impl OriginalFilePin {
     /// Repeat at the preflight and ordered admission boundaries. This opens
     /// and stats the same names, without reading or parsing source content.
     pub fn check(&mut self, deadline: Instant) -> Result<()> {
         let deadline = deadline.min(self.expires);
         let mut remaining = std::mem::take(&mut self.samples_left);
-        ensure!(Instant::now() < deadline, "Original PDF pin expired");
+        ensure!(Instant::now() < deadline, "Original document pin expired");
         charge(&mut remaining, 1)?;
         let mut work = METADATA_SAMPLE_WORK;
         let current = self.directory.current(&mut work)?;
         self.table.current(&current, &mut work)?;
-        self.pdf.current(&current, &mut work)?;
-        ensure!(Instant::now() < deadline, "Original PDF pin expired");
+        self.original.current(&current, &mut work)?;
+        ensure!(Instant::now() < deadline, "Original document pin expired");
         self.samples_left = remaining;
         Ok(())
     }
 }
 
 /// Holds the named assets' identities across CaptureSource without reading
-/// either file. The PDF can be absent when the current page is a note.
+/// either file. The original can be absent when the current page is a note.
 #[cfg(feature = "installed-resident-output")]
-pub(in crate::workflow) struct OrdinaryPdfSource {
+pub(in crate::workflow) struct OrdinaryBookSource {
     directory: Directory,
     table: Asset,
-    pdf: Result<Asset>,
+    pdf: Option<Result<Asset>>,
+    epub: Option<Result<Asset>>,
 }
 
 #[cfg(feature = "installed-resident-output")]
-impl OrdinaryPdfSource {
-    pub(super) fn pin(facts: &ReaderFacts) -> Result<Self> {
-        Self::pin_at(Path::new(INSTALLED_ROOT), (0, Some(0)), false, facts)
+impl OrdinaryBookSource {
+    pub(super) fn pin(facts: &ReaderFacts, pdf: bool, epub: bool) -> Result<Self> {
+        Self::pin_at(
+            Path::new(INSTALLED_ROOT),
+            (0, Some(0)),
+            false,
+            facts,
+            pdf,
+            epub,
+        )
     }
 
     #[cfg(test)]
-    pub(super) fn pin_fixture(root: &Path, facts: &ReaderFacts) -> Result<Self> {
-        Self::pin_at(root, (unsafe { libc::geteuid() }, None), true, facts)
+    pub(super) fn pin_fixture(
+        root: &Path,
+        facts: &ReaderFacts,
+        pdf: bool,
+        epub: bool,
+    ) -> Result<Self> {
+        Self::pin_at(
+            root,
+            (unsafe { libc::geteuid() }, None),
+            true,
+            facts,
+            pdf,
+            epub,
+        )
     }
 
     fn pin_at(
@@ -354,6 +387,8 @@ impl OrdinaryPdfSource {
         owner: (u32, Option<u32>),
         allow_fixture_temp: bool,
         facts: &ReaderFacts,
+        pdf_enabled: bool,
+        epub_enabled: bool,
     ) -> Result<Self> {
         let document = facts.page().document;
         let mut work = METADATA_SAMPLE_WORK;
@@ -364,11 +399,21 @@ impl OrdinaryPdfSource {
             TABLE_BYTES,
             &mut work,
         )?;
-        let pdf = Asset::open(&directory, format!("{document}.pdf"), PDF_BYTES, &mut work);
+        let mut asset = |extension| {
+            Asset::open(
+                &directory,
+                format!("{document}.{extension}"),
+                PDF_BYTES,
+                &mut work,
+            )
+        };
+        let pdf = pdf_enabled.then(|| asset("pdf"));
+        let epub = epub_enabled.then(|| asset("epub"));
         Ok(Self {
             directory,
             table,
             pdf,
+            epub,
         })
     }
 
@@ -377,24 +422,37 @@ impl OrdinaryPdfSource {
         facts: &ReaderFacts,
         deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<Option<ObservedOriginalPdf>> {
+    ) -> Result<Option<ObservedOriginalBook>> {
         let mut progress = SourceProgress::new(deadline, progress);
         progress.boundary()?;
         let mut work = METADATA_SAMPLE_WORK;
         let current = self.directory.current(&mut work)?;
         self.table.current(&current, &mut work)?;
-        ObservedOriginalPdf::read_mapped(
+        let pdf_enabled = self.pdf.is_some();
+        let epub_enabled = self.epub.is_some();
+        ObservedOriginalBook::read_mapped(
             self.directory,
             self.table,
-            |_, work| {
-                let pdf = self.pdf?;
-                pdf.current(&current, work)?;
-                Ok(pdf)
+            |_, page, work| {
+                let asset = match page {
+                    OriginalBookPage::Pdf { .. } => self.pdf,
+                    OriginalBookPage::Epub => self.epub,
+                }
+                .context("Original document format disabled")??;
+                asset.current(&current, work)?;
+                Ok(asset)
             },
             facts,
             progress,
             work,
-            crate::device::native_page::ordinary_pdf_mapping,
+            |raw, facts| {
+                crate::device::native_page::ordinary_book_mapping(
+                    raw,
+                    facts,
+                    pdf_enabled,
+                    epub_enabled,
+                )
+            },
         )
     }
 }
@@ -402,25 +460,40 @@ impl OrdinaryPdfSource {
 /// One bounded normalized input. The file identities contain no open
 /// descriptors, page authority, or live worker.
 #[cfg(feature = "installed-resident-output")]
-pub(in crate::workflow) struct OrdinaryPdfCache {
+pub(in crate::workflow) struct OrdinaryBookCache {
     directory: Vec<Identity>,
-    pdf: Stamp,
+    original: Stamp,
     units: crate::retrieval::pdf_worker::CachedNormalization,
 }
 
-pub struct ObservedOriginalPdf {
+pub struct ObservedOriginalBook {
     observed: ReaderFacts,
-    pin: OriginalPdfPin,
+    pin: OriginalFilePin,
     table_digest: String,
-    pdf_digest: String,
+    original_digest: String,
     bytes: Vec<u8>,
-    pages: u32,
+    page: OriginalBookPage,
     reads_left: usize,
     source_bytes_left: usize,
     acquisition_deadline: Instant,
 }
 
-impl ObservedOriginalPdf {
+pub type ObservedOriginalPdf = ObservedOriginalBook;
+
+impl ObservedOriginalBook {
+    pub(in crate::workflow) fn publication(&self) -> Publication {
+        match self.page {
+            OriginalBookPage::Pdf { pages, .. } => Publication::Pdf { pages },
+            OriginalBookPage::Epub => Publication::Epub,
+        }
+    }
+
+    fn pdf_page(&self) -> Result<(u32, u32)> {
+        match self.page {
+            OriginalBookPage::Pdf { pages, redirect } => Ok((pages, redirect + 1)),
+            OriginalBookPage::Epub => bail!("Selected PDF requires an original PDF page"),
+        }
+    }
     /// Call with the installed Reader's observed facts and already admitted
     /// document identity, before sending the matching CaptureSource request.
     pub fn observe(
@@ -458,7 +531,10 @@ impl ObservedOriginalPdf {
             admitted_document,
             acquisition_deadline,
             progress,
-            |raw, facts| original_pdf_mapping(raw, facts).map(Some),
+            |raw, facts| {
+                original_pdf_mapping(raw, facts)
+                    .map(|(pages, redirect)| Some(OriginalBookPage::Pdf { pages, redirect }))
+            },
         )?
         .context("Original PDF mapping unavailable")
     }
@@ -472,7 +548,7 @@ impl ObservedOriginalPdf {
         admitted_document: Uuid,
         acquisition_deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
-        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<(u32, u32)>>,
+        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<OriginalBookPage>>,
     ) -> Result<Option<Self>> {
         ensure!(
             !admitted_document.is_nil()
@@ -493,7 +569,7 @@ impl ObservedOriginalPdf {
         Self::read_mapped(
             directory,
             table,
-            |directory, work| {
+            |directory, _, work| {
                 Asset::open(
                     directory,
                     format!("{admitted_document}.pdf"),
@@ -512,11 +588,11 @@ impl ObservedOriginalPdf {
     fn read_mapped(
         directory: Directory,
         table: Asset,
-        pdf: impl FnOnce(&Directory, &mut usize) -> Result<Asset>,
+        open_original: impl FnOnce(&Directory, OriginalBookPage, &mut usize) -> Result<Asset>,
         observed: &ReaderFacts,
         mut progress: SourceProgress<'_>,
         mut work: usize,
-        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<(u32, u32)>>,
+        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<OriginalBookPage>>,
     ) -> Result<Option<Self>> {
         let acquisition_deadline = progress.deadline;
         let mut reads_left = SOURCE_READS;
@@ -528,24 +604,23 @@ impl ObservedOriginalPdf {
             &mut source_bytes_left,
             &mut progress,
         )?;
-        let Some((pages, redirect)) = mapping(&raw_table, observed)? else {
+        let Some(page) = mapping(&raw_table, observed)? else {
             let mut work = METADATA_SAMPLE_WORK;
             let current = directory.current(&mut work)?;
             table.current(&current, &mut work)?;
             progress.boundary()?;
             return Ok(None);
         };
-        let pdf = pdf(&directory, &mut work)?;
-        let mut pin = OriginalPdfPin {
+        let original = open_original(&directory, page, &mut work)?;
+        let mut pin = OriginalFilePin {
             directory,
             table,
-            pdf,
+            original,
             samples_left: METADATA_SAMPLES - 1,
-            original_page: redirect + 1,
             expires: acquisition_deadline,
         };
-        let mut bytes = Vec::with_capacity(pin.pdf.stamp.size.try_into()?);
-        let pdf_digest = pin.pdf.read(
+        let mut bytes = Vec::with_capacity(pin.original.stamp.size.try_into()?);
+        let original_digest = pin.original.read(
             Some(&mut bytes),
             &mut reads_left,
             &mut source_bytes_left,
@@ -557,9 +632,9 @@ impl ObservedOriginalPdf {
             observed: observed.clone(),
             pin,
             table_digest,
-            pdf_digest,
+            original_digest,
             bytes,
-            pages,
+            page,
             reads_left,
             source_bytes_left,
             acquisition_deadline,
@@ -605,41 +680,41 @@ impl ObservedOriginalPdf {
         verified: &ReaderFacts,
         executable: &Path,
         deadline: Instant,
-        retained: Option<OrdinaryPdfCache>,
+        retained: Option<OrdinaryBookCache>,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<(CapturedOriginalPdf, Option<OrdinaryPdfCache>)> {
-        use crate::retrieval::pdf_worker::PdfInput;
+    ) -> Result<(CapturedOriginalBook, Option<OrdinaryBookCache>)> {
+        use crate::retrieval::pdf_worker::OriginalInput;
 
         // Each request checks its own table, including pages inserted since the
-        // last answer. Only the original PDF's identity carries across requests.
+        // last answer. Only the original book's identity carries across requests.
         let mut source = self.recheck_verified(verified, progress)?;
         let units = retained
             .filter(|cache| {
                 cache.directory == source.pin.directory.identities
-                    && cache.pdf == source.pin.pdf.stamp
+                    && cache.original == source.pin.original.stamp
             })
             .map(|cache| cache.units);
         let document = Uuid::from_bytes(*verified.page().document.as_bytes());
         let (index, units) = PendingIndex::start_ordinary(
             executable,
-            PdfInput {
+            OriginalInput {
                 document,
                 bytes: &source.bytes,
-                sha256: source.pdf_digest,
-                pages: source.pages,
+                publication: source.publication(),
+                sha256: source.original_digest,
             },
             (source.acquisition_deadline, deadline),
             units,
             progress,
         )?;
-        let cache = units.map(|units| OrdinaryPdfCache {
+        let cache = units.map(|units| OrdinaryBookCache {
             directory: source.pin.directory.identities.clone(),
-            pdf: source.pin.pdf.stamp.clone(),
+            original: source.pin.original.stamp.clone(),
             units,
         });
         source.pin.expires = deadline;
         Ok((
-            CapturedOriginalPdf {
+            CapturedOriginalBook {
                 pin: source.pin,
                 index,
             },
@@ -653,10 +728,7 @@ impl ObservedOriginalPdf {
         verified: &ReaderFacts,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<u32> {
-        Ok(self
-            .recheck_verified(verified, progress)?
-            .pin
-            .original_page())
+        Ok(self.recheck_verified(verified, progress)?.pdf_page()?.1)
     }
 
     fn captured_with_executable(
@@ -701,7 +773,7 @@ impl ObservedOriginalPdf {
             &mut self.source_bytes_left,
             &mut progress,
         )?;
-        let pdf_digest = self.pin.pdf.read(
+        let original_digest = self.pin.original.read(
             None,
             &mut self.reads_left,
             &mut self.source_bytes_left,
@@ -709,8 +781,8 @@ impl ObservedOriginalPdf {
         )?;
         self.pin.check(self.acquisition_deadline)?;
         ensure!(
-            table_digest == self.table_digest && pdf_digest == self.pdf_digest,
-            "Original PDF bytes changed around capture"
+            table_digest == self.table_digest && original_digest == self.original_digest,
+            "Original document bytes changed around capture"
         );
         progress.boundary()?;
         Ok(self)
@@ -723,19 +795,23 @@ impl ObservedOriginalPdf {
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<CapturedOriginalPdf> {
         let document = Uuid::from_bytes(*self.observed.page().document.as_bytes());
+        let (pages, original_page) = self.pdf_page()?;
         let index = PendingIndex::start(
             executable,
             document,
             &self.bytes,
-            self.pdf_digest,
-            self.pages,
+            self.original_digest,
+            pages,
             self.acquisition_deadline,
             request_deadline,
             progress,
         )?;
         self.pin.expires = request_deadline;
         Ok(CapturedOriginalPdf {
-            pin: self.pin,
+            pin: OriginalPdfPin {
+                file: self.pin,
+                original_page,
+            },
             index,
         })
     }
@@ -743,6 +819,12 @@ impl ObservedOriginalPdf {
 
 pub struct CapturedOriginalPdf {
     pub pin: OriginalPdfPin,
+    pub index: PendingIndex,
+}
+
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) struct CapturedOriginalBook {
+    pub pin: OriginalFilePin,
     pub index: PendingIndex,
 }
 
