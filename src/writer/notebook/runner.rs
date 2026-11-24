@@ -63,11 +63,26 @@ pub struct Completed {
     pub finalized: Option<NotebookFinalized>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Check {
+    Boundary,
+    Progress,
+}
+
 pub fn run<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     input: Input,
     canceled: &mut dyn FnMut() -> bool,
+) -> Completed {
+    run_checked(ledger, engine, input, &mut |_| canceled())
+}
+
+pub(crate) fn run_checked<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    input: Input,
+    stopped: &mut dyn FnMut(Check) -> bool,
 ) -> Completed {
     let Some(owner) = super::super::Owner::acquire(ledger.store()) else {
         let mut report = Report::new(&input);
@@ -78,7 +93,7 @@ pub fn run<E: LLMEngine>(
             finalized: None,
         };
     };
-    run_owned(ledger, engine, input, canceled, &owner, Instant::now())
+    run_owned_checked(ledger, engine, input, stopped, &owner, Instant::now())
 }
 impl Report {
     fn new(input: &Input) -> Self {
@@ -113,6 +128,16 @@ pub(crate) fn run_owned<E: LLMEngine>(
     owner: &super::super::Owner<'_>,
     started: Instant,
 ) -> Completed {
+    run_owned_checked(ledger, engine, input, &mut |_| canceled(), owner, started)
+}
+fn run_owned_checked<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    input: Input,
+    stopped: &mut dyn FnMut(Check) -> bool,
+    owner: &super::super::Owner<'_>,
+    started: Instant,
+) -> Completed {
     let mut report = Report::new(&input);
     if !std::ptr::eq(owner.0, ledger.store().as_ref()) {
         report.failure = Some(Failure::InvalidOwner);
@@ -129,7 +154,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         };
     }
     let result = (|| -> Result<Option<NotebookFinalized>> {
-        if canceled() {
+        if stopped(Check::Boundary) {
             report.status = Status::Canceled;
             report.failure = Some(Failure::Canceled);
             return Ok(None);
@@ -146,7 +171,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         let mut runner = Runner {
             ledger,
             engine: &mut *engine,
-            canceled: &mut *canceled,
+            stopped: &mut *stopped,
             report: &mut report,
             started,
         };
@@ -161,7 +186,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         else {
             return Ok(None);
         };
-        if let Some(failure) = final_stop(canceled(), started.elapsed()) {
+        if let Some(failure) = final_stop(stopped(Check::Boundary), started.elapsed()) {
             report.status = Status::Canceled;
             report.failure = Some(failure);
             return Ok(None);
@@ -171,7 +196,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
             report.unobserved_publication = true;
             return Ok(None);
         };
-        if let Some(failure) = final_stop(canceled(), started.elapsed()) {
+        if let Some(failure) = final_stop(stopped(Check::Boundary), started.elapsed()) {
             report.status = Status::Canceled;
             report.failure = Some(failure);
             report.draft = Some(finalized.draft().record_id);
@@ -227,7 +252,7 @@ pub(super) fn run_sequence<C>(
 struct Runner<'a, E> {
     ledger: &'a Ledger,
     engine: &'a mut E,
-    canceled: &'a mut dyn FnMut() -> bool,
+    stopped: &'a mut dyn FnMut(Check) -> bool,
     report: &'a mut Report,
     started: Instant,
 }
@@ -262,10 +287,10 @@ impl<E: LLMEngine> Runner<'_, E> {
         let mut invoked = false;
         let response = {
             let ledger = self.ledger;
-            let canceled = &mut *self.canceled;
+            let stopped = &mut *self.stopped;
             let started = self.started;
-            let mut progress = || -> Result<()> {
-                if canceled() {
+            let mut check = |kind| -> Result<()> {
+                if stopped(kind) {
                     stop = Some(Failure::Canceled);
                     anyhow::bail!("notebook canceled")
                 }
@@ -283,7 +308,7 @@ impl<E: LLMEngine> Runner<'_, E> {
             };
             let content = super::super::Content(&mut *self.engine);
             content.0.clear_content();
-            if progress().is_err() {
+            if check(Check::Boundary).is_err() {
                 None
             } else {
                 for part in parts {
@@ -294,8 +319,10 @@ impl<E: LLMEngine> Runner<'_, E> {
                 }
                 invoked = true;
                 self.report.local_invocations += 1;
-                let response = content.0.execute_with_progress(&mut progress);
-                let _ = progress();
+                let response = content
+                    .0
+                    .execute_with_progress(&mut || check(Check::Progress));
+                let _ = check(Check::Boundary);
                 Some(response)
             }
         };

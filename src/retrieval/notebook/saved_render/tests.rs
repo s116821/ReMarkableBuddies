@@ -18,6 +18,10 @@ fn subblock(target: &mut Vec<u8>, tag: u8, payload: &[u8]) {
 }
 
 fn scene(stroke: Option<(f32, u32)>) -> Vec<u8> {
+    scene_with_samples(stroke.map(|(y, tool)| (y, tool, &[-20.0, 20.0][..])))
+}
+
+fn scene_with_samples(stroke: Option<(f32, u32, &[f32])>) -> Vec<u8> {
     let mut scene = HEADER.to_vec();
     let mut info = Vec::new();
     subblock(&mut info, 0x1c, &[0x1f, 0, 0, 0x2f, 0, 2]);
@@ -42,14 +46,14 @@ fn scene(stroke: Option<(f32, u32)>) -> Vec<u8> {
     subblock(&mut group, 0x6c, &[2, 0x2f, 0, 2]);
     record(&mut scene, 4, 1, &group);
 
-    if let Some((y, tool)) = stroke {
+    if let Some((y, tool, samples)) = stroke {
         let mut ink = vec![3, 0x14];
         ink.extend(tool.to_le_bytes());
         ink.extend([0x24, 0, 0, 0, 0, 0x38]);
         ink.extend(2.0_f64.to_le_bytes());
         ink.extend([0x44, 0, 0, 0, 0]);
         let mut points = Vec::new();
-        for x in [-20_f32, 20_f32] {
+        for &x in samples {
             points.extend(x.to_le_bytes());
             points.extend(y.to_le_bytes());
             points.extend([0, 0, 8, 0, 0, 255]);
@@ -114,6 +118,22 @@ fn saved_render_keeps_blank_page_and_full_extent_in_native_order() -> Result<()>
             Ok(())
         },
     )
+}
+
+#[test]
+fn saved_render_preserves_single_and_repeated_punctuation_dots() -> Result<()> {
+    let mut rasters = Vec::new();
+    for samples in [&[0.0][..], &[0.0, 0.0, 0.0]] {
+        let scene = scene_with_samples(Some((340.0, Pen::FinelinerV2 as u32, samples)));
+        let mut raster = NotebookRaster::default();
+        raster.push(saved_page(Uuid::new_v4(), &scene), &mut || Ok(()))?;
+        let image = image::load_from_memory(&raster.originals[0].1)?.to_luma8();
+        assert!(image.get_pixel(DEFAULT_WIDTH / 2, 340)[0] < 240);
+        assert_eq!(image.get_pixel(DEFAULT_WIDTH / 2 + 6, 340)[0], 255);
+        rasters.push(image);
+    }
+    assert_eq!(rasters[0], rasters[1]);
+    Ok(())
 }
 
 #[test]

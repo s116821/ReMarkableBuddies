@@ -1,10 +1,10 @@
 //! Installed whole-notebook Writer uses the saved source owner and local rasterizer.
 use super::{
-    current_page_writer::{PreparedWriterCapture, WriterCapture},
+    current_page_writer::{require_same_resident_source, PreparedWriterCapture, WriterCapture},
     Dispatch, Orchestrator, Workflow,
 };
 use crate::{
-    conversation::{Ledger, ResidentSourceCapture},
+    conversation::{Ledger, ResidentSourceCapture, SourceObservation},
     llm::LLMEngine,
     retrieval::notebook::{
         saved_render::{NotebookRaster, SavedPage},
@@ -12,7 +12,7 @@ use crate::{
     },
     storage::Uuid,
     workflow::{
-        conversation_dispatch::RequestScope,
+        conversation_dispatch::{NotebookVisit, RequestScope},
         resident_output::{format_exchange, ResidentOutputText},
         saved_notebook::{
             acquire_saved_notebook, acquire_saved_notebook_with_pages, NotebookSourceAcquisition,
@@ -133,20 +133,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                 &receipt,
                 model_profile,
                 &admitted,
-                &mut || {
-                    let current = read_saved_source(
-                        &mut self.workflow,
-                        &self.ledger,
-                        facts,
-                        generation_deadline,
-                    )?;
-                    ensure!(
-                        current.original_pages() == saved.original_pages(),
-                        "notebook source page ownership changed"
-                    );
-                    let mut observed = source.clone();
-                    current.bind_content_revision(&mut observed)?;
-                    Ok(observed)
+                &mut ResidentNotebookVisit {
+                    workflow: &mut self.workflow,
+                    ledger: &self.ledger,
+                    facts,
+                    source: &source,
+                    saved: &saved,
+                    deadline: generation_deadline,
                 },
             )
         })?;
@@ -176,6 +169,33 @@ impl<M: LLMEngine> Orchestrator<M> {
             ResidentOutputText::WriterSourceDraft(&text),
             association.as_ref(),
         )
+    }
+}
+
+struct ResidentNotebookVisit<'a> {
+    workflow: &'a mut Workflow,
+    ledger: &'a Ledger,
+    facts: &'a ReaderFacts,
+    source: &'a SourceObservation,
+    saved: &'a SavedNotebookSource,
+    deadline: Instant,
+}
+
+impl NotebookVisit for ResidentNotebookVisit<'_> {
+    fn observe(&mut self) -> Result<SourceObservation> {
+        let current = read_saved_source(self.workflow, self.ledger, self.facts, self.deadline)?;
+        ensure!(
+            current.original_pages() == self.saved.original_pages(),
+            "notebook source page ownership changed"
+        );
+        require_same_resident_source(self.workflow, self.deadline)?;
+        let mut observed = self.source.clone();
+        current.bind_content_revision(&mut observed)?;
+        Ok(observed)
+    }
+
+    fn progress(&mut self) -> Result<()> {
+        self.workflow.check_request_progress()
     }
 }
 

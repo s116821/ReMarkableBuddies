@@ -732,50 +732,56 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     model.seen.clear();
 
     let draft_text = "# Study note\n\nExamples from pages 1 and 4.";
-    let interrupted_conversation = Uuid::new_v4();
-    ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
-    let interrupted = scope(&ledger, interrupted_conversation, &source)?;
-    let reducer = NotebookStage::identity(interrupted.operation, NotebookStageKind::Reduce, 0);
-    let mut changed = false;
-    let mut observe_until_publication = || {
-        if let Some(envelope) = ledger.store().value(Namespace::Conversation, reducer)? {
-            let Record::NotebookStage(stage) = Ledger::decode(&envelope)? else {
-                anyhow::bail!("expected reducer stage");
-            };
-            if stage.outcome == Some(NotebookStageOutcome::Generated) {
-                changed = true;
-                return Ok(revised_source.clone());
+    let mut navigated_source = source.clone();
+    navigated_source.page = last;
+    assert_eq!(navigated_source.content_revision, source.content_revision);
+    assert_eq!(navigated_source.order_revision, source.order_revision);
+    for current_source in [&revised_source, &navigated_source] {
+        let interrupted_conversation = Uuid::new_v4();
+        ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
+        let interrupted = scope(&ledger, interrupted_conversation, &source)?;
+        let reducer = NotebookStage::identity(interrupted.operation, NotebookStageKind::Reduce, 0);
+        let mut changed = false;
+        let mut observe_until_publication = || {
+            if let Some(envelope) = ledger.store().value(Namespace::Conversation, reducer)? {
+                let Record::NotebookStage(stage) = Ledger::decode(&envelope)? else {
+                    anyhow::bail!("expected reducer stage");
+                };
+                if stage.outcome == Some(NotebookStageOutcome::Generated) {
+                    changed = true;
+                    return Ok(current_source.clone());
+                }
             }
-        }
-        Ok(source.clone())
-    };
-    let mut interrupted_model = Model::default();
-    interrupted_model.replies.extend([
-        transcript.to_string(),
-        "Ordered source coverage from pages 1 and 4.".into(),
-        draft_text.into(),
-    ]);
-    let (stopped, pending) = dispatch.whole_notebook(
-        &ledger,
-        &mut interrupted_model,
-        request,
-        &images,
-        &receipt,
-        "fixture",
-        &interrupted,
-        &mut observe_until_publication,
-    )?;
-    assert!(changed);
-    assert_eq!(interrupted_model.seen.len(), 3);
-    assert_eq!(stopped.status, Status::Canceled);
-    assert!(pending.is_none() && stopped.draft.is_none());
-    assert!(ledger
-        .store()
-        .value(
-            Namespace::Conversation,
-            writer::stage(interrupted.operation, "draft"),
-        )?
-        .is_none());
+            Ok(source.clone())
+        };
+        let mut interrupted_model = Model::default();
+        interrupted_model.replies.extend([
+            transcript.to_string(),
+            "Ordered source coverage from pages 1 and 4.".into(),
+            draft_text.into(),
+        ]);
+        let (stopped, pending) = dispatch.whole_notebook(
+            &ledger,
+            &mut interrupted_model,
+            request,
+            &images,
+            &receipt,
+            "fixture",
+            &interrupted,
+            &mut observe_until_publication,
+        )?;
+        assert!(changed);
+        assert_eq!(interrupted_model.seen.len(), 3);
+        assert_eq!(stopped.status, Status::Canceled);
+        assert!(pending.is_none() && stopped.draft.is_none());
+        assert!(ledger
+            .store()
+            .value(
+                Namespace::Conversation,
+                writer::stage(interrupted.operation, "draft"),
+            )?
+            .is_none());
+    }
 
     model.replies.extend([
         transcript.to_string(),

@@ -708,7 +708,7 @@ impl<'a> Dispatch<'a> {
         receipt: &NotebookSourceReceipt,
         model_profile: &str,
         admitted: &RequestScope,
-        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+        visit: &mut dyn NotebookVisit,
     ) -> Result<(writer::notebook::runner::Report, Option<PendingOutput>)> {
         use writer::notebook::{command::Request, ValidatedNotebook};
 
@@ -732,7 +732,7 @@ impl<'a> Dispatch<'a> {
             request: text.into(),
         };
         request.preflight()?;
-        admitted.check(ledger, observe)?;
+        admitted.check(ledger, &mut || visit.observe())?;
         ensure!(
             ledger
                 .store()
@@ -748,11 +748,22 @@ impl<'a> Dispatch<'a> {
             &receipt.ordered_image_sha256,
             model_profile,
             engine,
-            &mut |_| admitted.check(ledger, observe),
+            &mut |progress| {
+                use crate::retrieval::notebook::Progress;
+                match progress {
+                    Progress::BeforeDispatch | Progress::AfterResponse => {
+                        admitted.check(ledger, &mut || visit.observe())
+                    }
+                    _ => {
+                        visit.progress()?;
+                        admitted.check_root(ledger)
+                    }
+                }
+            },
         )?;
         let bytes = serde_json::to_vec(&normalized)?;
         let frozen = ValidatedNotebook::from_bytes(&bytes, &crate::storage::digest(&bytes))?;
-        self.notebook(ledger, engine, &request, Some(frozen), admitted, observe)
+        self.notebook(ledger, engine, &request, Some(frozen), admitted, visit)
     }
 
     pub(crate) fn notebook<E: LLMEngine>(
@@ -762,7 +773,7 @@ impl<'a> Dispatch<'a> {
         request: &writer::notebook::command::Request,
         frozen: Option<writer::notebook::ValidatedNotebook>,
         admitted: &RequestScope,
-        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+        visit: &mut dyn NotebookVisit,
     ) -> Result<(writer::notebook::runner::Report, Option<PendingOutput>)> {
         use writer::notebook::{command, runner};
         self.require_ledger(ledger)?;
@@ -772,7 +783,7 @@ impl<'a> Dispatch<'a> {
                 && request.operation() == admitted.operation,
             "notebook request identity changed"
         );
-        admitted.check(ledger, observe)?;
+        admitted.check(ledger, &mut || visit.observe())?;
         let input = command::prepare_receiving(
             ledger,
             request,
@@ -782,9 +793,12 @@ impl<'a> Dispatch<'a> {
             admitted.source.document,
             self.memory.as_deref(),
         )?;
-        admitted.check(ledger, observe)?;
-        let result = runner::run(ledger, engine, input, &mut || {
-            !observe().is_ok_and(|current| current == admitted.source)
+        admitted.check(ledger, &mut || visit.observe())?;
+        let result = runner::run_checked(ledger, engine, input, &mut |check| match check {
+            runner::Check::Boundary => !visit
+                .observe()
+                .is_ok_and(|current| current == admitted.source),
+            runner::Check::Progress => visit.progress().is_err(),
         });
         let output = result.finalized.map(|finalized| PendingOutput {
             id: finalized.draft().record_id,
@@ -1022,6 +1036,23 @@ pub(crate) enum ExportDecision {
     Attempt(Box<crate::writer_flow::Report>),
 }
 
+/// A notebook owner observes the visit and saved source at operation boundaries.
+/// The cheap progress pulse services the same input and cancellation guard.
+pub(crate) trait NotebookVisit {
+    fn observe(&mut self) -> Result<SourceObservation>;
+    fn progress(&mut self) -> Result<()>;
+}
+
+impl<F: FnMut() -> Result<SourceObservation>> NotebookVisit for F {
+    fn observe(&mut self) -> Result<SourceObservation> {
+        self()
+    }
+
+    fn progress(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 /// The input owner supplies an observation and stable event identity. A raw
 /// Interaction cannot construct these facts.
 pub(crate) struct RequestScope {
@@ -1038,6 +1069,10 @@ impl RequestScope {
         observe: &mut dyn FnMut() -> Result<SourceObservation>,
     ) -> Result<()> {
         self.check_source(observe)?;
+        self.check_root(ledger)
+    }
+
+    fn check_root(&self, ledger: &Ledger) -> Result<()> {
         ensure!(
             self.root.0.len() == 1
                 && ledger.expected(Namespace::Conversation, self.conversation)? == self.root,

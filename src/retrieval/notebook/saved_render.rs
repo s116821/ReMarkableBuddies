@@ -302,7 +302,6 @@ fn strict_value_end(value: &Reader<'_>) -> Result<(), remarkable_rm::ParseError>
 }
 
 fn ink_bottom(line: &Line) -> Result<f32> {
-    let first = line.points.first().context("saved stroke has no points")?;
     ensure!(
         line.tool == Pen::FinelinerV2
             && line.color == PenColor::Black
@@ -310,10 +309,7 @@ fn ink_bottom(line: &Line) -> Result<f32> {
             && (0.5..=12.0).contains(&line.thickness_scale)
             && line.starting_length == 0.0
             && line.move_id.is_none()
-            && line
-                .points
-                .iter()
-                .any(|point| (point.x, point.y) != (first.x, first.y)),
+            && !line.points.is_empty(),
         "saved stroke is outside the supported ink profile"
     );
     let half_width = DEFAULT_WIDTH as f32 / 2.0;
