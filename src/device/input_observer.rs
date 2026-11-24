@@ -170,6 +170,14 @@ struct Source {
     identity: Identity,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GestureClock {
+    Unavailable,
+    FirstEvent,
+    Ready,
+    LostAtSetup,
+}
+
 pub struct InputObserver {
     sources: Vec<Source>,
     inventory: BTreeMap<PathBuf, Identity>,
@@ -177,7 +185,7 @@ pub struct InputObserver {
     reducer: ContactReducer,
     model: DeviceModel,
     clock: Instant,
-    touch_uses_boot_clock: bool,
+    gesture_clock: GestureClock,
     reader_release_second: Option<u64>,
     lost: bool,
     initial_input: bool,
@@ -237,7 +245,7 @@ impl InputObserver {
         let mut sources = Vec::new();
         let mut frames = None;
         let mut initial_input = false;
-        let mut touch_uses_boot_clock = false;
+        let mut gesture_clock = GestureClock::Unavailable;
         for (path, identity) in &inventory_before {
             if owned.as_ref() == Some(&identity.sysfs) {
                 ensure!(path != touch_path, "Cannot exclude the touch device");
@@ -248,12 +256,13 @@ impl InputObserver {
                 .custom_flags(nix::libc::O_NONBLOCK)
                 .open(path)?;
             let touch = path == touch_path;
-            if touch && timestamp_release {
-                // Select the clock before seeding contacts or reading events.
-                // Unsupported clocks leave Reader and blank-start available.
-                touch_uses_boot_clock =
-                    unsafe { set_event_clock(file.as_raw_fd(), &nix::libc::CLOCK_BOOTTIME) }
-                        .is_ok();
+            // Select the clock before seeding contacts or reading events.
+            // Unsupported clocks leave Reader and blank-start available.
+            if touch
+                && timestamp_release
+                && unsafe { set_event_clock(file.as_raw_fd(), &nix::libc::CLOCK_BOOTTIME) }.is_ok()
+            {
+                gesture_clock = GestureClock::FirstEvent;
             }
             let device = RawDevice::from_fd(file.into())?;
             if touch {
@@ -285,7 +294,7 @@ impl InputObserver {
             reducer: ContactReducer::new(corner),
             model,
             clock: Instant::now(),
-            touch_uses_boot_clock,
+            gesture_clock,
             reader_release_second: None,
             lost: false,
             initial_input,
@@ -321,6 +330,10 @@ impl InputObserver {
 
     pub(super) fn reader_release_second(&self) -> Option<u64> {
         self.reader_release_second
+    }
+
+    pub(super) fn lost_initial_clock_frame(&self) -> bool {
+        self.lost && self.gesture_clock == GestureClock::LostAtSetup
     }
 
     /// Call frequently, including while waiting for persistence. A failed poll
@@ -533,7 +546,11 @@ impl InputObserver {
             }
             ensure!(events.len() <= 8192, "Input observer event limit");
             let touch = source.touch;
-            let timestamp_touch = touch && self.touch_uses_boot_clock;
+            let timestamp_touch = touch
+                && matches!(
+                    self.gesture_clock,
+                    GestureClock::FirstEvent | GestureClock::Ready
+                );
             self.feed_events(
                 touch,
                 events.into_iter().map(|event| {
@@ -571,6 +588,15 @@ impl InputObserver {
                     output.push(self.reducer.cancel());
                 }
                 continue;
+            }
+            if self.gesture_clock == GestureClock::FirstEvent {
+                // Switching clocks can discard queued input on this new client.
+                // Only its very first event can identify this setup boundary.
+                self.gesture_clock = if (kind, code) == (0, 3) {
+                    GestureClock::LostAtSetup
+                } else {
+                    GestureClock::Ready
+                };
             }
             // Finger-count hints are checked against the complete slots.
             // Other buttons are unrelated actions and invalidate history.
@@ -711,7 +737,7 @@ impl InputObserver {
             reducer: ContactReducer::new(TriggerCorner::LowerLeft),
             model: DeviceModel::Remarkable2,
             clock: Instant::now(),
-            touch_uses_boot_clock: false,
+            gesture_clock: GestureClock::Unavailable,
             reader_release_second: None,
             lost: false,
             initial_input: false,
@@ -822,6 +848,46 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
 #[cfg(test)]
 mod gesture_clock_tests {
     use super::*;
+
+    #[test]
+    fn lost_first_clocked_frame_reseeds_before_accepting_a_fresh_gesture() {
+        use crate::device::request_input::{RequestInput, ResidentGesture};
+        let mut opened = Vec::new();
+        let released = RequestInput::wait_for_gesture_with(
+            TriggerCorner::LowerRight,
+            true,
+            true,
+            &mut || Ok(()),
+            |clock| {
+                opened.push(clock);
+                match opened.len() {
+                    1 => {
+                        let mut idle = InputObserver::replay_request(vec![(true, vec![(0, 3, 0)])]);
+                        idle.gesture_clock = GestureClock::FirstEvent;
+                        Ok(idle)
+                    }
+                    2 => Ok(InputObserver::scripted(vec![
+                        Ok(vec![Interaction::BlankStart]),
+                        Ok(vec![]),
+                    ])),
+                    3 => Ok(InputObserver::scripted(vec![Ok(vec![])])),
+                    _ => panic!("unexpected input reopen"),
+                }
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(opened, [true, false, false]);
+        assert_eq!(released.gesture, ResidentGesture::BlankStart);
+        assert_eq!(released.released_boot_second, None);
+
+        // A drop after the first intact touch frame remains fatal.
+        let mut established =
+            InputObserver::replay_request(vec![(true, vec![(0, 0, 0), (0, 3, 0)])]);
+        established.gesture_clock = GestureClock::FirstEvent;
+        assert!(established.poll().is_err());
+        assert!(!established.lost_initial_clock_frame());
+    }
 
     #[test]
     fn late_poll_preserves_the_release_frames_boot_second_or_leaves_it_unknown() {

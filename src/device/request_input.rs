@@ -44,17 +44,44 @@ impl RequestInput {
         timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<ReleasedReaderInput> {
-        let mut input = InputObserver::open(corner.clone(), None, timestamp_release)?;
-        if blank_start {
-            input.enable_blank_start();
-        }
-        Self::wait_released_with(
-            &mut input,
+        Self::wait_for_gesture_with(
             corner.clone(),
+            blank_start,
+            timestamp_release,
             progress,
-            || InputObserver::new(corner.clone(), None),
+            |clock| InputObserver::open(corner.clone(), None, clock),
             || std::thread::sleep(Duration::from_millis(10)),
         )
+    }
+
+    pub(super) fn wait_for_gesture_with(
+        corner: TriggerCorner,
+        blank_start: bool,
+        timestamp_release: bool,
+        progress: &mut dyn FnMut() -> Result<()>,
+        mut open: impl FnMut(bool) -> Result<InputObserver>,
+        mut pace: impl FnMut(),
+    ) -> Result<ReleasedReaderInput> {
+        let mut use_clock = timestamp_release;
+        loop {
+            let mut input = open(use_clock)?;
+            if blank_start {
+                input.enable_blank_start();
+            }
+            let result = Self::wait_released_with(
+                &mut input,
+                corner.clone(),
+                progress,
+                || open(false),
+                &mut pace,
+            );
+            if !use_clock || !input.lost_initial_clock_frame() {
+                return result;
+            }
+            // No gesture was ever observed on this client. Drop it completely
+            // and reseed once on a fresh descriptor for the next gesture.
+            use_clock = false;
+        }
     }
     fn wait_released_with(
         prior: &mut InputObserver,
