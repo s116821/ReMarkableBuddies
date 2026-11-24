@@ -634,32 +634,34 @@ impl<M: LLMEngine> Orchestrator<M> {
             };
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
-            let mut output_started = false;
+            let mut pending_root = None;
             let rendered = self.workflow.render_resident_answer(
                 &self.ledger,
                 conversation,
                 text,
                 association.as_ref(),
                 &mut || {
-                    if !output_started {
-                        attempt.outcome(
-                            &self.ledger,
-                            true,
-                            Outcome::ReconcileRequired,
-                            AttemptReason::OutputPending,
-                        )?;
-                        output_started = true;
+                    if pending_root.is_none() {
+                        pending_root = Some(attempt.start_resident_output(&self.ledger)?);
                     }
                     Ok(())
                 },
             );
             let recorded = match &rendered {
-                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => attempt.outcome(
-                    &self.ledger,
-                    true,
-                    Outcome::Failed,
-                    AttemptReason::NativeOutputUnavailable,
-                ),
+                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => {
+                    if let Some(root) = pending_root {
+                        // Placement verified the return to the source before refusing
+                        // text. It issued no insert and sent no text to the keyboard.
+                        attempt.refuse_after_restored_page(&self.ledger, root)
+                    } else {
+                        attempt.outcome(
+                            &self.ledger,
+                            true,
+                            Outcome::Failed,
+                            AttemptReason::NativeOutputUnavailable,
+                        )
+                    }
+                }
                 Ok(super::resident_output::ResidentOutputOutcome::InsertionRefused) => attempt
                     .outcome(
                         &self.ledger,
@@ -688,7 +690,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         AttemptReason::NativeOutputUnavailable,
                     ),
                 Err(_)
-                    if !output_started
+                    if pending_root.is_none()
                         && self.workflow.input_failed()
                         && !self.workflow.runtime_failed() =>
                 {
