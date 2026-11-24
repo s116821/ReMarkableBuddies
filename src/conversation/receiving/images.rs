@@ -27,6 +27,16 @@ pub(crate) struct Association {
     dimensions: [u32; 2],
     attachment_index: usize,
     sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reader_target: Option<ReaderTarget>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReaderTarget {
+    turn: Uuid,
+    document: Uuid,
+    page: Uuid,
+    normalized: [f64; 2],
 }
 
 pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> {
@@ -214,9 +224,9 @@ pub(crate) fn resolve_with(
     let mut proven_captures = BTreeSet::new();
     for source in &ordered_sources {
         if let Some(images) = by_source.remove(source) {
-            let capture = resident.get(source).copied();
-            let proof = capture.map(serde_json::to_vec).transpose()?;
-            if let Some(capture) = capture.filter(|_| {
+            let resident_capture = resident.get(source).copied();
+            let proof = resident_capture.map(serde_json::to_vec).transpose()?;
+            if let Some(capture) = resident_capture.filter(|_| {
                 // Target aliases of the same frozen capture share one proof.
                 // Different capture metadata still consumes independent work.
                 proven_captures.insert(proof.expect("capture descriptor encoded"))
@@ -281,6 +291,16 @@ pub(crate) fn resolve_with(
                     dimensions,
                     attachment_index,
                     sha256: media.sha256,
+                    reader_target: resident_capture
+                        .filter(|capture| ordinal == 0 && capture.id == *source)
+                        .and_then(|capture| {
+                            capture.reader_target.map(|normalized| ReaderTarget {
+                                turn: capture.turn,
+                                document: capture.before.document,
+                                page: capture.before.page,
+                                normalized,
+                            })
+                        }),
                 });
             }
         }

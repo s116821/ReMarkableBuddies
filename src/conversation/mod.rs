@@ -590,6 +590,7 @@ impl Ledger {
             }
             return Ok((result, true));
         }
+        let observed = published.map(|output| (output, records.clone()));
         let result = self.store.commit_with_disposition(records, BTreeMap::new());
         // A committed-but-lost acknowledgment, or a concurrent identical winner,
         // is recognized before propagating stale-head/injected-error outcomes.
@@ -599,6 +600,9 @@ impl Ledger {
             // durable commit or a concurrent winner remains historical.
             let fresh = result.is_ok_and(|(_, changed)| changed)
                 && prior.historical.applied_root_revision == root_revision;
+            if let Some((output, records)) = observed.filter(|_| fresh) {
+                *output = records;
+            }
             return Ok((prior, fresh));
         }
         result?;
@@ -1304,7 +1308,26 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
     ) -> Result<WriteResult> {
-        self.advance_fact(operation, expected_root, expected_turn, turn, None)
+        self.advance_fact(operation, expected_root, expected_turn, turn, None, None)
+    }
+
+    pub(crate) fn interpret_installed_reader(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        capture: Uuid,
+        target: crate::analysis::SelectionCenter,
+    ) -> Result<WriteResult> {
+        self.advance_fact(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            None,
+            Some((capture, target.normalized())),
+        )
     }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
     pub fn record_attempt_outcome(
@@ -1322,7 +1345,14 @@ impl Ledger {
             ),
             "attempt outcome must remain unverified"
         );
-        self.advance_fact(operation, expected_root, expected_turn, turn, Some(reason))
+        self.advance_fact(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            Some(reason),
+            None,
+        )
     }
     fn advance_fact(
         &self,
@@ -1331,17 +1361,7 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
         reason: Option<AttemptReason>,
-    ) -> Result<WriteResult> {
-        self.advance_fact_target(operation, expected_root, expected_turn, turn, reason, None)
-    }
-    fn advance_fact_target(
-        &self,
-        operation: Uuid,
-        expected_root: ExpectedHeads,
-        expected_turn: ExpectedHeads,
-        turn: Turn,
-        reason: Option<AttemptReason>,
-        target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+        resident_target: Option<(Uuid, [f64; 2])>,
     ) -> Result<WriteResult> {
         self.advance_with_capture(
             operation,
@@ -1349,7 +1369,8 @@ impl Ledger {
             expected_turn,
             turn,
             reason,
-            target,
+            None,
+            resident_target,
             None,
             None,
             None,
@@ -1372,6 +1393,7 @@ impl Ledger {
             turn,
             None,
             None,
+            None,
             Some(captured),
             None,
             None,
@@ -1388,18 +1410,31 @@ impl Ledger {
         turn: Turn,
         reason: Option<AttemptReason>,
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
+        resident_target: Option<(Uuid, [f64; 2])>,
         captured: Option<&crate::storage::captured::Captured>,
         marked: Option<marked_question::PreparedMark>,
         published: Option<&mut Vec<Envelope>>,
     ) -> Result<(WriteResult, Option<marked_question::FreshMarkedQuestion>)> {
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
-            Self::fingerprint(&(
-                "interpret-source-target-v1",
-                &turn,
-                frame.source(),
-                candidate,
-            ))?
+            if let Some(resident) = resident_target {
+                Self::fingerprint(&(
+                    "interpret-installed-source-target-v1",
+                    &turn,
+                    frame.source(),
+                    candidate,
+                    resident,
+                ))?
+            } else {
+                Self::fingerprint(&(
+                    "interpret-source-target-v1",
+                    &turn,
+                    frame.source(),
+                    candidate,
+                ))?
+            }
+        } else if let Some(target) = resident_target {
+            Self::fingerprint(&("interpret-installed-reader", &turn, target))?
         } else if let Some(reason) = &reason {
             Self::fingerprint(&("attempt-outcome", &turn, reason))?
         } else {
@@ -1493,8 +1528,13 @@ impl Ledger {
         ) {
             ensure!(original.text == turn.text, "generated draft text changed");
         }
+        let capture = resident_target
+            .map(|(id, target)| self.interpreted_resident_capture(&turn, id, target))
+            .transpose()?;
         let target_records = target
-            .map(|(frame, candidate)| self.target_interpretation_records(&turn, frame, candidate))
+            .map(|(frame, candidate)| {
+                self.target_interpretation_records(&turn, frame, candidate, capture.as_ref())
+            })
             .transpose()?;
         let outcome = turn.outcome.clone();
         let turn_id = turn.id;
@@ -1519,6 +1559,7 @@ impl Ledger {
         if let Some(target_records) = target_records {
             records.extend(target_records);
         }
+        records.extend(capture);
         if let Some(reason) = reason {
             let id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
@@ -1579,8 +1620,16 @@ impl Ledger {
             };
             Ok((result, Some(fresh)))
         } else if target.is_some() {
-            let (result, fresh) =
-                self.publish_observed(operation, fingerprint, root, records, binding)?;
+            let (result, fresh) = self.publish_with_capture(
+                operation,
+                fingerprint,
+                root,
+                records,
+                binding,
+                None,
+                published,
+                None,
+            )?;
             ensure!(
                 fresh,
                 "target interpretation is historical; no continuation admitted"

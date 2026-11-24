@@ -171,6 +171,11 @@ while True:
                     response[146] ^= 1
                 send(response)
                 continue
+            if mode in ("reconnect-source-handoff-current-rejected", "reconnect-source-handoff-current-indeterminate") and request[202:204] == b"\x02\x01":
+                assert request[204:-16] == source_facts and request[-16:] != source_page
+                reply = b"\x03\x02" if mode.endswith("-rejected") else b"\x04"
+                send(request[:202] + b"\x03" + digest + reply)
+                continue
             if mode in ("reconnect-source-handoff-indeterminate", "reconnect-source-handoff-indeterminate-successor",
                         "reconnect-source-handoff-rejected") and request[202:204] == b"\x02\x01":
                 assert count == 1 and request[204:220] != source_facts[:16]

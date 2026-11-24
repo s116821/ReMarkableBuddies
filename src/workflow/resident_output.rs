@@ -34,6 +34,8 @@ pub enum PageUse {
 pub enum ResidentOutputOutcome {
     Unavailable,
     Unresolved,
+    /// The SDK explicitly rejected this insertion without applying it.
+    InsertionRefused,
     ReusedWithoutWrite,
     /// Rendering was submitted under the backend lease; persistence not implied.
     SubmittedUnverified,

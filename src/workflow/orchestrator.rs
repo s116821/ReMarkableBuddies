@@ -346,6 +346,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             ResidentOutputOutcome::ReusedWithoutWrite => {
                 info!("Blank conversation reopened on existing bound page")
             }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("blank conversation page insertion was refused");
+            }
             ResidentOutputOutcome::Unavailable | ResidentOutputOutcome::Unresolved => {
                 anyhow::bail!("blank conversation page placement unresolved");
             }
@@ -463,17 +466,21 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let text = format!("{title}\n\n{body}\n");
         self.workflow.validate_resident_new_page_text(&text)?;
-        anyhow::ensure!(
-            self.workflow.render_resident_answer(
-                &self.ledger,
-                *conversation,
-                super::resident_output::ResidentOutputText::Plain(&text),
-                association.as_ref(),
-                &mut || Ok(())
-            )? == ResidentOutputOutcome::SubmittedUnverified,
-            "Writer draft generated but native placement is unresolved"
-        );
-        info!("Writer refinement submitted to the resident page");
+        match self.workflow.render_resident_answer(
+            &self.ledger,
+            *conversation,
+            super::resident_output::ResidentOutputText::Plain(&text),
+            association.as_ref(),
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Writer refinement submitted to the resident page");
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("Writer draft generated, but page insertion was refused");
+            }
+            _ => anyhow::bail!("Writer draft generated but native placement is unresolved"),
+        }
         Ok(())
     }
 
@@ -568,6 +575,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         &marked.text,
                         marked.region,
                         marked.target.as_ref(),
+                        None,
                     )?;
                     if let (Some(fresh), Some(destination)) = (fresh, attempt.marked_destination) {
                         return self.workflow.present_marked_question(
@@ -624,6 +632,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
+                let installed_center = (self.workflow.uses_installed_reader_history()
+                    && attempt.resident_output())
+                .then_some(result.selection_center);
                 let mut fresh =
                     if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
                         self.workflow.check_request_progress()?;
@@ -632,12 +643,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                             &result.question,
                             marked.region,
                             result.target.as_ref(),
+                            installed_center,
                         )?
                     } else {
                         attempt.interpret_source_target(
                             &self.ledger,
                             &result.question,
                             result.target.as_ref(),
+                            installed_center,
                         )?;
                         None
                     };
@@ -792,7 +805,13 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated_with_memory(&self.ledger, Self::compose_result(result), memory)?;
+        let stored_answer =
+            if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
+                result.answer.clone()
+            } else {
+                Self::compose_result(result)
+            };
+        attempt.generated_with_memory(&self.ledger, stored_answer, memory)?;
         if attempt.is_selected() {
             if attempt.selected_resident() {
                 return Ok(());
@@ -844,6 +863,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                     Outcome::Failed,
                     AttemptReason::NativeOutputUnavailable,
                 ),
+                Ok(super::resident_output::ResidentOutputOutcome::InsertionRefused) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NoSuccessor,
+                    ),
                 Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt.outcome(
                     &self.ledger,
                     true,

@@ -689,6 +689,7 @@ impl Attempt {
         ledger: &Ledger,
         text: &str,
         candidate: Option<&crate::conversation::target::Candidate>,
+        installed_center: Option<crate::analysis::SelectionCenter>,
     ) -> Result<()> {
         let unresolved = unresolved_target();
         let candidate = candidate.unwrap_or(&unresolved);
@@ -697,21 +698,20 @@ impl Attempt {
             return Ok(());
         }
         let Some(frame) = self.target_frame.as_mut() else {
-            return self.interpret(ledger, text);
+            return self.interpret_with_selection(ledger, text, installed_center);
         };
         let mut user = self.user.clone();
         user.text = Some(text.into());
         user.outcome = Outcome::Interpreted;
         user.updated_ms = now()?;
-        let result = ledger.advance_with_source_target(
+        ledger.advance_with_source_target(
             Uuid::new_v4(),
-            frame.expected_root(),
             ledger.expected(Namespace::Conversation, user.id)?,
             user.clone(),
             frame,
             candidate,
+            installed_center,
         )?;
-        frame.acknowledge(ledger, &result)?;
         self.user = user;
         Ok(())
     }
@@ -722,6 +722,7 @@ impl Attempt {
         text: &str,
         region: [i32; 4],
         candidate: Option<&crate::conversation::target::Candidate>,
+        installed_center: Option<crate::analysis::SelectionCenter>,
     ) -> Result<Option<marked_question::FreshMarkedQuestion>> {
         anyhow::ensure!(!self.is_selected(), "marked question is ordinary only");
         // Only the modeled SDK batch currently supplies the exact capture
@@ -729,7 +730,7 @@ impl Attempt {
         // association until the installed capture owner supplies these facts.
         let Some(captured) = self.marked_capture.as_ref() else {
             log::debug!("Marked question has no admitted full-frame source association");
-            self.interpret_source_target(ledger, text, candidate)?;
+            self.interpret_source_target(ledger, text, candidate, installed_center)?;
             return Ok(None);
         };
         let (envelope, _) = captured
@@ -747,7 +748,7 @@ impl Attempt {
                 || !overview.full_frame_of(&capture.facts.native_parent)
         }) {
             log::debug!("Marked question overview does not match the full-page coordinate frame");
-            self.interpret_source_target(ledger, text, candidate)?;
+            self.interpret_source_target(ledger, text, candidate, installed_center)?;
             return Ok(None);
         }
         let source = crate::conversation::marked_question::modeled_source(&capture.facts);
@@ -819,8 +820,22 @@ impl Attempt {
             .written;
         Ok(())
     }
+    #[cfg(test)]
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
+        self.interpret_with_selection(ledger, text, None)
+    }
+
+    pub(super) fn interpret_with_selection(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        target: Option<crate::analysis::SelectionCenter>,
+    ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
+            anyhow::ensure!(
+                target.is_none(),
+                "selected Reader interpretation uses selected storage"
+            );
             let acknowledgment = selected.write(text, false, None)?;
             self.user = acknowledgment.written;
             return Ok(());
@@ -833,12 +848,22 @@ impl Attempt {
         turn.text = Some(text.into());
         turn.outcome = Outcome::Interpreted;
         turn.updated_ms = now()?;
-        ledger.advance(
-            Uuid::new_v4(),
-            ledger.expected(Namespace::Conversation, turn.conversation)?,
-            ledger.expected(Namespace::Conversation, turn.id)?,
-            turn.clone(),
-        )?;
+        let operation = Uuid::new_v4();
+        let root = ledger.expected(Namespace::Conversation, turn.conversation)?;
+        let expected = ledger.expected(Namespace::Conversation, turn.id)?;
+        if let Some(target) = target {
+            anyhow::ensure!(self.resident_output(), "installed Reader capture required");
+            ledger.interpret_installed_reader(
+                operation,
+                root,
+                expected,
+                turn.clone(),
+                self.evidence,
+                target,
+            )?;
+        } else {
+            ledger.advance(operation, root, expected, turn.clone())?;
+        }
         self.user = turn;
         Ok(())
     }

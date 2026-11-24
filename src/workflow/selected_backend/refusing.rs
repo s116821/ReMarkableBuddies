@@ -17,6 +17,8 @@ enum ReadOnlyTransport {
 pub(in crate::workflow) struct RefusingBackend {
     #[cfg(test)]
     transport: ReadOnlyTransport,
+    #[cfg(all(test, target_os = "linux"))]
+    output: Option<Box<dyn crate::workflow::resident_output::ResidentOutputBackend>>,
 }
 impl RefusingBackend {
     #[cfg(test)]
@@ -30,6 +32,8 @@ impl RefusingBackend {
         Self {
             #[cfg(test)]
             transport: ReadOnlyTransport::Unavailable,
+            #[cfg(all(test, target_os = "linux"))]
+            output: None,
         }
     }
     #[cfg(all(test, target_os = "linux"))]
@@ -38,7 +42,16 @@ impl RefusingBackend {
     ) -> Self {
         Self {
             transport: ReadOnlyTransport::Resident(releases.into()),
+            output: None,
         }
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::workflow) fn with_test_output(
+        mut self,
+        output: Box<dyn crate::workflow::resident_output::ResidentOutputBackend>,
+    ) -> Self {
+        self.output = Some(output);
+        self
     }
     #[cfg(test)]
     pub(in crate::workflow) fn with_capture(
@@ -46,10 +59,19 @@ impl RefusingBackend {
     ) -> Self {
         Self {
             transport: ReadOnlyTransport::Development(Some(Box::new(capture))),
+            #[cfg(target_os = "linux")]
+            output: None,
         }
     }
 }
 impl DeviceBackend for RefusingBackend {
+    #[cfg(all(test, target_os = "linux"))]
+    fn resident_output_backend(
+        &mut self,
+    ) -> Option<&mut dyn crate::workflow::resident_output::ResidentOutputBackend> {
+        Some(self.output.as_mut()?.as_mut())
+    }
+
     fn acquisition_kind(&self) -> crate::device::backend::AcquisitionKind {
         #[cfg(test)]
         if matches!(self.transport, ReadOnlyTransport::Development(_)) {
