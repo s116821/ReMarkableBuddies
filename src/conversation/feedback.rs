@@ -103,8 +103,16 @@ fn with_stored_feedback<R>(
     // siblings retained because another head matched the predicate.
     let mut seen = BTreeSet::new();
     for envelope in &snapshot {
+        // Schema 2 is shared by existing-page bindings and selected intent
+        // records. The tag screens out the latter before full domain validation.
+        let supported_schema = matches!(
+            envelope.domain_schema_version,
+            1 | super::marked_question::SCHEMA | super::target::SCHEMA
+        ) || (envelope.domain_schema_version
+            == super::EXISTING_BINDING_SCHEMA
+            && envelope.payload["record_kind"].as_str() == Some("binding"));
         ensure!(
-            envelope.kind == Kind::Value,
+            envelope.kind == Kind::Value && supported_schema,
             "unsupported stored feedback history"
         );
         ensure!(
@@ -113,14 +121,6 @@ fn with_stored_feedback<R>(
         );
         let record =
             Ledger::decode(envelope).map_err(|_| anyhow!("invalid stored feedback record"))?;
-        ensure!(
-            matches!(
-                envelope.domain_schema_version,
-                1 | super::marked_question::SCHEMA | super::target::SCHEMA
-            ) || (envelope.domain_schema_version == super::EXISTING_BINDING_SCHEMA
-                && matches!(&record, Record::Binding(_))),
-            "unsupported stored feedback history"
-        );
         let owner = match record {
             Record::Root(root) => root.id,
             Record::Turn(turn) => turn.conversation,
