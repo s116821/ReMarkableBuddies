@@ -1207,7 +1207,11 @@ impl DisplayFormat {
             String::new()
         };
         if let Some(subject) = subject {
-            let described = format!("{heading}About: {}\n{content}", subject.as_str());
+            let description = match subject {
+                crate::analysis::ReaderSubject::Recognized(subject) => subject.as_str(),
+                crate::analysis::ReaderSubject::Uncertain => "Uncertain what the selection shows",
+            };
+            let described = format!("{heading}About: {description}\n{content}");
             if admits_about(&described) {
                 return described;
             }
@@ -1280,7 +1284,10 @@ mod tests {
             crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
         let question = "What does <Start of Q-A block> mean?";
         let answer = "Keep this literal.\n(0.1, 0.2) is part of the answer.";
-        let subject = crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned()).unwrap();
+        let subject = crate::analysis::ReaderSubject::Recognized(
+            crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned()).unwrap(),
+        );
+        let uncertain = crate::analysis::ReaderSubject::Uncertain;
         let reader = |subject| ResidentOutputText::Reader {
             question,
             answer,
@@ -1309,11 +1316,17 @@ mod tests {
             unified.format(false, reader(Some(&subject)), |_| true),
             format!("About: 24 / 6\nQ: {question}\n\nA: {answer}\n")
         );
-        let qa = format!("Q: {question}\n\nA: {answer}\n");
         assert_eq!(
-            unified.format(false, reader(Some(&subject)), |body| body.len() <= qa.len()),
-            qa
+            unified.format(false, reader(Some(&uncertain)), |_| true),
+            format!("About: Uncertain what the selection shows\nQ: {question}\n\nA: {answer}\n")
         );
+        let qa = format!("Q: {question}\n\nA: {answer}\n");
+        for about in [&subject, &uncertain] {
+            assert_eq!(
+                unified.format(false, reader(Some(about)), |body| body.len() <= qa.len()),
+                qa
+            );
+        }
         assert_eq!(
             older.format(true, reader(None), |_| true),
             format!(

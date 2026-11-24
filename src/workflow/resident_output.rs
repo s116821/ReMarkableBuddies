@@ -55,7 +55,7 @@ pub enum ResidentOutputText<'a> {
         question: &'a str,
         answer: &'a str,
         center: crate::analysis::SelectionCenter,
-        subject: Option<&'a crate::analysis::ReaderSourceSubject>,
+        subject: Option<&'a crate::analysis::ReaderSubject>,
     },
 }
 

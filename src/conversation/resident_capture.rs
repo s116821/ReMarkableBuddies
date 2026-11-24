@@ -316,9 +316,10 @@ impl Ledger {
                 && capture.reader_target.is_none(),
             "resident interpretation capture changed"
         );
-        capture.schema = if target.subject.is_some() { 3 } else { 2 };
+        let subject = target.recognized_subject();
+        capture.schema = if subject.is_some() { 3 } else { 2 };
         capture.reader_target = Some(target.center.normalized());
-        capture.reader_subject = target.subject.clone();
+        capture.reader_subject = subject.cloned();
         capture.validate()?;
         let media = capture.media()?;
         self.envelope(
@@ -710,10 +711,10 @@ mod tests {
                 &crate::analysis::ReaderSelection {
                     center: crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024)
                         .unwrap(),
-                    subject: Some(
+                    subject: Some(crate::analysis::ReaderSubject::Recognized(
                         crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned())
                             .unwrap(),
-                    ),
+                    )),
                 },
             )
         };

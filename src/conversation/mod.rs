@@ -1141,7 +1141,7 @@ impl Ledger {
     ) -> Result<WriteResult> {
         let fingerprint = if let Some((capture, selection)) = resident_target {
             let target = (capture, selection.center.normalized());
-            match &selection.subject {
+            match selection.recognized_subject() {
                 Some(subject) => Self::fingerprint(&(
                     "interpret-installed-reader-subject",
                     &turn,

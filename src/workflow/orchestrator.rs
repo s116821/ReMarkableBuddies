@@ -3,7 +3,9 @@ use log::{debug, error, info};
 
 use super::reader_attempt::Attempt;
 use super::{indicator::Failure, AnswerPageType, ReturnOutcome, Workflow};
-use crate::analysis::{BoundingBox, ReaderSelection, ReaderSourceSubject, SelectionCenter};
+use crate::analysis::{
+    BoundingBox, ReaderSelection, ReaderSourceSubject, ReaderSubject, SelectionCenter,
+};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -883,7 +885,15 @@ impl<M: LLMEngine> Orchestrator<M> {
             .next()
             .map(str::trim)
             .filter(|text| subjects.next().is_none() && !text.eq_ignore_ascii_case(&question_text))
-            .and_then(|text| ReaderSourceSubject::try_from(text.to_owned()).ok());
+            .and_then(|text| {
+                if text.eq_ignore_ascii_case("NONE") {
+                    Some(ReaderSubject::Uncertain)
+                } else {
+                    ReaderSourceSubject::try_from(text.to_owned())
+                        .ok()
+                        .map(ReaderSubject::Recognized)
+                }
+            });
 
         debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
@@ -1341,12 +1351,22 @@ mod tests {
         let result = parse("SELECTION_SUBJECT: 24 / 6");
         assert_eq!(result.question, "why?");
         assert_eq!(result.answer, "The result is 4.");
-        assert_eq!(result.selection.subject.unwrap().as_str(), "24 / 6");
+        assert_eq!(
+            result.selection.recognized_subject().unwrap().as_str(),
+            "24 / 6"
+        );
+        let uncertain = parse("SELECTION_SUBJECT: NONE");
+        assert!(matches!(
+            uncertain.selection.subject.as_ref(),
+            Some(ReaderSubject::Uncertain)
+        ));
+        assert!(uncertain.selection.recognized_subject().is_none());
+        assert_eq!(uncertain.question, "why?");
+        assert_eq!(uncertain.answer, "The result is 4.");
         for invalid in [
             "",
-            "SELECTION_SUBJECT: NONE",
             "SELECTION_SUBJECT: Why?",
-            "SELECTION_SUBJECT: 24 / 6\nSELECTION_SUBJECT: 4",
+            "SELECTION_SUBJECT: 24 / 6\nSELECTION_SUBJECT: NONE",
             "SELECTION_SUBJECT: 24\u{2028}/ 6",
         ] {
             let result = parse(invalid);

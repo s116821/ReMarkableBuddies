@@ -67,9 +67,24 @@ impl TryFrom<String> for ReaderSourceSubject {
     }
 }
 
+/// How the proposal described a fresh circled or highlighted selection.
+pub enum ReaderSubject {
+    Recognized(ReaderSourceSubject),
+    Uncertain,
+}
+
 pub(crate) struct ReaderSelection {
     pub(crate) center: SelectionCenter,
-    pub(crate) subject: Option<ReaderSourceSubject>,
+    pub(crate) subject: Option<ReaderSubject>,
+}
+
+impl ReaderSelection {
+    pub(crate) fn recognized_subject(&self) -> Option<&ReaderSourceSubject> {
+        match &self.subject {
+            Some(ReaderSubject::Recognized(subject)) => Some(subject),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SelectionCenter {
