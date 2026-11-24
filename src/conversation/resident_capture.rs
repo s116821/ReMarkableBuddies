@@ -128,6 +128,24 @@ impl ResidentSourceCapture {
         ))
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn notebook_source(&self) -> (&ReaderFacts, super::SourceObservation) {
+        let proof = &self.correspondence;
+        (
+            self.capture.before(),
+            super::SourceObservation {
+                document: self.document(),
+                page: self.page(),
+                session: proof.activation.to_string(),
+                visit: proof.capture_operation.to_string(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: proof.adapter_sha256.clone(),
+                evidence_procedure: self.capture.procedure().into(),
+            },
+        )
+    }
+
     pub(super) fn prepare_history(
         &self,
         conversation: Uuid,

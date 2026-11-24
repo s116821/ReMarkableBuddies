@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, io::Cursor};
 
+#[cfg(any(test, all(target_os = "linux", feature = "installed-resident-output")))]
+pub(crate) mod saved_render;
 mod structured_math;
 pub use structured_math::{Coverage, MathNode, StructuredSpan};
 use structured_math::{StructuredPolicyPage, StructuredPolicyResponse};

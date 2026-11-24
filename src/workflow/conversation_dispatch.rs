@@ -696,11 +696,11 @@ impl<'a> Dispatch<'a> {
     /// every subsequent observation must cover the entire saved source.
     #[allow(
         dead_code,
-        reason = "the installed source owner supplies only viewport pixels"
+        reason = "the installed notebook acquisition runs only in the Linux output profile"
     )]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn whole_notebook<E: LLMEngine>(
-        &mut self,
+        &self,
         ledger: &Ledger,
         engine: &mut E,
         text: &str,
@@ -756,7 +756,7 @@ impl<'a> Dispatch<'a> {
     }
 
     pub(crate) fn notebook<E: LLMEngine>(
-        &mut self,
+        &self,
         ledger: &Ledger,
         engine: &mut E,
         request: &writer::notebook::command::Request,
@@ -899,6 +899,24 @@ pub(crate) struct PendingOutput {
     root: ExpectedHeads,
     source: SourceObservation,
     followup: Option<FollowupOutput>,
+}
+
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+impl PendingOutput {
+    pub(crate) fn notebook_draft(&self, ledger: &Ledger) -> Result<Turn> {
+        ensure!(
+            self.mode == Mode::Writer
+                && ledger.expected(Namespace::Conversation, self.conversation)? == self.root
+                && ledger.expected(Namespace::Conversation, self.id)? == self.revision,
+            "notebook Writer draft changed before placement"
+        );
+        let draft = ledger.writer_turn(self.id, self.conversation)?;
+        ensure!(
+            draft.role == Role::Assistant && draft.outcome == Outcome::Generated,
+            "notebook Writer draft is no longer generated"
+        );
+        Ok(draft)
+    }
 }
 
 type SourceCurrent = Arc<dyn Fn() -> Result<()> + Send + Sync>;
