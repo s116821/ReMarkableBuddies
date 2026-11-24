@@ -254,6 +254,32 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(super) fn activate_at_ordinary_startup(
+        &mut self,
+        corner: crate::device::touch::TriggerCorner,
+        health: &mut ServiceHealth,
+    ) -> Result<()> {
+        ensure!(
+            !self.fatal && self.session.is_none() && self.input.is_none(),
+            "resident startup activation requires an unused owner"
+        );
+        let mut session = Session::activate_ordinary_startup(
+            self.store.clone(),
+            health,
+            &self.selection,
+            || RequestInput::new(corner.clone(), None),
+        )?;
+        session.finish_source_request();
+        self.session = Some(Box::new(session));
+        self.reconnect = true;
+        log::info!("Resident Reader activated before the first request");
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn activate_at_startup(
         &mut self,
         corner: crate::device::touch::TriggerCorner,
