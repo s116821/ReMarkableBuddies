@@ -24,7 +24,7 @@ use std::{
 };
 
 const INSTALLED_ROOT: &str = "/home/root/.local/share/remarkable/xochitl";
-const INSTALLED_EXECUTABLE: &str = "/proc/self/exe";
+pub(super) const INSTALLED_EXECUTABLE: &str = "/proc/self/exe";
 const TABLE_BYTES: usize = 1024 * 1024;
 const CHUNK_BYTES: usize = 32 * 1024;
 const SOURCE_READS: usize = 2 * (PDF_BYTES / CHUNK_BYTES + TABLE_BYTES / CHUNK_BYTES + 2);
@@ -399,6 +399,15 @@ impl OrdinaryPdfSource {
     }
 }
 
+/// One bounded normalized input. The file identities contain no open
+/// descriptors, page authority, or live worker.
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) struct OrdinaryPdfCache {
+    directory: Vec<Identity>,
+    pdf: Stamp,
+    units: crate::retrieval::pdf_worker::CachedNormalization,
+}
+
 pub struct ObservedOriginalPdf {
     observed: ReaderFacts,
     pin: OriginalPdfPin,
@@ -590,16 +599,52 @@ impl ObservedOriginalPdf {
         )
     }
 
-    #[cfg(all(test, feature = "installed-resident-output"))]
-    pub(super) fn complete_ordinary_fixture(
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn complete_ordinary(
         self,
         verified: &ReaderFacts,
         executable: &Path,
         deadline: Instant,
+        retained: Option<OrdinaryPdfCache>,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<CapturedOriginalPdf> {
-        self.recheck_verified(verified, progress)?
-            .start_index(executable, deadline, progress)
+    ) -> Result<(CapturedOriginalPdf, Option<OrdinaryPdfCache>)> {
+        use crate::retrieval::pdf_worker::PdfInput;
+
+        // Each request checks its own table, including pages inserted since the
+        // last answer. Only the original PDF's identity carries across requests.
+        let mut source = self.recheck_verified(verified, progress)?;
+        let units = retained
+            .filter(|cache| {
+                cache.directory == source.pin.directory.identities
+                    && cache.pdf == source.pin.pdf.stamp
+            })
+            .map(|cache| cache.units);
+        let document = Uuid::from_bytes(*verified.page().document.as_bytes());
+        let (index, units) = PendingIndex::start_ordinary(
+            executable,
+            PdfInput {
+                document,
+                bytes: &source.bytes,
+                sha256: source.pdf_digest,
+                pages: source.pages,
+            },
+            (source.acquisition_deadline, deadline),
+            units,
+            progress,
+        )?;
+        let cache = units.map(|units| OrdinaryPdfCache {
+            directory: source.pin.directory.identities.clone(),
+            pdf: source.pin.pdf.stamp.clone(),
+            units,
+        });
+        source.pin.expires = deadline;
+        Ok((
+            CapturedOriginalPdf {
+                pin: source.pin,
+                index,
+            },
+            cache,
+        ))
     }
 
     #[cfg(test)]
@@ -729,5 +774,7 @@ pub fn development_original_pdf(
     .captured_with_executable(capture, executable, deadline, progress)
 }
 
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(crate) use tests::assert_ordinary_pdf_reuse;
 #[cfg(test)]
 mod tests;

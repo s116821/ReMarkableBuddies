@@ -16,15 +16,18 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::for_document(Uuid::from_u128(1))
+    }
+
+    fn for_document(document: Uuid) -> Self {
         // Use a private child of the fixture temp root and own only this child.
         let root = std::env::temp_dir().join(format!("reader-original-pdf-{}", Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let document = Uuid::from_u128(1);
         let id = |number| SdkUuid::parse(&Uuid::from_u128(number).to_string()).unwrap();
         let facts = ReaderFacts::new(
             PageKey {
-                document: id(1),
+                document: SdkUuid::parse(&document.to_string()).unwrap(),
                 page: id(3),
             },
             vec![id(2), id(3)],
@@ -74,6 +77,84 @@ impl Fixture {
             &mut || Ok(()),
         )
     }
+}
+
+#[cfg(feature = "installed-resident-output")]
+pub(crate) fn assert_ordinary_pdf_reuse(
+    executable: &Path,
+    initial: &[u8],
+    revised: &[u8],
+) -> Result<()> {
+    let observe = |fixture: &Fixture| -> Result<ObservedOriginalPdf> {
+        OrdinaryPdfSource::pin_fixture(&fixture.root, &fixture.facts)?
+            .read(
+                &fixture.facts,
+                Instant::now() + Duration::from_secs(25),
+                &mut || Ok(()),
+            )?
+            .context("Fixture page did not admit an original PDF")
+    };
+    let query = |fixture: &Fixture, cached, question: &str, page: u32| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (capture, cached) = observe(fixture)?.complete_ordinary(
+            &fixture.facts,
+            executable,
+            deadline,
+            cached,
+            &mut || Ok(()),
+        )?;
+        let key = capture.index.key().clone();
+        let request = capture.index.fixture_request();
+        let found =
+            capture
+                .index
+                .query(&key, question, 1, 4096, false, deadline, &mut || Ok(()))?;
+        assert_eq!(
+            found.passages.first().and_then(|passage| passage.page),
+            Some(page)
+        );
+        Ok::<_, anyhow::Error>((request, key, cached))
+    };
+
+    let fixture = Fixture::new();
+    fs::write(fixture.pdf_path(), initial)?;
+    let ((_, reused), key, cache) = query(&fixture, None, "alpha acceleration", 2)?;
+    assert!(!reused && cache.is_some());
+
+    fs::write(fixture.pdf_path(), revised)?;
+    let ((_, reused), changed, cache) = query(&fixture, cache, "beta velocity", 2)?;
+    assert!(!reused);
+    assert_ne!(key.source_sha256, changed.source_sha256);
+
+    // Replacing the inode with identical bytes still requires cold admission.
+    let replacement = fixture.root.join("replacement.pdf");
+    fs::write(&replacement, revised)?;
+    fs::rename(replacement, fixture.pdf_path())?;
+    let ((_, reused), same, cache) = query(&fixture, cache, "beta velocity", 2)?;
+    assert!(!reused);
+    assert_eq!(same, changed);
+
+    let other = Fixture::for_document(Uuid::new_v4());
+    fs::write(other.pdf_path(), revised)?;
+    let ((_, reused), other_key, cache) = query(&other, cache, "beta velocity", 2)?;
+    assert!(!reused);
+    assert_ne!(other_key.document, changed.document);
+    let ((_, reused), _, cache) = query(&fixture, cache, "beta velocity", 2)?;
+    assert!(!reused);
+
+    // Fail the full source recheck before a cached worker can receive input.
+    let source = observe(&fixture)?;
+    fixture.table(1, 0);
+    assert!(source
+        .complete_ordinary(
+            &fixture.facts,
+            executable,
+            Instant::now() + Duration::from_secs(30),
+            cache,
+            &mut || Ok(()),
+        )
+        .is_err());
+    Ok(())
 }
 
 impl Drop for Fixture {

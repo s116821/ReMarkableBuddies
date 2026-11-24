@@ -17,6 +17,8 @@ struct State {
     generation: Option<GenerationWitness>,
     #[cfg(feature = "installed-resident-output")]
     replace_interpreted_pdf_turn: bool,
+    #[cfg(feature = "installed-resident-output")]
+    ordinary_pdf_workers: Vec<(crate::storage::Uuid, bool)>,
 }
 
 thread_local! {
@@ -33,6 +35,8 @@ impl Scope {
             generation: None,
             #[cfg(feature = "installed-resident-output")]
             replace_interpreted_pdf_turn: false,
+            #[cfg(feature = "installed-resident-output")]
+            ordinary_pdf_workers: Vec::new(),
         }));
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
@@ -54,6 +58,11 @@ impl Scope {
     pub(crate) fn replace_interpreted_pdf_turn(&self) {
         self.0.borrow_mut().replace_interpreted_pdf_turn = true;
     }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn ordinary_pdf_workers(&self) -> Vec<(crate::storage::Uuid, bool)> {
+        self.0.borrow().ordinary_pdf_workers.clone()
+    }
 }
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -61,6 +70,20 @@ impl Drop for Scope {
             active.borrow_mut().take();
         });
     }
+}
+
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) fn record_ordinary_pdf_worker(
+    index: &crate::retrieval::pdf_worker::PendingIndex,
+) {
+    ACTIVE.with(|active| {
+        if let Some(state) = active.borrow().as_ref() {
+            state
+                .borrow_mut()
+                .ordinary_pdf_workers
+                .push(index.fixture_request());
+        }
+    });
 }
 
 /// Change only the interpreted turn's storage revision after the real commit.

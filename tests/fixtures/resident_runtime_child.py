@@ -99,6 +99,14 @@ if mode == "reconnect-source-handoff-indeterminate-successor":
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
 source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
+
+def current_source_facts():
+    order_change = root.parent / "ordinary-pdf-order-change"
+    if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
+        extra = uuid.UUID(order_change.read_text()).bytes
+        return source_document + source_page + struct.pack(">H", 2) + source_page + extra
+    return source_facts
+
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
@@ -187,14 +195,7 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                observed = source_facts
-                order_change = root.parent / "ordinary-pdf-order-change"
-                if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
-                    # Keep the active page and original assets fixed. Only the SDK
-                    # observation shows that the native order has changed.
-                    extra = uuid.UUID(order_change.read_text()).bytes
-                    observed = source_document + source_page + struct.pack(">H", 2) + extra + source_page
-                send(request[:202] + b"\x03" + digest + b"\x00" + observed)
+                send(request[:202] + b"\x03" + digest + b"\x00" + current_source_facts())
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
@@ -202,7 +203,7 @@ while True:
                 facts = request[204:]
                 assert not visual or not facts
                 if mode.startswith("reconnect-source-handoff"):
-                    assert facts == source_facts
+                    assert facts == current_source_facts()
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
