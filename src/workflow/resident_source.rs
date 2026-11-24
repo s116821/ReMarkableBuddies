@@ -2345,7 +2345,7 @@ pub(crate) mod tests {
                 released(Instant::now()),
             ])
             .with_test_output(Box::new(RecognitionProbe {
-                writer_preview: Some(preview.clone()),
+                rendered_text: Some(preview.clone()),
                 ..RecognitionProbe::default()
             }));
         let mut workflow = Workflow::with_device(Box::new(backend), false);
@@ -2399,6 +2399,7 @@ pub(crate) mod tests {
     #[cfg(feature = "installed-resident-output")]
     pub(crate) struct OrdinaryPdfFixtureRounds<'a> {
         pub epub: bool,
+        pub rendered: Option<Rc<RefCell<Vec<String>>>>,
         pub source_targets: bool,
         pub count: usize,
         pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
@@ -2418,7 +2419,15 @@ pub(crate) mod tests {
         model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
         inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
     ) -> Result<(Vec<Result<()>>, Vec<Record>)> {
-        let mode = "reconnect-source-handoff-ordinary-pdf";
+        let mode = if rounds.rendered.is_some() {
+            anyhow::ensure!(
+                rounds.count == 1,
+                "The placement fixture starts from one original page"
+            );
+            "reconnect-source-handoff-writer-insert"
+        } else {
+            "reconnect-source-handoff-ordinary-pdf"
+        };
         let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
         let setting = if rounds.epub {
             "researched_epub"
@@ -2461,7 +2470,26 @@ pub(crate) mod tests {
         let extension = if rounds.epub { "epub" } else { "pdf" };
         let pdf = root.join(format!("{document}.{extension}"));
         let owner = workflow.resident_source.as_mut().unwrap();
-        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.selection = if let Some(rendered) = &rounds.rendered {
+            let output = RecognitionProbe {
+                confirmed_source: true,
+                insertion_source: Some(page),
+                rendered_text: Some(rendered.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                super::super::selected_backend::RefusingBackend::with_resident_releases(vec![
+                    released(Instant::now()),
+                ])
+                .with_test_output(Box::new(output)),
+            );
+            InstalledReaderSelection::fixture_for_installed_output(
+                &base.join("output-profile"),
+                runtime.identity(),
+            )?
+        } else {
+            InstalledReaderSelection::fixture_with_installed_output()
+        };
         owner.ordinary_pdf_fixture = Some((root, executable));
         owner.session = Some(Box::new(OwnedSession {
             runtime,
@@ -2512,11 +2540,19 @@ pub(crate) mod tests {
                 events.starts_with(acquisition),
                 "unexpected fixture acquisition: {events:?}"
             );
-            let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
-            assert!(remainder.is_empty());
-            assert!(observations
-                .iter()
-                .all(|pair| *pair == ["reconnect", "observe"]));
+            if rounds.rendered.is_some() {
+                assert_eq!(
+                    events.iter().filter(|&&event| event == "insert").count(),
+                    1,
+                    "Expected one insertion after the original question page"
+                );
+            } else {
+                let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
+                assert!(remainder.is_empty());
+                assert!(observations
+                    .iter()
+                    .all(|pair| *pair == ["reconnect", "observe"]));
+            }
             events.clear();
         }
         let records = store
@@ -2954,7 +2990,7 @@ pub(crate) mod tests {
         #[cfg(feature = "installed-resident-output")]
         insertion_source: Option<ConversationId>,
         #[cfg(feature = "installed-resident-output")]
-        writer_preview: Option<Rc<RefCell<Vec<String>>>>,
+        rendered_text: Option<Rc<RefCell<Vec<String>>>>,
     }
 
     struct SuccessorProbe {
@@ -2963,10 +2999,10 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    struct WriterPreview(Rc<RefCell<Vec<String>>>);
+    struct RecordedOutput(Rc<RefCell<Vec<String>>>);
 
     #[cfg(feature = "installed-resident-output")]
-    impl ResidentRenderer for WriterPreview {
+    impl ResidentRenderer for RecordedOutput {
         fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
             lease.step(|pulse| {
                 pulse()?;
@@ -3180,7 +3216,7 @@ pub(crate) mod tests {
             );
             #[cfg(feature = "installed-resident-output")]
             if self.insertion_source.is_none()
-                && self.writer_preview.is_some()
+                && self.rendered_text.is_some()
                 && self
                     .successor
                     .as_ref()
@@ -3242,12 +3278,12 @@ pub(crate) mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
             #[cfg(feature = "installed-resident-output")]
-            if let Some(preview) = &self.writer_preview {
+            if let Some(preview) = &self.rendered_text {
                 if let Some(source) = self.insertion_source {
                     assert!(_newly_created);
                     assert_ne!(_target.page().page.as_bytes(), source.as_bytes());
                 }
-                return Ok(Box::new(WriterPreview(preview.clone())));
+                return Ok(Box::new(RecordedOutput(preview.clone())));
             }
             panic!("unexpected renderer request");
         }
@@ -3300,7 +3336,7 @@ pub(crate) mod tests {
             let written = Rc::new(RefCell::new(Vec::new()));
             let probe = RecognitionProbe {
                 confirmed_source: role == PageUse::ConfirmedNonBuddy,
-                writer_preview: (role == PageUse::RelevantBuddy).then(|| written.clone()),
+                rendered_text: (role == PageUse::RelevantBuddy).then(|| written.clone()),
                 ..RecognitionProbe::default()
             };
             workflow.device = Box::new(

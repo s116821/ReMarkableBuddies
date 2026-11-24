@@ -1,4 +1,5 @@
 //! Owned, one-query original-document normalization in the installed Reader executable.
+mod sections;
 use super::{epub, pdf, Index, IndexKey, NormalizedDocument, Retrieved, SourceFormat, SourceUnit};
 use crate::storage::{digest, Uuid};
 use anyhow::{bail, ensure, Context, Result};
@@ -34,9 +35,6 @@ const READY: u8 = 2;
 const QUERY: u8 = 3;
 const OUTPUT: u8 = 4;
 const NORMALIZED_INPUT: u8 = 5;
-const EPUB_SECTIONS: u8 = 6;
-// A canonical section path is at most 512 UTF-8 bytes. JSON can double quotes.
-const SECTION_TABLE_BYTES: usize = epub::MAX_SECTIONS * (2 * 512 + 3) + 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +63,13 @@ struct Ready {
     request: Uuid,
     key: IndexKey,
     pages: u32,
+}
+
+struct ReadyPayload {
+    ready: Ready,
+    normalized_sha256: String,
+    units: Option<Vec<u8>>,
+    sections: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -233,15 +238,6 @@ fn run() -> Result<()> {
     };
     write_frame(&mut output, READY, &packet(&ready, &units, READY_BYTES)?)?;
     drop(units);
-    if ready.key.format == SourceFormat::Epub {
-        let sections = epub_sections(&index.units)?;
-        let locations = serde_json::to_vec(&sections)?;
-        ensure!(
-            locations.len() <= SECTION_TABLE_BYTES,
-            "EPUB section table exceeds bound"
-        );
-        write_frame(&mut output, EPUB_SECTIONS, &locations)?;
-    }
 
     let query_frame = read_frame(&mut input, QUERY, QUERY_BYTES)?;
     let (query, question): (Query, _) = unpack(&query_frame)?;
@@ -272,26 +268,6 @@ fn run() -> Result<()> {
     write_frame(&mut output, OUTPUT, &response)
 }
 
-fn epub_sections(units: &[SourceUnit]) -> Result<Vec<&str>> {
-    ensure!(
-        (1..=epub::MAX_SECTIONS).contains(&units.len()),
-        "Invalid EPUB section count"
-    );
-    let mut seen = std::collections::BTreeSet::new();
-    units
-        .iter()
-        .map(|unit| {
-            let path = unit.section.as_deref().context("Missing EPUB section")?;
-            ensure!(
-                unit.page.is_none() && seen.insert(path),
-                "Invalid EPUB section sequence"
-            );
-            epub::archive_path(path)?;
-            Ok(path)
-        })
-        .collect()
-}
-
 fn read_index(input: &mut impl Read) -> Result<(Uuid, u32, Index, Vec<u8>)> {
     let mut frame = [0; 6];
     input.read_exact(&mut frame)?;
@@ -319,13 +295,16 @@ fn read_index(input: &mut impl Read) -> Result<(Uuid, u32, Index, Vec<u8>)> {
                         .all(|(i, unit)| unit.page == Some(i as u32 + 1) && unit.section.is_none()),
                 "PDF worker cached page sequence changed"
             ),
-            SourceFormat::Epub => {
-                ensure!(
-                    source.key.extractor_revision == epub::EXTRACTOR_REVISION,
-                    "EPUB extractor changed"
-                );
-                epub_sections(&units)?;
-            }
+            SourceFormat::Epub => ensure!(
+                source.key.extractor_revision == epub::EXTRACTOR_REVISION
+                    && (1..=epub::MAX_SECTIONS).contains(&units.len())
+                    && units.iter().all(|unit| unit.page.is_none()
+                        && unit
+                            .section
+                            .as_deref()
+                            .is_some_and(|path| epub::validate_archive_path(path).is_ok())),
+                "Invalid cached EPUB sections"
+            ),
             _ => bail!("Unsupported cached publication"),
         }
         let index = Index::build(NormalizedDocument {
@@ -558,9 +537,10 @@ impl OwnedChild {
     fn read_ready(
         &mut self,
         deadline: Instant,
+        publication: Publication,
         retain: bool,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<(Ready, String, Option<Vec<u8>>)> {
+    ) -> Result<ReadyPayload> {
         let mut frame_header = [0; 6];
         self.read_exact(&mut frame_header, deadline, progress)?;
         let size = length(frame_header, READY, READY_BYTES)?;
@@ -574,25 +554,42 @@ impl OwnedChild {
         );
         let mut header = vec![0; header_size];
         self.read_exact(&mut header, deadline, progress)?;
+        let ready: Ready = serde_json::from_slice(&header)?;
+        ensure!(
+            ready.key.format == publication.format() && publication.accepts_units(ready.pages),
+            "Document worker returned an invalid format or unit count"
+        );
         let mut remaining = size - 4 - header_size;
         let mut units = (retain && remaining <= CACHE_BYTES).then(|| Vec::with_capacity(remaining));
         let mut hasher = Sha256::new();
-        let mut chunk = [0; CHUNK_BYTES];
-        while remaining > 0 {
-            let limit = remaining.min(CHUNK_BYTES);
+        let mut next = |chunk: &mut [u8]| -> Result<usize> {
+            let limit = remaining.min(chunk.len());
+            if limit == 0 {
+                return Ok(0);
+            }
             let count = self.read_some(&mut chunk[..limit], deadline, progress)?;
-            ensure!(count > 0, "PDF worker ready payload truncated");
+            ensure!(count > 0, "Document worker ready payload truncated");
             hasher.update(&chunk[..count]);
             if let Some(units) = &mut units {
                 units.extend_from_slice(&chunk[..count]);
             }
             remaining -= count;
-        }
-        Ok((
-            serde_json::from_slice(&header)?,
-            format!("{:x}", hasher.finalize()),
+            Ok(count)
+        };
+        let sections = match publication {
+            Publication::Epub => Some(sections::from_units(ready.pages, next)?),
+            Publication::Pdf { .. } => {
+                let mut chunk = [0; CHUNK_BYTES];
+                while next(&mut chunk)? != 0 {}
+                None
+            }
+        };
+        Ok(ReadyPayload {
+            ready,
+            normalized_sha256: format!("{:x}", hasher.finalize()),
             units,
-        ))
+            sections,
+        })
     }
 
     fn finish(
@@ -854,10 +851,17 @@ impl PendingIndex {
         let mut worker = OwnedChild::spawn(executable)?;
         worker.write(kind, &body, ready_by, &mut || progress.poll())?;
         drop(body);
-        let (ready, normalized_sha256, units) =
-            worker.read_ready(ready_by, retain && cached.is_none(), &mut || {
-                progress.poll()
-            })?;
+        let ReadyPayload {
+            ready,
+            normalized_sha256,
+            units,
+            sections,
+        } = worker.read_ready(
+            ready_by,
+            publication,
+            retain && cached.is_none(),
+            &mut || progress.poll(),
+        )?;
         let key = IndexKey {
             document,
             format: publication.format(),
@@ -867,7 +871,6 @@ impl PendingIndex {
         };
         ensure!(
             ready.request == request
-                && publication.accepts_units(ready.pages)
                 && ready.key == key
                 && cached
                     .as_ref()
@@ -875,24 +878,6 @@ impl PendingIndex {
             "Document worker returned a different index identity"
         );
         let pages = ready.pages;
-        let sections = if matches!(publication, Publication::Epub) {
-            let payload = worker.read(EPUB_SECTIONS, SECTION_TABLE_BYTES, ready_by, &mut || {
-                progress.poll()
-            })?;
-            let sections: Vec<String> = serde_json::from_slice(&payload)?;
-            ensure!(
-                sections.len() == pages as usize,
-                "EPUB section count changed"
-            );
-            let mut seen = std::collections::BTreeSet::new();
-            for section in &sections {
-                epub::archive_path(section)?;
-                ensure!(seen.insert(section), "Duplicate EPUB section");
-            }
-            Some(sections)
-        } else {
-            None
-        };
         check(ready_by, &mut || progress.force())?;
         let cached = cached.or_else(|| {
             units.map(|units| CachedNormalization {

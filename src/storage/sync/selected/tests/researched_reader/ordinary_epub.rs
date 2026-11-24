@@ -75,6 +75,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
         executable.into(),
         crate::workflow::OrdinaryPdfFixtureRounds {
             epub: true,
+            rendered: None,
             source_targets: false,
             count: questions.len(),
             before_round: Some(&mut change_book),
@@ -153,5 +154,33 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
             .as_deref()
             .is_some_and(|text| text.contains(&format!("[S1] Document {document}, {section}"))));
     }
+    let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let question = questions[2].0;
+    let mut model = Scripted::new(Reading::Deny, false, false, Events::default());
+    model.ordinary_pdf_questions = vec![question];
+    let (results, _) = crate::workflow::ordinary_pdf_receiver_fixture(
+        document,
+        page,
+        fixture.0.clone(),
+        executable.into(),
+        crate::workflow::OrdinaryPdfFixtureRounds {
+            epub: true,
+            rendered: Some(rendered.clone()),
+            source_targets: false,
+            count: 1,
+            before_round: None,
+        },
+        |_, _, _| model,
+        |_, _| Ok(()),
+    )?;
+    for result in results {
+        result.context("Place the EPUB answer after its original page")?;
+    }
+    let rendered = rendered.borrow();
+    let [shown] = rendered.as_slice() else {
+        anyhow::bail!("Expected exactly one rendered EPUB answer")
+    };
+    assert!(shown.contains(question));
+    assert!(shown.contains(&format!("[S1] Document {document}, book/experiment.xhtml")));
     Ok(())
 }

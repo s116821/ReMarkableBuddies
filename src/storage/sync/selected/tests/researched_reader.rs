@@ -1280,6 +1280,7 @@ fn assert_pdf_reuse_between_service_questions(
             executable.into(),
             OrdinaryPdfFixtureRounds {
                 epub: false,
+                rendered: None,
                 source_targets: false,
                 count: questions.len(),
                 before_round: Some(&mut update_order),
@@ -1508,6 +1509,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             executable.clone(),
             crate::workflow::OrdinaryPdfFixtureRounds {
                 epub: false,
+                rendered: None,
                 source_targets: matches!(
                     case,
                     Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets

@@ -74,7 +74,12 @@ impl Seek for ArchiveInput<'_> {
     }
 }
 
-pub(super) fn archive_path(path: &str) -> Result<String> {
+fn archive_path(path: &str) -> Result<String> {
+    validate_archive_path(path)?;
+    Ok(path.to_owned())
+}
+
+pub(super) fn validate_archive_path(path: &str) -> Result<()> {
     ensure!(
         !path.is_empty()
             && path.len() <= 512
@@ -88,7 +93,7 @@ pub(super) fn archive_path(path: &str) -> Result<String> {
             .all(|p| !p.is_empty() && p != "." && p != ".."),
         "Noncanonical EPUB resource path"
     );
-    Ok(path.to_owned())
+    Ok(())
 }
 
 fn reference(base: &str, href: &str) -> Result<String> {
