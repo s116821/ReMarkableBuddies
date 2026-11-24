@@ -344,7 +344,7 @@ ssh RM2 "chmod +x /opt/bin/reader-buddy"
 ssh RM2
 cat > /etc/systemd/system/reader-buddy.service << 'EOF'
 [Unit]
-Description=ReMarkable Reader Buddy
+Description=ReMarkableBuddies (Reader and Writer)
 After=home.mount xochitl.service
 Wants=xochitl.service
 

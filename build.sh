@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build script for ReMarkable Reader Buddy
+# Build the ReMarkableBuddies tablet app.
 
 set -e
 
