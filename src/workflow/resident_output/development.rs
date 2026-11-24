@@ -672,7 +672,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
             &self
                 .pin
                 .new_page_display()
-                .format(true, ResidentOutputText::Plain(text)),
+                .format(true, ResidentOutputText::Plain(text), |_| true),
         )
     }
 
@@ -1176,27 +1176,47 @@ impl DisplayFormat {
         }
     }
 
-    fn format(self, new: bool, text: ResidentOutputText<'_>) -> String {
-        let content = match text {
-            ResidentOutputText::Plain(text) => text.to_owned(),
+    fn format(
+        self,
+        new: bool,
+        text: ResidentOutputText<'_>,
+        admits_about: impl FnOnce(&str) -> bool,
+    ) -> String {
+        let (content, subject) = match text {
+            ResidentOutputText::Plain(text) => (text.to_owned(), None),
             ResidentOutputText::Reader {
                 question,
                 answer,
                 center,
-            } => match self {
-                Self::Legacy => crate::workflow::Workflow::compose_qa(question, answer, center),
-                Self::Unified => format!("Q: {question}\n\nA: {answer}\n"),
-            },
+                subject,
+            } => {
+                let body = match self {
+                    Self::Legacy => crate::workflow::Workflow::compose_qa(question, answer, center),
+                    Self::Unified => format!("Q: {question}\n\nA: {answer}\n"),
+                };
+                (body, subject)
+            }
         };
-        if new {
+        let heading = if new {
             let title = match self {
                 Self::Legacy => LEGACY_TITLE,
                 Self::Unified => crate::conversation_layout::CONVERSATION_TITLE,
             };
-            format!("{title}\n\n{content}")
+            format!("{title}\n\n")
         } else {
-            content
+            String::new()
+        };
+        if let Some(subject) = subject {
+            let description = match subject {
+                crate::analysis::ReaderSubject::Recognized(subject) => subject.as_str(),
+                crate::analysis::ReaderSubject::Uncertain => "Uncertain what the selection shows",
+            };
+            let described = format!("{heading}About: {description}\n{content}");
+            if admits_about(&described) {
+                return described;
+            }
         }
+        format!("{heading}{content}")
     }
 }
 fn validate_text(keyboard: &Keyboard, text: &str) -> Result<()> {
@@ -1217,8 +1237,14 @@ impl ResidentRenderer for Renderer {
         text: ResidentOutputText<'_>,
         lease: &mut DevelopmentTargetLease<'_>,
     ) -> Result<()> {
-        let text = self.display.format(self.new, text);
-        validate_text(&self.keyboard.borrow(), &text)?;
+        let text = {
+            let keyboard = self.keyboard.borrow();
+            let rendered = self.display.format(self.new, text, |candidate| {
+                validate_text(&keyboard, candidate).is_ok()
+            });
+            validate_text(&keyboard, &rendered)?;
+            rendered
+        };
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
             pulse()?;
             self.pin.current()?;
@@ -1258,10 +1284,15 @@ mod tests {
             crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
         let question = "What does <Start of Q-A block> mean?";
         let answer = "Keep this literal.\n(0.1, 0.2) is part of the answer.";
-        let reader = || ResidentOutputText::Reader {
+        let subject = crate::analysis::ReaderSubject::Recognized(
+            crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned()).unwrap(),
+        );
+        let uncertain = crate::analysis::ReaderSubject::Uncertain;
+        let reader = |subject| ResidentOutputText::Reader {
             question,
             answer,
             center,
+            subject,
         };
         let unified = DisplayFormat::Unified
             .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE);
@@ -1278,26 +1309,41 @@ mod tests {
             DisplayFormat::Legacy
         );
         assert_eq!(
-            unified.format(true, reader()),
-            "ReMarkableBuddies\n\nQ: What does <Start of Q-A block> mean?\n\nA: Keep this literal.\n(0.1, 0.2) is part of the answer.\n"
+            unified.format(true, reader(Some(&subject)), |_| true),
+            format!("ReMarkableBuddies\n\nAbout: 24 / 6\nQ: {question}\n\nA: {answer}\n")
         );
         assert_eq!(
-            unified.format(false, reader()),
-            format!("Q: {question}\n\nA: {answer}\n")
+            unified.format(false, reader(Some(&subject)), |_| true),
+            format!("About: 24 / 6\nQ: {question}\n\nA: {answer}\n")
         );
         assert_eq!(
-            older.format(true, reader()),
+            unified.format(false, reader(Some(&uncertain)), |_| true),
+            format!("About: Uncertain what the selection shows\nQ: {question}\n\nA: {answer}\n")
+        );
+        let qa = format!("Q: {question}\n\nA: {answer}\n");
+        for about in [&subject, &uncertain] {
+            assert_eq!(
+                unified.format(false, reader(Some(about)), |body| body.len() <= qa.len()),
+                qa
+            );
+        }
+        assert_eq!(
+            older.format(true, reader(None), |_| true),
             format!(
                 "=== Reader Buddy Answers ===\n\n{}",
                 crate::workflow::Workflow::compose_qa(question, answer, center)
             )
         );
         assert_eq!(
-            unified.format(true, ResidentOutputText::Plain("")),
+            unified.format(true, ResidentOutputText::Plain(""), |_| true),
             "ReMarkableBuddies\n\n"
         );
         assert_eq!(
-            unified.format(false, ResidentOutputText::Plain("Draft\n\nBody\n")),
+            unified.format(
+                false,
+                ResidentOutputText::Plain("Draft\n\nBody\n"),
+                |_| panic!("plain content has no About line"),
+            ),
             "Draft\n\nBody\n"
         );
     }

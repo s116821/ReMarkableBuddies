@@ -188,6 +188,9 @@ pub struct ResidentCaptureHistory {
     /// Unit coordinates in image zero, the complete provider overview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_target: Option<[f64; 2]>,
+    /// Recognized marked content on this exact overview, separate from turn text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_subject: Option<crate::analysis::ReaderSourceSubject>,
 }
 fn absent_qualification<'de, D: serde::Deserializer<'de>>(
     value: D,
@@ -202,8 +205,10 @@ pub struct PreparedResidentCapture {
 impl ResidentCaptureHistory {
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            matches!((self.schema, self.reader_target), (1, None) | (2, Some(_)))
-                && self.sdk_source == RESIDENT_SDK_SOURCE
+            matches!(
+                (self.schema, self.reader_target, &self.reader_subject),
+                (1, None, None) | (2, Some(_), None) | (3, Some(_), Some(_))
+            ) && self.sdk_source == RESIDENT_SDK_SOURCE
                 && !self.id.is_nil()
                 && !self.conversation.is_nil()
                 && !self.turn.is_nil(),
@@ -289,7 +294,7 @@ impl Ledger {
         &self,
         turn: &Turn,
         id: Uuid,
-        target: [f64; 2],
+        target: &crate::analysis::ReaderSelection,
     ) -> Result<crate::storage::Envelope> {
         ensure!(
             turn.role == Role::User
@@ -311,8 +316,10 @@ impl Ledger {
                 && capture.reader_target.is_none(),
             "resident interpretation capture changed"
         );
-        capture.schema = 2;
-        capture.reader_target = Some(target);
+        let subject = target.recognized_subject();
+        capture.schema = if subject.is_some() { 3 } else { 2 };
+        capture.reader_target = Some(target.center.normalized());
+        capture.reader_subject = subject.cloned();
         capture.validate()?;
         let media = capture.media()?;
         self.envelope(
@@ -430,6 +437,7 @@ impl Ledger {
             original_dimensions: capture.capture.dimensions(),
             provider_procedure: "reader-nearest-overview-overlapping-strips-v1".into(),
             reader_target: None,
+            reader_subject: None,
             images: provider_images
                 .iter()
                 .enumerate()
@@ -700,7 +708,14 @@ mod tests {
                 heads.clone(),
                 interpreted.clone(),
                 id,
-                crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap(),
+                &crate::analysis::ReaderSelection {
+                    center: crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024)
+                        .unwrap(),
+                    subject: Some(crate::analysis::ReaderSubject::Recognized(
+                        crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned())
+                            .unwrap(),
+                    )),
+                },
             )
         };
         store
@@ -723,6 +738,22 @@ mod tests {
         assert_eq!(commit().unwrap().historical, committed.historical);
         let retained = ledger.stored_resident_images(id).unwrap();
         assert_eq!(retained.evidence.reader_target, Some([0.5, 0.25]));
+        assert_eq!(retained.evidence.schema, 3);
+        assert_eq!(
+            retained
+                .evidence
+                .reader_subject
+                .as_ref()
+                .map(crate::analysis::ReaderSourceSubject::as_str),
+            Some("24 / 6")
+        );
+        let mut earlier = serde_json::to_value(&retained.evidence).unwrap();
+        earlier["schema"] = serde_json::json!(2);
+        earlier.as_object_mut().unwrap().remove("reader_subject");
+        let earlier: ResidentCaptureHistory = serde_json::from_value(earlier).unwrap();
+        earlier.validate().unwrap();
+        assert_eq!(earlier.reader_target, retained.evidence.reader_target);
+        assert!(earlier.reader_subject.is_none());
         assert_eq!(
             retained.evidence.correspondence,
             prepared.evidence.correspondence

@@ -1094,7 +1094,7 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
         capture: Uuid,
-        target: crate::analysis::SelectionCenter,
+        target: &crate::analysis::ReaderSelection,
     ) -> Result<WriteResult> {
         self.advance_fact(
             operation,
@@ -1102,7 +1102,7 @@ impl Ledger {
             expected_turn,
             turn,
             None,
-            Some((capture, target.normalized())),
+            Some((capture, target)),
         )
     }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
@@ -1137,10 +1137,19 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
         reason: Option<AttemptReason>,
-        resident_target: Option<(Uuid, [f64; 2])>,
+        resident_target: Option<(Uuid, &crate::analysis::ReaderSelection)>,
     ) -> Result<WriteResult> {
-        let fingerprint = if let Some(target) = resident_target {
-            Self::fingerprint(&("interpret-installed-reader", &turn, target))?
+        let fingerprint = if let Some((capture, selection)) = resident_target {
+            let target = (capture, selection.center.normalized());
+            match selection.recognized_subject() {
+                Some(subject) => Self::fingerprint(&(
+                    "interpret-installed-reader-subject",
+                    &turn,
+                    target,
+                    subject,
+                ))?,
+                None => Self::fingerprint(&("interpret-installed-reader", &turn, target))?,
+            }
         } else if let Some(reason) = &reason {
             Self::fingerprint(&("attempt-outcome", &turn, reason))?
         } else {

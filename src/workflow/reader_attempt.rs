@@ -414,7 +414,7 @@ impl Attempt {
         &mut self,
         ledger: &Ledger,
         text: &str,
-        target: Option<crate::analysis::SelectionCenter>,
+        target: Option<&crate::analysis::ReaderSelection>,
     ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
             anyhow::ensure!(

@@ -55,6 +55,7 @@ pub enum ResidentOutputText<'a> {
         question: &'a str,
         answer: &'a str,
         center: crate::analysis::SelectionCenter,
+        subject: Option<&'a crate::analysis::ReaderSubject>,
     },
 }
 
@@ -164,6 +165,7 @@ pub trait ResidentRenderer {
                 question,
                 answer,
                 center,
+                ..
             } => self.render(
                 &super::Workflow::compose_qa(question, answer, center),
                 lease,
