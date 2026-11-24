@@ -178,6 +178,35 @@ fn fixture_png(tone: u8) -> Result<Vec<u8>> {
     Ok(png.into_inner())
 }
 
+#[cfg(test)]
+fn fixture_notebook_drawing(with_letter: bool) -> Result<Vec<u8>> {
+    let mut canvas = image::GrayImage::from_pixel(40, 32, image::Luma([255]));
+    for (start, end) in [
+        ((7., 22.), (17., 8.)),
+        ((17., 8.), (27., 22.)),
+        ((27., 22.), (7., 22.)),
+    ] {
+        imageproc::drawing::draw_line_segment_mut(&mut canvas, start, end, image::Luma([0]));
+    }
+    if with_letter {
+        imageproc::drawing::draw_line_segment_mut(
+            &mut canvas,
+            (32., 7.),
+            (32., 12.),
+            image::Luma([0]),
+        );
+        imageproc::drawing::draw_line_segment_mut(
+            &mut canvas,
+            (32., 12.),
+            (35., 12.),
+            image::Luma([0]),
+        );
+    }
+    let mut png = Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma8(canvas).write_to(&mut png, image::ImageFormat::Png)?;
+    Ok(png.into_inner())
+}
+
 fn seed_shared_images(
     ledger: &Ledger,
     conversation: Uuid,
@@ -622,7 +651,7 @@ fn maintained_combined_fixture_runs() {
 fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     use crate::{
         conversation::notebook::{NotebookStage, NotebookStageKind, NotebookStageOutcome},
-        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages},
+        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages, VISUAL_SECTION},
     };
     use writer::notebook::runner::Status;
 
@@ -636,9 +665,9 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     let last = Uuid::new_v4();
     let order = [source.page, blank, buddy, last];
     let buddy_pages = [buddy].into_iter().collect();
-    let first_png = fixture_png(5)?;
+    let first_png = fixture_notebook_drawing(false)?;
     let blank_png = fixture_png(255)?;
-    let last_png = fixture_png(17)?;
+    let last_png = fixture_notebook_drawing(true)?;
     let originals = [
         (source.page, first_png.as_slice()),
         (blank, blank_png.as_slice()),
@@ -741,16 +770,20 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     );
 
     let transcript = json!({"pages": [
-        {"page": 1, "status": "transcribed", "text": "First-page example."},
-        {"page": 2, "status": "blank", "text": ""},
-        {"page": 4, "status": "transcribed", "text": "Last-page example."}
+        {"page": 1, "status": "readable", "writing": "", "visual_observation": "Three strokes form a triangle."},
+        {"page": 2, "status": "blank", "writing": "", "visual_observation": ""},
+        {"page": 4, "status": "readable", "writing": "L", "visual_observation": "A triangle sits left of the letter."}
     ]});
     let unavailable = scope(&ledger, conversation, &source)?;
-    let mut unreadable = transcript.clone();
-    unreadable["pages"][2] = json!({"page":4, "status":"unreadable", "text":""});
-    model.replies.push_back(unreadable.to_string());
-    assert!(dispatch
-        .whole_notebook(
+    for (status, expected) in [
+        ("unreadable", "notebook page unreadable"),
+        ("blank", "marked notebook page reported blank"),
+    ] {
+        let mut rejected = transcript.clone();
+        rejected["pages"][0] =
+            json!({"page":1, "status":status, "writing":"", "visual_observation":""});
+        model.replies.push_back(rejected.to_string());
+        let Err(error) = dispatch.whole_notebook(
             &ledger,
             &mut model,
             request,
@@ -758,17 +791,22 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             &receipt,
             "fixture",
             &unavailable,
-            &mut observe
-        )
-        .is_err());
-    assert_eq!(model.seen.len(), 1);
-    assert_eq!(
-        ledger.expected(Namespace::Conversation, conversation)?,
-        unavailable.root
-    );
-    model.seen.clear();
+            &mut observe,
+        ) else {
+            anyhow::bail!("invalid page evidence reached planning");
+        };
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(model.seen.len(), 1);
+        assert_eq!(
+            ledger.expected(Namespace::Conversation, conversation)?,
+            unavailable.root
+        );
+        model.seen.clear();
+    }
 
-    let draft_text = "# Study note\n\nExamples from pages 1 and 4.";
+    let map_text =
+        "Page 1 depicts a triangle. Page 4 depicts a triangle beside the written letter L.";
+    let draft_text = "# Study note\n\nPage 1 depicts a triangle. Page 4 shows a triangle next to the written label L.";
     let mut navigated_source = source.clone();
     navigated_source.page = last;
     assert_eq!(navigated_source.content_revision, source.content_revision);
@@ -859,11 +897,9 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             .is_none());
     }
 
-    model.replies.extend([
-        transcript.to_string(),
-        "Ordered source coverage from pages 1 and 4.".into(),
-        draft_text.into(),
-    ]);
+    model
+        .replies
+        .extend([transcript.to_string(), map_text.into(), draft_text.into()]);
     let (report, output) = dispatch.whole_notebook(
         &ledger,
         &mut model,
@@ -876,6 +912,40 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     )?;
     assert_eq!(report.status, Status::Generated);
     assert_eq!(model.seen.len(), 3);
+    let map_parts = &model.seen[1].0;
+    assert!(map_parts[0].contains("unverified model observations"));
+    let map: Value = serde_json::from_str(map_parts.last().unwrap())?;
+    let segments = map["chunk"]["authoritative"].as_array().unwrap();
+    let values = segments
+        .iter()
+        .map(|segment| {
+            (
+                segment["page"].as_u64(),
+                segment["section"].as_str(),
+                segment["text"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        [
+            (
+                Some(1),
+                Some(VISUAL_SECTION),
+                "Three strokes form a triangle."
+            ),
+            (Some(2), None, ""),
+            (Some(4), None, "L"),
+            (
+                Some(4),
+                Some(VISUAL_SECTION),
+                "A triangle sits left of the letter."
+            ),
+        ]
+    );
+    let reduce_parts = &model.seen[2].0;
+    assert!(reduce_parts[0].contains("separately from the user's transcribed words"));
+    assert!(reduce_parts.iter().any(|part| part.contains(map_text)));
     assert_eq!(
         model.seen[0]
             .1
@@ -909,12 +979,21 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             .document()
             .units
             .iter()
-            .map(|unit| (unit.page, unit.text.as_str()))
+            .map(|unit| (unit.page, unit.section.as_deref(), unit.text.as_str()))
             .collect::<Vec<_>>(),
         [
-            (Some(1), "First-page example."),
-            (Some(2), ""),
-            (Some(4), "Last-page example.")
+            (
+                Some(1),
+                Some(VISUAL_SECTION),
+                "Three strokes form a triangle."
+            ),
+            (Some(2), None, ""),
+            (Some(4), None, "L"),
+            (
+                Some(4),
+                Some(VISUAL_SECTION),
+                "A triangle sits left of the letter."
+            )
         ]
     );
     let visible = scope(&ledger, conversation, &source)?;
@@ -989,12 +1068,12 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
     let leading_notes = "First-page example. ".repeat(1_000);
     let trailing_notes = "Last-page example. ".repeat(1_000);
     let first_batch = json!({"pages": [
-        {"page":1, "status":"transcribed", "text":leading_notes},
-        {"page":2, "status":"blank", "text":""},
-        {"page":4, "status":"transcribed", "text":"Third original."},
-        {"page":5, "status":"transcribed", "text":"Fourth original."}
+        {"page":1, "status":"readable", "writing":leading_notes, "visual_observation":""},
+        {"page":2, "status":"blank", "writing":"", "visual_observation":""},
+        {"page":4, "status":"readable", "writing":"Third original.", "visual_observation":""},
+        {"page":5, "status":"readable", "writing":"Fourth original.", "visual_observation":""}
     ]});
-    let later_unreadable = json!({"pages": [{"page":6, "status":"unreadable", "text":""}]});
+    let later_unreadable = json!({"pages": [{"page":6, "status":"unreadable", "writing":"", "visual_observation":""}]});
     let refused = scope(&ledger, conversation, &source)?;
     let mut blocked = Model {
         replies: [first_batch.to_string(), later_unreadable.to_string()].into(),
@@ -1025,7 +1104,7 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
         )?
         .is_none());
 
-    let final_batch = json!({"pages": [{"page":6, "status":"transcribed", "text":trailing_notes}]});
+    let final_batch = json!({"pages": [{"page":6, "status":"readable", "writing":trailing_notes, "visual_observation":""}]});
     let mut model = Model {
         replies: [
             first_batch.to_string(),
