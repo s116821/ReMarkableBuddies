@@ -601,9 +601,10 @@ impl Workflow {
             anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
             let health = self.service_health.as_mut().expect("selected health owner");
             let owner = self.resident_source.as_mut().unwrap();
+            let writer_enabled = config.is_none_or(|settings| settings.admits_writer(false));
             let released = match self
                 .device
-                .wait_for_resident_reader(&mut || owner.progress(health))
+                .wait_for_resident_reader(writer_enabled, &mut || owner.progress(health))
             {
                 Ok(released) => released,
                 Err(error) => {

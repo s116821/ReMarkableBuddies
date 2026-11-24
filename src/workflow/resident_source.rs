@@ -343,9 +343,9 @@ impl ResidentSourceOwner {
         if writer && self.selection.has_installed_output() {
             // A failed read cannot carry over a previously observed request.
             self.writer_at_release = None;
-            self.writer_at_release = match &self.session {
-                Some(session) => session.writer_at_release(released.released_boot_second)?,
-                None => None,
+            self.writer_at_release = match (&self.session, released.released_boot_second) {
+                (Some(session), Some(second)) => session.writer_at_release(second)?,
+                _ => None,
             };
             return Ok(reader || self.writer_at_release.is_some());
         }
@@ -1351,7 +1351,7 @@ mod tests {
     fn released(at: Instant) -> ReleasedReaderInput {
         ReleasedReaderInput {
             released_at: at,
-            released_boot_second: crate::device::request_input::boot_seconds().unwrap(),
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: quiet_guard(),
         }
@@ -2325,7 +2325,7 @@ mod tests {
         polls.extend((0..4096).map(|_| Ok(vec![])));
         let first = ReleasedReaderInput {
             released_at: Instant::now(),
-            released_boot_second: crate::device::request_input::boot_seconds().unwrap(),
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: RequestInput::scripted(polls),
         };

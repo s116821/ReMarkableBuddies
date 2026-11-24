@@ -1,7 +1,6 @@
 //! One local Writer request scoped to the installed activation and a page.
 use super::{libc, open_at, recovery, Lease};
 use crate::{
-    device::request_input::boot_seconds,
     storage::{files, Uuid},
     writer::Request,
 };
@@ -19,6 +18,17 @@ use std::{
 
 const LIMIT: u64 = 32 * 1024;
 const LIFETIME_SECS: u64 = 120;
+
+fn boot_seconds() -> Result<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(time.tv_sec.try_into()?)
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
@@ -246,8 +256,9 @@ pub(crate) fn at_release(
     // The current draft and its page binding are verified before a claim.
     let pending = read(lease, &name(lease))?;
     lease.current()?;
+    let now = boot_seconds()?;
     match pending {
-        Some(slot) if boot_seconds()? < slot.expires => {
+        Some(slot) if released_boot_second <= now && now < slot.expires => {
             slot.refinement(lease.record().activation(), released_boot_second)
         }
         _ => Ok(None),
