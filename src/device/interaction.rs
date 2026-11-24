@@ -5,7 +5,7 @@ use std::time::Duration;
 const HOLD: Duration = Duration::from_secs(2);
 const FORMATION: Duration = Duration::from_millis(250);
 const RELEASE: Duration = Duration::from_millis(500);
-const JITTER: i32 = 8;
+const STATIONARY_JITTER: u32 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,14 +112,16 @@ impl ContactReducer {
         session.reader_held_in_corner &= reader_in_corner;
         let same_id = |a: &Contact, b: &Contact| a.slot == b.slot && a.tracking == b.tracking;
         let contains = |list: &[Contact], item: &Contact| list.iter().any(|old| same_id(old, item));
+        // Multi-finger gestures require stillness. Reader instead tracks one
+        // continuous contact inside the corner, including normal finger drift.
         let moved = contacts.iter().any(|contact| {
             session
                 .reference
                 .iter()
                 .find(|old| same_id(old, contact))
                 .is_some_and(|old| {
-                    old.x.abs_diff(contact.x) > JITTER as u32
-                        || old.y.abs_diff(contact.y) > JITTER as u32
+                    old.x.abs_diff(contact.x) > STATIONARY_JITTER
+                        || old.y.abs_diff(contact.y) > STATIONARY_JITTER
                 })
         });
         let duplicates = contacts.windows(2).any(|pair| pair[0].slot == pair[1].slot)
@@ -131,7 +133,7 @@ impl ContactReducer {
                 .iter()
                 .zip(&session.current)
                 .all(|(a, b)| same_id(a, b));
-        if moved || duplicates {
+        if duplicates {
             session.blocked = true;
         }
         if !same {
@@ -160,6 +162,7 @@ impl ContactReducer {
         if session.qualified.is_none()
             && !session.blocked
             && !session.invalidated
+            && !moved
             && elapsed >= HOLD
         {
             session.qualified = match contacts.len() {
@@ -170,7 +173,8 @@ impl ContactReducer {
             };
         }
         if !session.invalidated
-            && (session.blocked
+            && (moved
+                || session.blocked
                 || (session.qualified.is_none()
                     && !matches!(contacts.len(), 2 | 4)
                     && !(self.blank_start && contacts.len() == 3)
@@ -353,6 +357,53 @@ mod tests {
         assert!(reducer.frame(&[inside_jitter], ms(6100)).is_empty());
         assert_eq!(reducer.frame(&[], ms(8000)), vec![Interaction::Reader]);
         assert!(reducer.frame(&[], ms(8100)).is_empty());
+    }
+
+    #[test]
+    fn single_finger_can_settle_inside_the_corner_without_arming_other_gestures() {
+        let mut reducer = ContactReducer::new(TriggerCorner::LowerRight);
+        let start = Contact {
+            slot: 0,
+            tracking: 1,
+            x: 712,
+            y: 970,
+        };
+        let settled = Contact {
+            x: 729,
+            y: 982,
+            ..start
+        };
+        assert!(reducer.frame(&[start], ms(0)).is_empty());
+        assert_eq!(
+            reducer.frame(&[settled], ms(100)),
+            vec![Interaction::Invalidated]
+        );
+        assert_eq!(reducer.frame(&[], ms(2200)), vec![Interaction::Reader]);
+        assert!(reducer.frame(&[], ms(2300)).is_empty());
+
+        // Drift first reported with the second finger still cancels both actions.
+        reducer.frame(&[start], ms(3000));
+        let second = Contact {
+            slot: 1,
+            tracking: 2,
+            ..settled
+        };
+        assert_eq!(
+            reducer.frame(&[settled, second], ms(3150)),
+            vec![Interaction::Invalidated]
+        );
+        assert!(reducer.frame(&[settled, second], ms(5400)).is_empty());
+        assert!(reducer.frame(&[], ms(5500)).is_empty());
+
+        // Keeping the same slot does not let a replacement finger finish the hold.
+        reducer.frame(&[start], ms(6000));
+        reducer.frame(&[settled], ms(6300));
+        let replacement = Contact {
+            tracking: 3,
+            ..settled
+        };
+        reducer.frame(&[replacement], ms(6500));
+        assert!(reducer.frame(&[], ms(8500)).is_empty());
     }
 
     #[test]
