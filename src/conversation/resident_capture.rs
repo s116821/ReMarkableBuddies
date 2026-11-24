@@ -711,7 +711,8 @@ mod tests {
                     center: crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024)
                         .unwrap(),
                     subject: Some(
-                        crate::analysis::ReaderSourceSubject::try_from("24 / 6".into()).unwrap(),
+                        crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned())
+                            .unwrap(),
                     ),
                 },
             )

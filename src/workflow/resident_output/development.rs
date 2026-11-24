@@ -1280,7 +1280,7 @@ mod tests {
             crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
         let question = "What does <Start of Q-A block> mean?";
         let answer = "Keep this literal.\n(0.1, 0.2) is part of the answer.";
-        let subject = crate::analysis::ReaderSourceSubject::try_from("24 / 6".into()).unwrap();
+        let subject = crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned()).unwrap();
         let reader = |subject| ResidentOutputText::Reader {
             question,
             answer,
