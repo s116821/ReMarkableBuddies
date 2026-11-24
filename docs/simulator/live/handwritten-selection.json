@@ -1,0 +1,16 @@
+{
+  "name": "live-handwritten-selection",
+  "llm": { "mode": "live", "max_calls": 2, "timeout_seconds": 90 },
+  "pages": [{ "image": "../../validation/images/rem17/handwritten-selection-input.png" }, {}],
+  "iterations": [{}],
+  "output": "../../../target/simulator/live-handwritten-selection",
+  "expect": {
+    "active_page": 1,
+    "model_calls": 2,
+    "unchanged_pages": [0],
+    "text": { "0": "" },
+    "text_contains": { "1": ["Reader Buddy Answers", "Q: How much is this?", "A: 25"] },
+    "x_count": { "0": 0, "1": 0 },
+    "operations": { "next": 1, "previous": 0, "text": 2, "body": 1 }
+  }
+}
