@@ -378,6 +378,11 @@ impl ResidentSourceOwner {
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
+        use super::{
+            resident_output::SelectedConversationRequest,
+            resident_supervisor::writer_request::InstalledRequest,
+        };
+
         let session = self
             .session
             .as_ref()
@@ -385,14 +390,23 @@ impl ResidentSourceOwner {
         Ok(session
             .take_writer_request(capture.document(), capture.page())?
             .map(|request| match request {
-                super::resident_supervisor::writer_request::InstalledRequest::Refine(request) => {
-                    super::resident_output::SelectedConversationRequest::WriterRefinement {
+                InstalledRequest::Refine(request) => {
+                    SelectedConversationRequest::WriterRefinement {
                         request,
                         require_current_draft: true,
                     }
                 }
-                super::resident_supervisor::writer_request::InstalledRequest::GenerateRegion(_) => {
-                    super::resident_output::SelectedConversationRequest::UnsupportedRegionalWriter
+                InstalledRequest::GenerateRegion(_) => {
+                    SelectedConversationRequest::UnsupportedRegionalWriter
+                }
+                InstalledRequest::GenerateCurrentTarget(request) => {
+                    SelectedConversationRequest::WriterCurrentTarget(
+                        crate::writer::target::CurrentRequest {
+                            operation: request.operation,
+                            request: request.request,
+                            guidance: request.guidance,
+                        },
+                    )
                 }
             }))
     }
@@ -1352,6 +1366,8 @@ pub(crate) mod tests {
         _fixture: Fixture,
         events: Events,
         delivery_fault: bool,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot: Option<Rc<super::super::resident_supervisor::writer_request::FixtureSlot>>,
     }
     struct OwnedAdmission<'a> {
         health: &'a mut ServiceHealth,
@@ -1377,6 +1393,39 @@ pub(crate) mod tests {
         }
     }
     impl SourceSession for OwnedSession {
+        #[cfg(feature = "installed-resident-output")]
+        fn take_writer_request(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+        ) -> Result<Option<super::super::resident_supervisor::writer_request::InstalledRequest>>
+        {
+            use super::super::resident_supervisor::writer_request::{
+                InstalledRequest, RegionalRequest,
+            };
+            if let Some(slot) = &self.writer_slot {
+                return slot.take_on_page(document, page);
+            }
+            let mut events = self.events.borrow_mut();
+            let Some(index) = events
+                .iter()
+                .position(|event| *event == "current-target-writer-queued")
+            else {
+                return Ok(None);
+            };
+            events.remove(index);
+            events.push("current-target-writer-received");
+            Ok(Some(InstalledRequest::GenerateCurrentTarget(
+                RegionalRequest {
+                    document,
+                    page,
+                    operation: ConversationId::new_v4(),
+                    request: "Make a note about the current selected source".into(),
+                    guidance: None,
+                },
+            )))
+        }
+
         fn companion_pid(&self) -> Option<u32> {
             self.runtime.fixture_companion_pid()
         }
@@ -1518,6 +1567,8 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: self.events.clone(),
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }))
         }
     }
@@ -1565,6 +1616,326 @@ pub(crate) mod tests {
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn ordinary_installed_current_target_reaches_writer_and_refuses_an_unbound_page() {
+        let (mut workflow, store, base, events, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.resident_source.as_mut().unwrap().selection =
+            InstalledReaderSelection::fixture_with_installed_output();
+        events.borrow_mut().push("current-target-writer-queued");
+        let config = crate::config::Config {
+            paths: store.paths.clone(),
+            ..Default::default()
+        };
+        let ledger = Ledger::new(store.clone());
+        let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .unwrap()
+            .with_regional_writer_model("fixture".into());
+        let calls = Rc::new(Cell::new(0));
+        let provider = Provider {
+            calls: calls.clone(),
+            batches: Rc::new(RefCell::new(vec![])),
+            images: vec![],
+            payload_delay: Duration::ZERO,
+            kill_pid: None,
+            selection_subject: Some("24 / 6"),
+        };
+        let mut reader = Orchestrator::new(workflow, provider, ledger);
+        let error = reader
+            .run_iteration_with_trigger(true, Some(&dispatch))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a bound conversation"),
+            "{error:#}"
+        );
+        assert!(events.borrow().contains(&"current-target-writer-received"));
+        assert_eq!(calls.get(), 0);
+        drop(reader);
+        drop(dispatch);
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn ordinary_installed_current_target_places_the_masked_regional_draft() {
+        use super::super::resident_supervisor::writer_request::{FixtureSlot, RegionalRequest};
+        use crate::conversation::{
+            resident_capture::tests::capture_for,
+            target::{geometry::Geometry, Candidate, Understanding},
+            target_source::tests::Fixture as StoreFixture,
+            BindingAcquisition, BindingReceipt, ExpectedHeads, Mode, Role, SourceObservation, Turn,
+        };
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        #[derive(Default)]
+        struct RegionalModel {
+            calls: Rc<Cell<usize>>,
+            images: Vec<String>,
+            text: Vec<String>,
+        }
+
+        impl crate::LLMEngine for RegionalModel {
+            fn guarded_timeout(&self) -> Option<Duration> {
+                Some(Duration::from_secs(1))
+            }
+            fn execute_with_handoff(
+                &mut self,
+                progress: &mut dyn FnMut() -> Result<()>,
+                handoff: &mut crate::llm::ModelHandoff<'_>,
+            ) -> Result<String> {
+                progress()?;
+                let mut result = None;
+                handoff(&mut || {
+                    result = Some(self.execute());
+                    Ok(())
+                })?;
+                result.context("regional fixture provider was not dispatched")?
+            }
+            fn add_text_content(&mut self, text: &str) {
+                self.text.push(text.into());
+            }
+            fn add_image_content(&mut self, image: &str) {
+                self.images.push(image.into());
+            }
+            fn clear_content(&mut self) {
+                self.images.clear();
+                self.text.clear();
+            }
+            fn execute(&mut self) -> Result<String> {
+                let call = self.calls.get();
+                self.calls.set(call + 1);
+                match call {
+                    0 => {
+                        let [image] = self.images.as_slice() else {
+                            panic!("normalization must receive one masked original");
+                        };
+                        let png = STANDARD.decode(image).unwrap();
+                        let pixels =
+                            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                                .unwrap()
+                                .to_rgba8();
+                        assert_eq!(pixels.dimensions(), (12, 20));
+                        assert_eq!(pixels.get_pixel(1, 1).0, [17, 29, 41, 255]);
+                        assert_eq!(pixels.get_pixel(10, 1).0, [255, 255, 255, 255]);
+                        Ok(
+                            r#"{"pages":[{"page":1,"status":"transcribed","text":"24 / 6 = 4"}]}"#
+                                .into(),
+                        )
+                    }
+                    1 => {
+                        assert!(self.images.is_empty());
+                        assert!(self.text.iter().any(|part| part.contains("24 / 6 = 4")));
+                        Ok("# Regional note\n\nSelected equation equals four.".into())
+                    }
+                    _ => panic!("unexpected extra model request"),
+                }
+            }
+        }
+
+        let base = StoreFixture(std::env::temp_dir().join(format!(
+            "resident-current-target-{}",
+            ConversationId::new_v4(),
+        )));
+        let config = crate::config::Config {
+            paths: StorePaths {
+                data: base.0.join("data"),
+                cache: base.0.join("cache"),
+                credentials: base.0.join("credentials"),
+            },
+            ..Default::default()
+        };
+        let store = Arc::new(Store::open_source_target_startup(&config).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let document = ConversationId::new_v4();
+        let original = capture_for(document);
+        let page = original.page();
+        let conversation = ConversationId::new_v4();
+        ledger
+            .create(conversation, ConversationId::new_v4(), 1)
+            .unwrap();
+        let image_id = ConversationId::new_v4();
+        let mut user = Turn {
+            id: ConversationId::new_v4(),
+            conversation,
+            exchange: ConversationId::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        ledger
+            .prepare_resident_historical(
+                ConversationId::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                user.clone(),
+                image_id,
+                &original,
+            )
+            .unwrap();
+        let mut frame = ledger.target_source_frame(conversation, image_id).unwrap();
+        let user_heads = ledger.expected(Namespace::Conversation, user.id).unwrap();
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = 2;
+        user.text = Some("What is this?".into());
+        user.sources = vec![image_id];
+        ledger
+            .advance_with_source_target(
+                ConversationId::new_v4(),
+                user_heads,
+                user,
+                &mut frame,
+                &Candidate {
+                    subject: "24 / 6".into(),
+                    geometry: Some(Geometry {
+                        components: vec![vec![
+                            [0, 0],
+                            [500_000, 0],
+                            [500_000, 1_000_000],
+                            [0, 1_000_000],
+                        ]],
+                    }),
+                    understanding: Understanding::Interpreted,
+                },
+                Some(
+                    crate::analysis::SelectionCenter::from_pixels(192.0, 512.0, 768, 1024).unwrap(),
+                ),
+            )
+            .unwrap();
+        let target = ledger
+            .current_resident_writer_target(conversation, document, page)
+            .unwrap()
+            .unwrap();
+
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let runtime = native
+            .start_with_store(
+                store.clone(),
+                "reconnect-source-handoff",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let profile = InstalledReaderSelection::fixture_for_installed_output(
+            &base.0.join("output-profile"),
+            runtime.identity(),
+        )
+        .unwrap();
+        let hex = |bytes: [u8; 32]| {
+            bytes
+                .into_iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let bind = ConversationId::new_v4();
+        ledger
+            .bind(
+                bind,
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                ExpectedHeads::default(),
+                BindingReceipt {
+                    operation: bind,
+                    conversation,
+                    request_fingerprint: "fixture-request".into(),
+                    adapter_fingerprint: hex(runtime.identity().adapter_sha256),
+                    source: SourceObservation {
+                        document,
+                        page,
+                        session: "fixture-session".into(),
+                        visit: "fixture-visit".into(),
+                        content_revision: None,
+                        order_revision: None,
+                        capability_revision: hex(runtime.identity().profile_sha256),
+                        evidence_procedure: "fixture-source".into(),
+                    },
+                    intended_target: Some(page),
+                    observed_document: document,
+                    observed_page: page,
+                    expected_order: vec![page],
+                    observed_order: vec![page],
+                    persisted_revision: "fixture-binding".into(),
+                    observed_ms: 3,
+                    evidence_origin: "installed-native-guarded-v1".into(),
+                    acquisition: BindingAcquisition::ExistingCurrent,
+                },
+            )
+            .unwrap();
+
+        let operation = ConversationId::new_v4();
+        let slot = Rc::new(FixtureSlot::current_target(RegionalRequest {
+            document,
+            page,
+            operation,
+            request: "Make a note about this marked source".into(),
+            guidance: None,
+        }));
+        let preview = Rc::new(RefCell::new(vec![]));
+        let backend =
+            super::super::selected_backend::RefusingBackend::with_resident_releases(vec![
+                released(Instant::now()),
+            ])
+            .with_test_output(Box::new(RecognitionProbe {
+                writer_preview: Some(preview.clone()),
+                ..RecognitionProbe::default()
+            }));
+        let mut workflow = Workflow::with_device(Box::new(backend), false);
+        let (socket, _notify) = UnixDatagram::pair().unwrap();
+        workflow
+            .enable_service_health(ServiceHealth::fixture(socket))
+            .unwrap();
+        workflow
+            .configure_resident_source(profile, store.clone())
+            .unwrap();
+        let events = Rc::new(RefCell::new(vec![]));
+        workflow.resident_source.as_mut().unwrap().session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            writer_slot: Some(slot.clone()),
+        }));
+        let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .unwrap()
+            .with_regional_writer_model("fixture".into());
+        let provider = RegionalModel::default();
+        let calls = provider.calls.clone();
+        let mut reader = Orchestrator::new(workflow, provider, Ledger::new(store.clone()));
+        reader
+            .run_iteration_with_trigger(true, Some(&dispatch))
+            .unwrap();
+
+        assert_eq!(calls.get(), 2);
+        assert!(!slot.pending());
+        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(
+            preview.borrow().as_slice(),
+            &["Regional note\n\nAbout: 24 / 6\n\nSelected equation equals four.\n"],
+        );
+        let records = ledger.inspect(conversation, false).unwrap();
+        assert!(records.iter().any(|record| matches!(record,
+            Record::RegionSource(region) if region.target == target
+                && region.normalized.document.document == document)));
+        assert!(records.iter().any(|record| matches!(record,
+            Record::Turn(turn) if turn.exchange == operation
+                && turn.role == Role::Assistant
+                && turn.mode == Mode::Writer
+                && turn.outcome == Outcome::Generated)));
     }
 
     #[test]
@@ -1888,6 +2259,22 @@ pub(crate) mod tests {
     struct RecognitionProbe {
         conversation: Option<ConversationId>,
         confirmed_source: bool,
+        #[cfg(feature = "installed-resident-output")]
+        writer_preview: Option<Rc<RefCell<Vec<String>>>>,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    struct WriterPreview(Rc<RefCell<Vec<String>>>);
+
+    #[cfg(feature = "installed-resident-output")]
+    impl ResidentRenderer for WriterPreview {
+        fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
+            lease.step(|pulse| {
+                pulse()?;
+                self.0.borrow_mut().push(text.to_owned());
+                pulse()
+            })
+        }
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -2073,6 +2460,10 @@ pub(crate) mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
             assert!(self.conversation.replace(conversation).is_none());
+            #[cfg(feature = "installed-resident-output")]
+            if self.writer_preview.is_some() {
+                return Ok(PageUse::RelevantBuddy);
+            }
             Ok(if self.confirmed_source {
                 PageUse::ConfirmedNonBuddy
             } else {
@@ -2112,6 +2503,10 @@ pub(crate) mod tests {
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
+            #[cfg(feature = "installed-resident-output")]
+            if let Some(preview) = &self.writer_preview {
+                return Ok(Box::new(WriterPreview(preview.clone())));
+            }
             panic!("unexpected renderer request");
         }
     }
@@ -2153,6 +2548,8 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             let source = RecognitionProbe {
                 confirmed_source: true,
@@ -2389,6 +2786,8 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             owner.reconnect = true;
             let calls = Rc::new(Cell::new(0));

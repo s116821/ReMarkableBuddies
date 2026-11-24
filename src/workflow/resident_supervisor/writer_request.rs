@@ -33,6 +33,13 @@ pub(crate) enum Submission {
         request: String,
         guidance: Option<String>,
     },
+    GenerateCurrentTargetOnTablet {
+        document: Uuid,
+        page: Uuid,
+        operation: Uuid,
+        request: String,
+        guidance: Option<String>,
+    },
     AdoptLegacyPage {
         approval: LegacyAdoption,
     },
@@ -91,7 +98,8 @@ impl Submission {
             Self::RefineOnTablet { refinement, .. } => {
                 (refinement.conversation(), refinement.operation())
             }
-            Self::GenerateRegionOnTablet { operation, .. } => (Uuid::nil(), *operation),
+            Self::GenerateRegionOnTablet { operation, .. }
+            | Self::GenerateCurrentTargetOnTablet { operation, .. } => (Uuid::nil(), *operation),
             Self::AdoptLegacyPage { approval } => (Uuid::nil(), approval.operation),
         }
     }
@@ -169,6 +177,13 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
         operation,
         request,
         guidance,
+    }
+    | Submission::GenerateCurrentTargetOnTablet {
+        document,
+        page,
+        operation,
+        request,
+        guidance,
     } = &submission
     {
         RegionalRequest {
@@ -193,9 +208,9 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
     );
     lease.record.group.current_process()?;
     let name = match &submission {
-        Submission::RefineOnTablet { .. } | Submission::GenerateRegionOnTablet { .. } => {
-            name(&lease)
-        }
+        Submission::RefineOnTablet { .. }
+        | Submission::GenerateRegionOnTablet { .. }
+        | Submission::GenerateCurrentTargetOnTablet { .. } => name(&lease),
         Submission::AdoptLegacyPage { approval } => {
             approval.validate(&lease)?;
             match open_at(&lease.directory, &approval.spent_name(), false, false) {
@@ -250,14 +265,26 @@ impl RegionalRequest {
 pub(crate) enum InstalledRequest {
     Refine(Request),
     GenerateRegion(RegionalRequest),
+    GenerateCurrentTarget(RegionalRequest),
 }
 impl Pending {
     fn request(self) -> Result<InstalledRequest> {
+        let current = matches!(
+            self.submission,
+            Submission::GenerateCurrentTargetOnTablet { .. }
+        );
         match self.submission {
             Submission::RefineOnTablet { refinement, .. } => {
                 Ok(InstalledRequest::Refine(refinement))
             }
             Submission::GenerateRegionOnTablet {
+                document,
+                page,
+                operation,
+                request,
+                guidance,
+            }
+            | Submission::GenerateCurrentTargetOnTablet {
                 document,
                 page,
                 operation,
@@ -272,7 +299,11 @@ impl Pending {
                     guidance,
                 };
                 request.validate()?;
-                Ok(InstalledRequest::GenerateRegion(request))
+                Ok(if current {
+                    InstalledRequest::GenerateCurrentTarget(request)
+                } else {
+                    InstalledRequest::GenerateRegion(request)
+                })
             }
             _ => anyhow::bail!("unexpected command in Writer slot"),
         }
@@ -280,7 +311,10 @@ impl Pending {
     fn page(&self) -> Result<(Uuid, Uuid)> {
         match &self.submission {
             Submission::RefineOnTablet { document, page, .. }
-            | Submission::GenerateRegionOnTablet { document, page, .. } => Ok((*document, *page)),
+            | Submission::GenerateRegionOnTablet { document, page, .. }
+            | Submission::GenerateCurrentTargetOnTablet { document, page, .. } => {
+                Ok((*document, *page))
+            }
             _ => anyhow::bail!("unexpected command in Writer slot"),
         }
     }
@@ -307,9 +341,24 @@ fn caller(activation: uuid::Uuid) -> Result<Lease> {
 }
 pub(crate) fn peek(activation: uuid::Uuid) -> Result<Option<RegionalPin>> {
     let lease = caller(activation)?;
-    let Some(pending) = read(&lease, &name(&lease))? else {
+    peek_locked(&lease)
+}
+
+fn peek_locked(lease: &Lease) -> Result<Option<RegionalPin>> {
+    let name = name(lease);
+    let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
+    if matches!(
+        pending.submission,
+        Submission::GenerateCurrentTargetOnTablet { .. }
+    ) {
+        if boot_seconds()? >= pending.expires {
+            discard_locked(lease, &name)?;
+        }
+        lease.current()?;
+        anyhow::bail!("current-target Writer requires the ordinary receiver");
+    }
     if !matches!(
         pending.submission,
         Submission::GenerateRegionOnTablet { .. }
@@ -323,7 +372,7 @@ pub(crate) fn peek(activation: uuid::Uuid) -> Result<Option<RegionalPin>> {
         anyhow::bail!("regional Writer intent changed")
     };
     Ok(Some(RegionalPin {
-        activation,
+        activation: lease.record().activation(),
         digest,
         request,
         #[cfg(test)]
@@ -428,7 +477,19 @@ fn take_locked(lease: &Lease, document: Uuid, page: Uuid) -> Result<Option<Insta
         lease.current()?;
         anyhow::bail!("fresh regional Writer requires the selected receiver");
     }
-    if !expired && pending.page()? != (document, page) {
+    let matching_page = !expired && pending.page()? == (document, page);
+    if matches!(
+        pending.submission,
+        Submission::GenerateCurrentTargetOnTablet { .. }
+    ) && (expired || !matching_page)
+    {
+        if expired {
+            discard_locked(lease, &name)?;
+        }
+        lease.current()?;
+        anyhow::bail!("current-target Writer request expired or belongs to another page");
+    }
+    if !expired && !matching_page {
         return Ok(None);
     }
     discard_locked(lease, &name)?;
@@ -508,9 +569,6 @@ pub(crate) struct FixtureSlot {
 #[cfg(test)]
 impl FixtureSlot {
     pub(crate) fn new(request: RegionalRequest) -> Self {
-        let fixture = super::tests::Fixture::new();
-        let path = fixture.lease_dir();
-        let lease = Lease::publish_inner(&path, fixture.record()).unwrap();
         let submission = Submission::GenerateRegionOnTablet {
             document: request.document,
             page: request.page,
@@ -518,6 +576,24 @@ impl FixtureSlot {
             request: request.request.clone(),
             guidance: request.guidance.clone(),
         };
+        Self::with_submission(request, submission)
+    }
+
+    pub(crate) fn current_target(request: RegionalRequest) -> Self {
+        let submission = Submission::GenerateCurrentTargetOnTablet {
+            document: request.document,
+            page: request.page,
+            operation: request.operation,
+            request: request.request.clone(),
+            guidance: request.guidance.clone(),
+        };
+        Self::with_submission(request, submission)
+    }
+
+    fn with_submission(request: RegionalRequest, submission: Submission) -> Self {
+        let fixture = super::tests::Fixture::new();
+        let path = fixture.lease_dir();
+        let lease = Lease::publish_inner(&path, fixture.record()).unwrap();
         files::atomic_json(
             &path.join(name(&lease)),
             &Pending {
@@ -539,6 +615,16 @@ impl FixtureSlot {
             pin,
         }
     }
+    pub(crate) fn take_on_page(
+        &self,
+        document: Uuid,
+        page: Uuid,
+    ) -> Result<Option<InstalledRequest>> {
+        let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap())?;
+        lock(&lease)?;
+        take_locked(&lease, document, page)
+    }
+
     pub(crate) fn pending(&self) -> bool {
         let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap()).unwrap();
         read(&lease, &name(&lease)).unwrap().is_some()
@@ -640,9 +726,7 @@ mod tests {
         document: Uuid,
         page: Uuid,
     ) -> Result<Option<InstalledRequest>> {
-        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
-        lock(&lease)?;
-        take_locked(&lease, document, page)
+        slot.take_on_page(document, page)
     }
     fn expire(slot: &FixtureSlot) {
         let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
@@ -651,6 +735,57 @@ mod tests {
         pending.expires = 0;
         files::atomic_json(&lease.path.join(name(&lease)), &pending).unwrap();
     }
+    #[test]
+    fn ordinary_current_target_requires_matching_live_page_and_consumes_once() {
+        let request = request();
+        for expired in [false, true] {
+            let slot = FixtureSlot::current_target(request.clone());
+            if expired {
+                expire(&slot);
+                assert!(ordinary(&slot, request.document, request.page).is_err());
+            } else {
+                let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+                let path = lease.path.join(name(&lease));
+                let exact = fs::read(&path).unwrap();
+                assert!(ordinary(&slot, request.document, Uuid::new_v4()).is_err());
+                assert_eq!(fs::read(&path).unwrap(), exact);
+                assert!(matches!(
+                    ordinary(&slot, request.document, request.page).unwrap(),
+                    Some(InstalledRequest::GenerateCurrentTarget(current)) if current == request
+                ));
+            }
+            assert!(ordinary(&slot, request.document, request.page)
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn selected_peek_preserves_live_wrong_mode_and_retires_expired_before_next_release() {
+        let slot = FixtureSlot::current_target(request());
+        let peek = || {
+            let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
+            lock(&lease)?;
+            peek_locked(&lease)
+        };
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+        let path = lease.path.join(name(&lease));
+        let original = fs::read(&path).unwrap();
+        assert!(peek().is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        expire(&slot);
+        assert!(
+            peek().is_err(),
+            "the release observing expiry must still refuse"
+        );
+        assert!(!path.exists());
+        assert!(
+            peek().unwrap().is_none(),
+            "the next release can select Reader"
+        );
+    }
+
     #[test]
     fn ordinary_ingress_matching_region_refuses_and_preserves_input() {
         let request = request();

@@ -520,12 +520,12 @@ impl Ledger {
     }
 }
 impl Ledger {
-    pub(crate) fn target_inherited_records(&self, user: &Turn) -> Result<Vec<Envelope>> {
+    fn current_target_reference(&self, conversation: Uuid) -> Result<Option<RecordRef>> {
         let Some(state) = self
             .store
-            .value(Namespace::Conversation, TargetState::id(user.conversation))?
+            .value(Namespace::Conversation, TargetState::id(conversation))?
         else {
-            return Ok(vec![]);
+            return Ok(None);
         };
         let Record::TargetState(state) = Self::decode(&state)? else {
             bail!("target state unavailable")
@@ -542,13 +542,50 @@ impl Ledger {
         let Record::TargetUse(prior) = Self::decode(&envelope)? else {
             bail!("target state's use variant")
         };
-        let Some(target) = prior.target else {
-            return Ok(vec![]);
-        };
         ensure!(
-            prior.conversation == user.conversation,
+            state.conversation == conversation && prior.conversation == conversation,
             "foreign current target"
         );
+        Ok(prior.target)
+    }
+
+    pub(crate) fn current_resident_writer_target(
+        &self,
+        conversation: Uuid,
+        document: Uuid,
+        page: Uuid,
+    ) -> Result<Option<RecordRef>> {
+        let Some(reference) = self.current_target_reference(conversation)? else {
+            return Ok(None);
+        };
+        let target = self.stored_source_target(conversation, &reference)?;
+        if !matches!(target.candidate.understanding, Understanding::Interpreted) {
+            return Ok(None);
+        }
+        let source = &target.source.record;
+        let bytes = self.store.read_object(&source.object)?;
+        let envelope: Envelope = serde_json::from_slice(&bytes)?;
+        ensure!(
+            envelope.namespace == source.namespace
+                && envelope.record_id == source.record
+                && envelope.revision_id == source.revision,
+            "current target capture reference differs"
+        );
+        let record = Self::decode(&envelope)?;
+        target.source.validate_record(&record, conversation)?;
+        let Record::ResidentCapture(capture) = record else {
+            return Ok(None);
+        };
+        Ok(
+            (capture.before.document == document && capture.before.page == page)
+                .then_some(reference),
+        )
+    }
+
+    pub(crate) fn target_inherited_records(&self, user: &Turn) -> Result<Vec<Envelope>> {
+        let Some(target) = self.current_target_reference(user.conversation)? else {
+            return Ok(vec![]);
+        };
         let used = TargetUse {
             id: TargetUse::id(user.id),
             conversation: user.conversation,
@@ -866,6 +903,56 @@ pub(crate) mod tests {
         };
         assert_eq!(&target.target.source, frame.source());
         assert_eq!(target.target.candidate, candidate);
+        let Record::ResidentCapture(origin) = &target.source else {
+            panic!("expected pinned resident capture");
+        };
+        let expected = expected_subject.map(|_| target.reference.clone());
+        assert_eq!(
+            ledger
+                .current_resident_writer_target(
+                    conversation,
+                    origin.before.document,
+                    origin.before.page,
+                )
+                .unwrap(),
+            expected
+        );
+        assert!(ledger
+            .current_resident_writer_target(conversation, origin.before.document, Uuid::new_v4(),)
+            .unwrap()
+            .is_none());
+        let operation = Uuid::new_v4();
+        let resolved = crate::writer::target::CurrentRequest {
+            operation,
+            request: "Make a note about this marked source".into(),
+            guidance: None,
+        }
+        .resolve(
+            &ledger,
+            conversation,
+            origin.before.document,
+            origin.before.page,
+        );
+        if let Some(expected) = expected {
+            let crate::writer::target::Request::GenerateTarget {
+                target,
+                expected_root,
+                request,
+                operation: resolved_operation,
+                ..
+            } = resolved.unwrap();
+            assert_eq!(target, expected);
+            assert_eq!(
+                expected_root,
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap()
+            );
+            assert_eq!(resolved_operation, operation);
+            assert_eq!(request, "Make a note about this marked source");
+        } else {
+            assert!(resolved.is_err());
+        }
         ledger
             .stored_target_frame(conversation, &target.reference)
             .unwrap();
@@ -1109,11 +1196,11 @@ pub(crate) mod tests {
 }
 
 impl Ledger {
-    pub(crate) fn stored_target_frame(
+    fn stored_source_target(
         &self,
         conversation: Uuid,
         reference: &RecordRef,
-    ) -> Result<(SourceFrame, SourceTarget)> {
+    ) -> Result<SourceTarget> {
         ensure!(
             reference.namespace == Namespace::Source,
             "target namespace differs"
@@ -1131,12 +1218,21 @@ impl Ledger {
             bail!("not a stored target")
         };
         ensure!(target.conversation == conversation, "foreign stored target");
+        Ok(*target)
+    }
+
+    pub(crate) fn stored_target_frame(
+        &self,
+        conversation: Uuid,
+        reference: &RecordRef,
+    ) -> Result<(SourceFrame, SourceTarget)> {
+        let target = self.stored_source_target(conversation, reference)?;
         let frame = self.target_source_frame(conversation, target.source.record.record)?;
         ensure!(
             frame.source == target.source,
             "stored target original changed"
         );
-        Ok((frame, *target))
+        Ok((frame, target))
     }
     pub(crate) fn target_document(&self, target: &SourceTarget) -> Result<Uuid> {
         let encoded = self.store.read_object(&target.source.record.object)?;

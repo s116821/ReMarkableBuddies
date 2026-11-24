@@ -243,6 +243,16 @@ impl InstalledReaderSelection {
         }
     }
 
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    pub(crate) fn fixture_for_installed_output(
+        path: &Path,
+        runtime: &RuntimeIdentity,
+    ) -> Result<Self> {
+        let mut selection = Self::fixture_for_output(path, runtime)?;
+        selection.installed_output = true;
+        Ok(selection)
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture_for_output(path: &Path, runtime: &RuntimeIdentity) -> Result<Self> {
         use std::{io::Write, os::unix::fs::DirBuilderExt};

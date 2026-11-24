@@ -45,6 +45,7 @@ pub enum SelectedConversationRequest {
     BlankStart(Option<Uuid>),
     /// Ordinary installed receivers cannot consume fresh regional generation.
     UnsupportedRegionalWriter,
+    WriterCurrentTarget(crate::writer::target::CurrentRequest),
     WriterRefinement {
         request: crate::writer::Request,
         require_current_draft: bool,
