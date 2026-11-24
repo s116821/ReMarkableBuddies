@@ -194,7 +194,7 @@ impl NotebookVisit for ResidentNotebookVisit<'_> {
         Ok(observed)
     }
 
-    fn progress(&mut self) -> Result<()> {
+    fn progress(&mut self, _expected: &SourceObservation) -> Result<()> {
         self.workflow.check_request_progress()
     }
 }

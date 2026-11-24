@@ -755,7 +755,7 @@ impl<'a> Dispatch<'a> {
                         admitted.check(ledger, &mut || visit.observe())
                     }
                     _ => {
-                        visit.progress()?;
+                        visit.progress(&admitted.source)?;
                         admitted.check_root(ledger)
                     }
                 }
@@ -798,7 +798,7 @@ impl<'a> Dispatch<'a> {
             runner::Check::Boundary => !visit
                 .observe()
                 .is_ok_and(|current| current == admitted.source),
-            runner::Check::Progress => visit.progress().is_err(),
+            runner::Check::Progress => visit.progress(&admitted.source).is_err(),
         });
         let output = result.finalized.map(|finalized| PendingOutput {
             id: finalized.draft().record_id,
@@ -1040,7 +1040,7 @@ pub(crate) enum ExportDecision {
 /// The cheap progress pulse services the same input and cancellation guard.
 pub(crate) trait NotebookVisit {
     fn observe(&mut self) -> Result<SourceObservation>;
-    fn progress(&mut self) -> Result<()>;
+    fn progress(&mut self, expected: &SourceObservation) -> Result<()>;
 }
 
 impl<F: FnMut() -> Result<SourceObservation>> NotebookVisit for F {
@@ -1048,7 +1048,8 @@ impl<F: FnMut() -> Result<SourceObservation>> NotebookVisit for F {
         self()
     }
 
-    fn progress(&mut self) -> Result<()> {
+    fn progress(&mut self, expected: &SourceObservation) -> Result<()> {
+        ensure!(&self()? == expected, "request visit changed");
         Ok(())
     }
 }
