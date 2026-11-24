@@ -75,12 +75,14 @@ impl SelectedConversationRequest {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum ReaderAbout<'a> {
     /// The complete About line from the validated source-target record.
     PreparedLine(&'a str),
     Subject(&'a crate::analysis::ReaderSubject),
 }
 
+#[derive(Clone, Copy)]
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
     WriterSourceDraft(&'a str),
@@ -108,6 +110,15 @@ pub trait ResidentOutputBackend {
 
     fn validate_new_page_text(&self, _text: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Existing adapters retain their preliminary Writer check. The installed
+    /// backend also checks the fully formatted text before creating a page.
+    fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
+        if let (false, ResidentOutputText::Plain(body)) = (new_page, text) {
+            self.validate_new_page_text(body)?;
+        }
+        Ok(true)
     }
 
     /// Optional diagnostics from fresh native pixels after rendering. This is

@@ -32,6 +32,10 @@ impl Fixture {
         self.0.join("ordinary-pdf-order-change")
     }
 
+    pub(crate) fn successor_position(&self) -> PathBuf {
+        self.0.join("successor-position")
+    }
+
     fn store(&self) -> Arc<Store> {
         Arc::new(
             Store::open(StorePaths {

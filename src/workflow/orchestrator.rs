@@ -656,7 +656,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         produced: Option<crate::conversation::WriterSelection>,
         protect_source: bool,
     ) -> Result<()> {
-        use super::resident_output::{ResidentOutputOutcome, ResidentOutputText};
+        use super::resident_output::ResidentOutputText;
         use crate::{storage::Namespace, writer};
 
         let selected =
@@ -683,28 +683,17 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
         )?;
         let text = format!("{title}\n\n{body}\n");
-        self.workflow.validate_resident_new_page_text(&text)?;
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)
         } else {
             ResidentOutputText::Plain(&text)
         };
-        match self.workflow.render_resident_answer(
+        self.workflow.place_resident_writer_draft(
             &self.ledger,
             conversation,
             output,
             association.as_ref(),
-            &mut || Ok(()),
-        )? {
-            ResidentOutputOutcome::SubmittedUnverified => {
-                info!("Writer draft submitted to the resident page");
-            }
-            ResidentOutputOutcome::InsertionRefused => {
-                anyhow::bail!("Writer draft generated, but page insertion was refused");
-            }
-            _ => anyhow::bail!("Writer draft generated but native placement is unresolved"),
-        }
-        Ok(())
+        )
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
@@ -1084,33 +1073,35 @@ impl<M: LLMEngine> Orchestrator<M> {
             };
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
-            let mut output_started = false;
+            let mut pending_root = None;
             let rendered = self.workflow.render_resident_answer(
                 &self.ledger,
                 conversation,
                 text,
                 association.as_ref(),
                 &mut || {
-                    if !output_started {
+                    if pending_root.is_none() {
                         before_output(&self.ledger)?;
-                        attempt.outcome(
-                            &self.ledger,
-                            true,
-                            Outcome::ReconcileRequired,
-                            AttemptReason::OutputPending,
-                        )?;
-                        output_started = true;
+                        pending_root = Some(attempt.start_resident_output(&self.ledger)?);
                     }
                     Ok(())
                 },
             );
             let recorded = match &rendered {
-                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => attempt.outcome(
-                    &self.ledger,
-                    true,
-                    Outcome::Failed,
-                    AttemptReason::NativeOutputUnavailable,
-                ),
+                Ok(super::resident_output::ResidentOutputOutcome::Unavailable) => {
+                    if let Some(root) = pending_root {
+                        // Placement can refuse text after successfully probing
+                        // and restoring the source, before an insertion or write.
+                        attempt.refuse_after_restored_page(&self.ledger, root)
+                    } else {
+                        attempt.outcome(
+                            &self.ledger,
+                            true,
+                            Outcome::Failed,
+                            AttemptReason::NativeOutputUnavailable,
+                        )
+                    }
+                }
                 Ok(super::resident_output::ResidentOutputOutcome::InsertionRefused) => attempt
                     .outcome(
                         &self.ledger,
@@ -1139,7 +1130,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         AttemptReason::NativeOutputUnavailable,
                     ),
                 Err(_)
-                    if !output_started
+                    if pending_root.is_none()
                         && self.workflow.input_failed()
                         && !self.workflow.runtime_failed() =>
                 {

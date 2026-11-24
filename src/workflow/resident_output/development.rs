@@ -666,14 +666,21 @@ impl ResidentOutputBackend for NativeOutputBackend {
     }
 
     fn validate_new_page_text(&self, text: &str) -> Result<()> {
+        ensure!(
+            self.supports_page_text(ResidentOutputText::Plain(text), true)?,
+            "development text/keyboard repertoire bound"
+        );
+        Ok(())
+    }
+
+    fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
         self.pin.current()?;
-        validate_text(
-            &self.keyboard.borrow(),
-            &self
-                .pin
-                .new_page_display()
-                .format(true, ResidentOutputText::Plain(text), |_| true),
-        )
+        let keyboard = self.keyboard.borrow();
+        Ok(self
+            .pin
+            .new_page_display()
+            .text_for_keyboard(new_page, text, |value| keyboard.supports_text(value))
+            .is_some())
     }
 
     fn admit(
@@ -1227,13 +1234,28 @@ impl DisplayFormat {
         }
         format!("{heading}{content}")
     }
+
+    fn text_for_keyboard(
+        self,
+        new: bool,
+        output: ResidentOutputText<'_>,
+        supports_keys: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let fits =
+            |text: &str| text.len() <= 2048 && text.chars().count() <= 512 && supports_keys(text);
+        let text = self.format(new, output, fits);
+        fits(&text).then_some(text)
+    }
 }
-fn validate_text(keyboard: &Keyboard, text: &str) -> Result<()> {
-    ensure!(
-        text.chars().count() <= 512 && text.len() <= 2048 && keyboard.supports_text(text),
-        "development text/keyboard repertoire bound"
-    );
-    Ok(())
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(in crate::workflow) fn fits_test_keyboard(
+    text: ResidentOutputText<'_>,
+    new_page: bool,
+) -> bool {
+    DisplayFormat::Unified
+        .text_for_keyboard(new_page, text, str::is_ascii)
+        .is_some()
 }
 
 impl ResidentRenderer for Renderer {
@@ -1248,11 +1270,9 @@ impl ResidentRenderer for Renderer {
     ) -> Result<()> {
         let text = {
             let keyboard = self.keyboard.borrow();
-            let rendered = self.display.format(self.new, text, |candidate| {
-                validate_text(&keyboard, candidate).is_ok()
-            });
-            validate_text(&keyboard, &rendered)?;
-            rendered
+            self.display
+                .text_for_keyboard(self.new, text, |value| keyboard.supports_text(value))
+                .context("development text/keyboard repertoire bound")?
         };
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
             pulse()?;
@@ -1286,6 +1306,54 @@ impl ResidentRenderer for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_text_checks_the_exact_destination_and_preserves_a_fitting_answer() {
+        let display = DisplayFormat::Unified;
+        let draft = "x".repeat(512);
+        let plain = ResidentOutputText::Plain(&draft);
+        assert_eq!(
+            display
+                .text_for_keyboard(false, plain, str::is_ascii)
+                .as_deref(),
+            Some(draft.as_str())
+        );
+        assert!(display
+            .text_for_keyboard(true, plain, str::is_ascii)
+            .is_none());
+        assert!(display
+            .text_for_keyboard(true, ResidentOutputText::Plain("π"), str::is_ascii)
+            .is_none());
+
+        let center =
+            crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
+        let subject = crate::analysis::ReaderSubject::Uncertain;
+        let question = "Why?";
+        let prefix = format!(
+            "{}\n\nQ: {question}\n\nA: ",
+            crate::conversation_layout::CONVERSATION_TITLE
+        );
+        let answer = "a".repeat(512 - prefix.len() - 1);
+        let longer = format!("{answer}!");
+        for about in [
+            ReaderAbout::Subject(&subject),
+            ReaderAbout::PreparedLine("About: 18 + 7"),
+        ] {
+            let reader = |answer| ResidentOutputText::Reader {
+                question,
+                answer,
+                center,
+                about: Some(about),
+            };
+            assert_eq!(
+                display.text_for_keyboard(true, reader(&answer), str::is_ascii),
+                Some(format!("{prefix}{answer}\n"))
+            );
+            assert!(display
+                .text_for_keyboard(true, reader(&longer), str::is_ascii)
+                .is_none());
+        }
+    }
 
     #[test]
     fn installed_display_uses_the_shared_title_and_exact_role_text() {

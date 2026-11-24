@@ -94,13 +94,15 @@ if declared_source.is_file():
 else:
     source_document, source_page = uuid.uuid4().bytes, uuid.uuid4().bytes
 source_order = [source_page]
-if mode == "reconnect-source-handoff-indeterminate-successor":
+if mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-source-handoff-text-refusal"):
     source_order.append(uuid.uuid4().bytes)
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
 source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
 
 def current_source_facts():
+    if mode == "reconnect-source-handoff-text-refusal" and (root.parent / "successor-position").is_file():
+        return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"
     if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
         extra = uuid.UUID(order_change.read_text()).bytes

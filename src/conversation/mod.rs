@@ -89,6 +89,12 @@ const TEXT_SOURCE_SCHEMA: u32 = 2;
 pub struct Ledger {
     store: Arc<Store>,
 }
+
+enum AdvanceReason {
+    Ordinary(AttemptReason),
+    #[cfg(target_os = "linux")]
+    RestoredPageOutputUnavailable,
+}
 impl Ledger {
     fn complete_store(&self) -> Result<()> {
         let unavailable_commits = self.store.unavailable_commits()?;
@@ -1384,6 +1390,31 @@ impl Ledger {
             None,
         )
     }
+
+    #[cfg(target_os = "linux")]
+    /// Settle only the pending root from this live request after a confirmed
+    /// return to the source and a text refusal before insertion or typing.
+    pub(crate) fn record_restored_page_output_unavailable(
+        &self,
+        operation: Uuid,
+        pending_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+    ) -> Result<()> {
+        self.advance_with_capture(
+            operation,
+            pending_root,
+            expected_turn,
+            turn,
+            Some(AdvanceReason::RestoredPageOutputUnavailable),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        Ok(())
+    }
     fn advance_fact(
         &self,
         operation: Uuid,
@@ -1398,7 +1429,7 @@ impl Ledger {
             expected_root,
             expected_turn,
             turn,
-            reason,
+            reason.map(AdvanceReason::Ordinary),
             None,
             resident_target,
             None,
@@ -1438,13 +1469,22 @@ impl Ledger {
         expected_root: ExpectedHeads,
         expected_turn: ExpectedHeads,
         turn: Turn,
-        reason: Option<AttemptReason>,
+        reason: Option<AdvanceReason>,
         target: Option<(&target_source::SourceFrame, &target::Candidate)>,
         resident_target: Option<(Uuid, &crate::analysis::ReaderSelection)>,
         captured: Option<&crate::storage::captured::Captured>,
         marked: Option<marked_question::PreparedMark>,
         published: Option<&mut Vec<Envelope>>,
     ) -> Result<(WriteResult, Option<marked_question::FreshMarkedQuestion>)> {
+        #[cfg(target_os = "linux")]
+        let restored = matches!(&reason, Some(AdvanceReason::RestoredPageOutputUnavailable));
+        #[cfg(not(target_os = "linux"))]
+        let restored = false;
+        let reason = reason.map(|reason| match reason {
+            AdvanceReason::Ordinary(reason) => reason,
+            #[cfg(target_os = "linux")]
+            AdvanceReason::RestoredPageOutputUnavailable => AttemptReason::NativeOutputUnavailable,
+        });
         let fingerprint = if let Some((frame, candidate)) = target {
             frame.check(self)?;
             if let Some((capture, selection)) = resident_target {
@@ -1558,8 +1598,17 @@ impl Ledger {
                     Some(AttemptReason::SubmittedUnverified | AttemptReason::DeviceUncertain),
                 )
             );
+        let restored_page_refusal = restored
+            && original.role == Role::Assistant
+            && original.mode == Mode::Reader
+            && original.outcome == Outcome::ReconcileRequired
+            && turn.outcome == Outcome::Failed;
         ensure!(
-            permitted || explicit_reconciliation || interpreted_reader_terminal,
+            if restored {
+                restored_page_refusal
+            } else {
+                permitted || explicit_reconciliation || interpreted_reader_terminal
+            },
             "invalid outcome transition; reconciliation is explicit"
         );
         if matches!(
