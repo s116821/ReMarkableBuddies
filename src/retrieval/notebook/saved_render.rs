@@ -1,5 +1,5 @@
 //! Bounded rendering for saved RM2 notebook pages admitted by the source owner.
-use super::{static_png, Options, OrderedNotebookImages};
+use super::{static_png, OrderedNotebookImages, MAX_ORDERED_NOTEBOOK_PAGES};
 use crate::storage::Uuid;
 use anyhow::{bail, ensure, Context, Result};
 use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
@@ -23,6 +23,7 @@ const MAX_HEIGHT: u32 = DEFAULT_HEIGHT * 3 / 2;
 const MAX_TEMPLATE_PNG: usize = 1024 * 1024;
 const MAX_TEMPLATE_SVG: usize = 32 * 1024;
 const MAX_PNG: usize = 2 * 1024 * 1024;
+const MAX_RETAINED_PNG_BYTES: usize = 8 * 1024 * 1024;
 const EDGE_MARGIN: f32 = 24.0;
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
@@ -37,7 +38,7 @@ pub(crate) struct SavedPage<'a> {
 #[derive(Default)]
 pub(crate) struct NotebookRaster {
     originals: Vec<(Uuid, Vec<u8>)>,
-    pixels: u64,
+    retained_png_bytes: usize,
 }
 
 impl NotebookRaster {
@@ -46,20 +47,14 @@ impl NotebookRaster {
         page: SavedPage<'_>,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
-        let options = Options::default();
         ensure!(
-            self.originals.len() < options.max_pages
+            self.originals.len() < MAX_ORDERED_NOTEBOOK_PAGES
                 && !page.id.is_nil()
                 && self.originals.iter().all(|(id, _)| *id != page.id),
             "unsupported saved notebook page count or identity"
         );
         progress()?;
         let height = checked_scene_extent(page.scene)?;
-        let pixels = self.pixels + u64::from(DEFAULT_WIDTH) * u64::from(height);
-        ensure!(
-            pixels <= options.max_total_pixels,
-            "saved notebook raster pixel budget exceeded"
-        );
         verify_white_template(&page)?;
         progress()?;
 
@@ -73,10 +68,13 @@ impl NotebookRaster {
             },
         )
         .context("saved scene rasterization refused")?;
-        ensure!(png.len() <= MAX_PNG, "saved scene PNG exceeds budget");
+        ensure!(
+            png.len() <= MAX_PNG && self.retained_png_bytes + png.len() <= MAX_RETAINED_PNG_BYTES,
+            "saved notebook PNG budget exceeded"
+        );
         progress()?;
+        self.retained_png_bytes += png.len();
         self.originals.push((page.id, png));
-        self.pixels = pixels;
         Ok(())
     }
 

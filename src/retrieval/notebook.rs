@@ -27,6 +27,7 @@ fn whole_page_instructions(options: Options) -> String {
 }
 const PROFILE_REVISION: &str = "notebook-ocr-unverified-v2:";
 const MIB: usize = 1024 * 1024;
+const MAX_ORDERED_NOTEBOOK_PAGES: usize = 32;
 
 pub struct PageImage<'a> {
     pub page: u32,
@@ -65,7 +66,7 @@ impl OrderedNotebookImages<'_> {
     pub(crate) fn image_digest(&self) -> Result<String> {
         let options = Options::default();
         ensure!(
-            (1..=options.max_pages).contains(&self.originals.len()),
+            (1..=MAX_ORDERED_NOTEBOOK_PAGES).contains(&self.originals.len()),
             "invalid notebook page count"
         );
         check_image_bytes(self.originals.iter().map(|(_, png)| *png), options)?;
@@ -91,7 +92,7 @@ impl OrderedNotebookImages<'_> {
     ) -> Result<NormalizedDocument> {
         let options = Options::default();
         ensure!(
-            (1..=options.max_pages).contains(&self.originals.len())
+            (1..=MAX_ORDERED_NOTEBOOK_PAGES).contains(&self.originals.len())
                 && self.order.len() == self.originals.len() + self.buddy_pages.len()
                 && self.originals.iter().any(|(page, _)| *page == current_page),
             "complete ordered notebook source required"
@@ -125,14 +126,39 @@ impl OrderedNotebookImages<'_> {
             image_digest == expected_image_digest,
             "notebook images differ from acquisition receipt"
         );
-        let NotebookText { mut document, .. } = normalize(
-            self.document,
-            &pages,
-            model_profile,
-            engine,
-            options,
-            progress,
-        )?;
+        let mut batches = pages.chunks(options.max_pages);
+        let mut transcribe = |pages: &[PageImage<'_>]| {
+            normalize(
+                self.document,
+                pages,
+                model_profile,
+                engine,
+                options,
+                progress,
+            )
+        };
+        let first = batches
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("complete ordered notebook source required"))?;
+        let NotebookText { mut document, .. } = transcribe(first)?;
+        let mut text_bytes = document
+            .units
+            .iter()
+            .map(|unit| unit.text.len())
+            .sum::<usize>();
+        for batch in batches {
+            let NotebookText { document: next, .. } = transcribe(batch)?;
+            text_bytes += next.units.iter().map(|unit| unit.text.len()).sum::<usize>();
+            ensure!(
+                text_bytes <= crate::writer::notebook::MAX_SELECTED_BYTES,
+                "notebook selected text too large"
+            );
+            document.units.extend(next.units);
+        }
+        if pages.len() > options.max_pages {
+            document.extractor_revision =
+                format!("ordered-batches-v1:{}", document.extractor_revision);
+        }
         document.source_sha256 = image_digest;
         Ok(document)
     }

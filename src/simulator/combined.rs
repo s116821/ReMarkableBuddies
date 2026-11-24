@@ -941,6 +941,161 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Result<()> {
+    use crate::{
+        conversation::notebook::NotebookPlan,
+        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages},
+        writer::notebook::runner::Status,
+    };
+
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open_targets()?;
+    let conversation = Uuid::new_v4();
+    ledger.create(conversation, Uuid::new_v4(), 1)?;
+    let mut source = fixture_source(Uuid::new_v4());
+    let originals = [
+        source.page,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let [first, blank, third, fourth, fifth] = originals;
+    let buddy = Uuid::new_v4();
+    let order = [first, blank, buddy, third, fourth, fifth];
+    let pngs = [5, 255, 12, 18, 25].map(fixture_png);
+    let pngs = pngs.into_iter().collect::<Result<Vec<_>>>()?;
+    let original_images: Vec<_> = originals
+        .into_iter()
+        .zip(pngs.iter().map(Vec::as_slice))
+        .collect();
+    let images = OrderedNotebookImages {
+        document: source.document,
+        order: &order,
+        originals: &original_images,
+        buddy_pages: &std::collections::BTreeSet::from([buddy]),
+    };
+    let receipt = NotebookSourceReceipt {
+        saved_source_revision: digest(b"independently observed fixture notebook"),
+        ordered_image_sha256: images.image_digest()?,
+    };
+    source.order_revision = Some(images.order_revision()?);
+    source.content_revision = Some(receipt.saved_source_revision.clone());
+    let config = Config::default();
+    let dispatch = Dispatch::local(&config, &ledger)?;
+    let request = "Make one study note from this notebook.";
+
+    let leading_notes = "First-page example. ".repeat(1_000);
+    let trailing_notes = "Last-page example. ".repeat(1_000);
+    let first_batch = json!({"pages": [
+        {"page":1, "status":"transcribed", "text":leading_notes},
+        {"page":2, "status":"blank", "text":""},
+        {"page":4, "status":"transcribed", "text":"Third original."},
+        {"page":5, "status":"transcribed", "text":"Fourth original."}
+    ]});
+    let later_unreadable = json!({"pages": [{"page":6, "status":"unreadable", "text":""}]});
+    let refused = scope(&ledger, conversation, &source)?;
+    let mut blocked = Model {
+        replies: [first_batch.to_string(), later_unreadable.to_string()].into(),
+        ..Model::default()
+    };
+    assert!(dispatch
+        .whole_notebook(
+            &ledger,
+            &mut blocked,
+            request,
+            &images,
+            &receipt,
+            "fixture",
+            &refused,
+            &mut || Ok(source.clone()),
+        )
+        .is_err());
+    assert_eq!(blocked.seen.len(), 2);
+    assert_eq!(
+        ledger.expected(Namespace::Conversation, conversation)?,
+        refused.root
+    );
+    assert!(ledger
+        .store()
+        .value(
+            Namespace::Conversation,
+            NotebookPlan::identity(refused.operation)
+        )?
+        .is_none());
+
+    let final_batch = json!({"pages": [{"page":6, "status":"transcribed", "text":trailing_notes}]});
+    let mut model = Model {
+        replies: [
+            first_batch.to_string(),
+            final_batch.to_string(),
+            "First map summary".into(),
+            "Second map summary".into(),
+            "# One notebook note\n\nExamples from the entire notebook.".into(),
+        ]
+        .into(),
+        ..Model::default()
+    };
+    let ready = scope(&ledger, conversation, &source)?;
+    let (report, output) = dispatch.whole_notebook(
+        &ledger,
+        &mut model,
+        request,
+        &images,
+        &receipt,
+        "fixture",
+        &ready,
+        &mut || Ok(source.clone()),
+    )?;
+    assert_eq!(report.status, Status::Generated);
+    assert_eq!(report.local_invocations, 3);
+    assert!(output.is_some());
+    assert_eq!(
+        model
+            .seen
+            .iter()
+            .map(|(_, attachments)| attachments.len())
+            .collect::<Vec<_>>(),
+        [4, 1, 0, 0, 0]
+    );
+    let encoded: Vec<_> = model
+        .seen
+        .iter()
+        .take(2)
+        .flat_map(|(_, images)| images)
+        .collect();
+    for (attachment, expected) in encoded.into_iter().zip(&pngs) {
+        assert_eq!(STANDARD.decode(attachment)?, *expected);
+    }
+    let draft = ledger.writer_turn(report.draft.unwrap(), conversation)?;
+    let archive = ledger
+        .store()
+        .value(Namespace::Source, draft.sources[0])?
+        .unwrap();
+    let Record::ArchivedNormalizedSource(archive) = Ledger::decode(&archive)? else {
+        anyhow::bail!("notebook archive absent");
+    };
+    let normalized = archive.load(ledger.store())?;
+    let document = normalized.document();
+    assert_eq!(document.source_sha256, receipt.ordered_image_sha256);
+    assert_eq!(
+        document
+            .units
+            .iter()
+            .map(|unit| (unit.page, unit.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1), leading_notes.as_str()),
+            (Some(2), ""),
+            (Some(4), "Third original."),
+            (Some(5), "Fourth original."),
+            (Some(6), trailing_notes.as_str()),
+        ]
+    );
+    Ok(())
+}
+
 fn run_notebook(scenario: &Scenario) -> Result<usize> {
     use writer::notebook::{
         command::{Generate, Refine, Request},
