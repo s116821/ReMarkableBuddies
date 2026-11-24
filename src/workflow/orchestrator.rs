@@ -420,6 +420,27 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if attempt.resident_output() && attempt.resident_answer.is_none() {
+            if let Some(original) = self
+                .workflow
+                .resident_source
+                .as_ref()
+                .and_then(|owner| owner.blocked_reader_insertion())
+            {
+                self.workflow.check_request_progress()?;
+                attempt.outcome(
+                    &self.ledger,
+                    false,
+                    Outcome::Failed,
+                    AttemptReason::NativeOutputUnavailable,
+                )?;
+                anyhow::bail!(
+                    "Reader cannot insert an answer page until original operation {} is reconciled",
+                    original.0
+                );
+            }
+        }
         let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
