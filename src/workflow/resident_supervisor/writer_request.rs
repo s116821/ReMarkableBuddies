@@ -734,6 +734,15 @@ mod tests {
         let mut pending = read(&lease, &name(&lease)).unwrap().unwrap();
         pending.expires = 0;
         files::atomic_json(&lease.path.join(name(&lease)), &pending).unwrap();
+
+        // A parallel test can fork while this lock is held and retain its
+        // descriptor until exec. Release the lock before the fixture reopens it.
+        assert_eq!(
+            unsafe { libc::flock(lease.directory.as_raw_fd(), libc::LOCK_UN) },
+            0,
+            "unlock expired Writer fixture: {}",
+            std::io::Error::last_os_error()
+        );
     }
     #[test]
     fn ordinary_current_target_requires_matching_live_page_and_consumes_once() {
@@ -805,12 +814,14 @@ mod tests {
         let request = request();
         let slot = FixtureSlot::new(request.clone());
         expire(&slot);
-        let result = ordinary(&slot, request.document, request.page);
-        assert!(
-            result.is_err(),
-            "expired regional intent must not fall through to Reader"
+        let error = ordinary(&slot, request.document, request.page)
+            .err()
+            .expect("expired regional intent must not fall through to Reader");
+        assert_eq!(
+            error.to_string(),
+            "fresh regional Writer requires the selected receiver"
         );
-        assert!(!slot.pending(), "owned expired record may be retired");
+        assert!(!slot.pending(), "owned expired record must be retired");
     }
     #[test]
     fn ordinary_ingress_foreign_region_refuses_and_keeps_exact_bytes() {
