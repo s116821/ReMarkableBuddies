@@ -57,10 +57,15 @@ conversation binding and its current interpreted target internally. It uses the
 retained image on the binding's original source page and sends the saved draft
 through the existing guarded Writer placement path.
 
-The existing Reader release consumes a matching queued request. An absent request
-keeps its Reader meaning. An expired, foreign or unresolved Writer intent refuses
-the attempt. This is the receiver contract for a composer or preset producer. The
-existing typed on-tablet composer does not yet publish this request.
+The lower-right hold consumes a matching queued request first. An expired,
+foreign or unresolved queued request stops the attempt. The typed on-tablet
+composer does not yet publish this request.
+
+With the queue empty, the combined preview interprets the handwritten request on
+the open source page. A reading question goes to Reader when Reader is enabled.
+With Writer enabled, a note request can use the current page or just the content
+inside a clear circle. Both work on a fresh notebook page. An ambiguous circle
+stops the circled request. See [using Writer on the tablet](../README.md#using-writer-on-the-tablet).
 
 ## Explicit target changes
 
@@ -78,10 +83,8 @@ A candidate includes `subject`, canonical `geometry.components` and
 use the original full frame and integer edge scale1,000,000. A point alone cannot
 supply a region. Subject changes never update the handwriting profile.
 
-These explicit commands are historical data operations. Native composer Submit,
-scope gestures, selected regional Writer ingress and supported-device presentation
-remain separate integration and acceptance gates. Scripted/localhost results do
-not establish live recognition quality or native display behavior.
+These commands edit the stored target. The handwritten source-page flow above
+can establish its first target from the circle on the open page.
 
 Joined generation/export uses the same `--writer-note` dispatch with
 `command: "generate-target-and-export"`, a nested `generation` object matching
