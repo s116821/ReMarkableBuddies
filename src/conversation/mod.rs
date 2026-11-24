@@ -1084,7 +1084,26 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
     ) -> Result<WriteResult> {
-        self.advance_fact(operation, expected_root, expected_turn, turn, None)
+        self.advance_fact(operation, expected_root, expected_turn, turn, None, None)
+    }
+
+    pub(crate) fn interpret_installed_reader(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        capture: Uuid,
+        target: crate::analysis::SelectionCenter,
+    ) -> Result<WriteResult> {
+        self.advance_fact(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            None,
+            Some((capture, target.normalized())),
+        )
     }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
     pub fn record_attempt_outcome(
@@ -1102,7 +1121,14 @@ impl Ledger {
             ),
             "attempt outcome must remain unverified"
         );
-        self.advance_fact(operation, expected_root, expected_turn, turn, Some(reason))
+        self.advance_fact(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            Some(reason),
+            None,
+        )
     }
     fn advance_fact(
         &self,
@@ -1111,8 +1137,11 @@ impl Ledger {
         expected_turn: ExpectedHeads,
         turn: Turn,
         reason: Option<AttemptReason>,
+        resident_target: Option<(Uuid, [f64; 2])>,
     ) -> Result<WriteResult> {
-        let fingerprint = if let Some(reason) = &reason {
+        let fingerprint = if let Some(target) = resident_target {
+            Self::fingerprint(&("interpret-installed-reader", &turn, target))?
+        } else if let Some(reason) = &reason {
             Self::fingerprint(&("attempt-outcome", &turn, reason))?
         } else {
             Self::fingerprint(&("advance", &turn))?
@@ -1196,6 +1225,9 @@ impl Ledger {
         }
         let outcome = turn.outcome.clone();
         let turn_id = turn.id;
+        let capture = resident_target
+            .map(|(id, target)| self.interpreted_resident_capture(&turn, id, target))
+            .transpose()?;
         root.updated_ms = turn.updated_ms;
         let binding = root.binding;
         let updated = self.envelope(
@@ -1213,6 +1245,7 @@ impl Ledger {
             vec![],
         )?;
         let mut records = vec![updated];
+        records.extend(capture);
         if let Some(reason) = reason {
             let id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,

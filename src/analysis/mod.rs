@@ -17,6 +17,10 @@ pub struct SelectionCenter {
 }
 
 impl SelectionCenter {
+    pub fn normalized(self) -> [f64; 2] {
+        [self.x, self.y]
+    }
+
     pub fn from_pixels(x: f64, y: f64, width: u32, height: u32) -> Option<Self> {
         if width == 0
             || height == 0

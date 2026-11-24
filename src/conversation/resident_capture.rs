@@ -164,7 +164,7 @@ pub struct ResidentImage {
     /// Locally derived crop in original PNG pixels, never SDK page geometry.
     pub parent_crop: [u32; 4],
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ResidentCaptureHistory {
     pub schema: u32,
@@ -185,6 +185,9 @@ pub struct ResidentCaptureHistory {
     pub provider_procedure: String,
     /// Locally derived overview and three strips, in original provider order.
     pub images: Vec<ResidentImage>,
+    /// Unit coordinates in image zero, the complete provider overview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_target: Option<[f64; 2]>,
 }
 fn absent_qualification<'de, D: serde::Deserializer<'de>>(
     value: D,
@@ -199,13 +202,19 @@ pub struct PreparedResidentCapture {
 impl ResidentCaptureHistory {
     pub(super) fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema == 1
+            matches!((self.schema, self.reader_target), (1, None) | (2, Some(_)))
                 && self.sdk_source == RESIDENT_SDK_SOURCE
                 && !self.id.is_nil()
                 && !self.conversation.is_nil()
                 && !self.turn.is_nil(),
             "invalid resident history identity/schema/source"
         );
+        if let Some(target) = self.reader_target {
+            ensure!(
+                target.into_iter().all(|axis| (0.0..=1.0).contains(&axis)),
+                "invalid normalized resident Reader target"
+            );
+        }
         ensure!(
             self.images.len() == 4
                 && self.provider_procedure == "reader-nearest-overview-overlapping-strips-v1",
@@ -276,6 +285,45 @@ impl ResidentCaptureHistory {
     }
 }
 impl Ledger {
+    pub(super) fn interpreted_resident_capture(
+        &self,
+        turn: &Turn,
+        id: Uuid,
+        target: [f64; 2],
+    ) -> Result<crate::storage::Envelope> {
+        ensure!(
+            turn.role == Role::User
+                && turn.mode == super::Mode::Reader
+                && turn.outcome == Outcome::Interpreted
+                && turn.sources.as_slice() == [id],
+            "invalid installed Reader interpretation"
+        );
+        let envelope = self
+            .store
+            .value(Namespace::Source, id)?
+            .context("resident interpretation capture absent")?;
+        let Record::ResidentCapture(mut capture) = Self::decode(&envelope)? else {
+            anyhow::bail!("resident interpretation requires its original capture");
+        };
+        ensure!(
+            capture.conversation == turn.conversation
+                && capture.turn == turn.id
+                && capture.reader_target.is_none(),
+            "resident interpretation capture changed"
+        );
+        capture.schema = 2;
+        capture.reader_target = Some(target);
+        capture.validate()?;
+        let media = capture.media()?;
+        self.envelope(
+            Namespace::Source,
+            id,
+            ExpectedHeads([envelope.revision_id].into_iter().collect()),
+            Record::ResidentCapture(capture),
+            media,
+        )
+    }
+
     /// Resolve a stored answer from the freshly observed current page or its
     /// immediate successor. A successor must belong to this exact source.
     pub(crate) fn resident_answer_association(
@@ -381,6 +429,7 @@ impl Ledger {
             },
             original_dimensions: capture.capture.dimensions(),
             provider_procedure: "reader-nearest-overview-overlapping-strips-v1".into(),
+            reader_target: None,
             images: provider_images
                 .iter()
                 .enumerate()
@@ -611,6 +660,79 @@ mod tests {
         let conversation = Uuid::new_v4();
         ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
         (base, store, ledger, turn(conversation), capture())
+    }
+
+    #[test]
+    fn resident_target_publication_is_atomic_and_preserves_the_original_capture() {
+        let (base, store, ledger, user, captured) = fixture();
+        let id = Uuid::new_v4();
+        let prepared = ledger
+            .prepare_resident_historical(
+                Uuid::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, user.conversation)
+                    .unwrap(),
+                user.clone(),
+                id,
+                &captured,
+            )
+            .unwrap();
+        let original = store.value(Namespace::Source, id).unwrap().unwrap();
+        assert!(original.payload["record"].get("reader_target").is_none());
+        let envelope = store
+            .value(Namespace::Conversation, user.id)
+            .unwrap()
+            .unwrap();
+        let Record::Turn(mut interpreted) = Ledger::decode(&envelope).unwrap() else {
+            panic!("expected Prepared turn");
+        };
+        interpreted.text = Some("Which one?".into());
+        interpreted.outcome = Outcome::Interpreted;
+        let operation = Uuid::new_v4();
+        let root = ledger
+            .expected(Namespace::Conversation, user.conversation)
+            .unwrap();
+        let heads = ledger.expected(Namespace::Conversation, user.id).unwrap();
+        let commit = || {
+            ledger.interpret_installed_reader(
+                operation,
+                root.clone(),
+                heads.clone(),
+                interpreted.clone(),
+                id,
+                crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap(),
+            )
+        };
+        store
+            .set_fault(crate::storage::Fault::BeforeCommit)
+            .unwrap();
+        assert!(commit().is_err());
+        assert_eq!(
+            store
+                .value(Namespace::Source, id)
+                .unwrap()
+                .unwrap()
+                .revision_id,
+            original.revision_id
+        );
+        assert_eq!(
+            ledger.expected(Namespace::Conversation, user.id).unwrap(),
+            heads
+        );
+        let committed = commit().unwrap();
+        assert_eq!(commit().unwrap().historical, committed.historical);
+        let retained = ledger.stored_resident_images(id).unwrap();
+        assert_eq!(retained.evidence.reader_target, Some([0.5, 0.25]));
+        assert_eq!(
+            retained.evidence.correspondence,
+            prepared.evidence.correspondence
+        );
+        assert_eq!(retained.evidence.images, prepared.evidence.images);
+        assert_eq!(retained.images, prepared.images);
+        assert_eq!(retained.original_png, prepared.original_png);
+        drop(ledger);
+        drop(store);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

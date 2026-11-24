@@ -407,7 +407,20 @@ impl Attempt {
         self.kind == EvidenceKind::Legacy
     }
     pub fn interpret(&mut self, ledger: &Ledger, text: &str) -> Result<()> {
+        self.interpret_with_selection(ledger, text, None)
+    }
+
+    pub(super) fn interpret_with_selection(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        target: Option<crate::analysis::SelectionCenter>,
+    ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
+            anyhow::ensure!(
+                target.is_none(),
+                "selected Reader interpretation uses selected storage"
+            );
             let acknowledgment = selected.write(text, false, None)?;
             self.user = acknowledgment.written;
             return Ok(());
@@ -420,12 +433,22 @@ impl Attempt {
         turn.text = Some(text.into());
         turn.outcome = Outcome::Interpreted;
         turn.updated_ms = now()?;
-        ledger.advance(
-            Uuid::new_v4(),
-            ledger.expected(Namespace::Conversation, turn.conversation)?,
-            ledger.expected(Namespace::Conversation, turn.id)?,
-            turn.clone(),
-        )?;
+        let operation = Uuid::new_v4();
+        let root = ledger.expected(Namespace::Conversation, turn.conversation)?;
+        let expected = ledger.expected(Namespace::Conversation, turn.id)?;
+        if let Some(target) = target {
+            anyhow::ensure!(self.resident_output(), "installed Reader capture required");
+            ledger.interpret_installed_reader(
+                operation,
+                root,
+                expected,
+                turn.clone(),
+                self.evidence,
+                target,
+            )?;
+        } else {
+            ledger.advance(operation, root, expected, turn.clone())?;
+        }
         self.user = turn;
         Ok(())
     }
