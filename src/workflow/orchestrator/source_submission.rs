@@ -1,7 +1,7 @@
 //! Classify the current handwritten submission from the ordinary resident input.
 use super::{Dispatch, ModelContent, Orchestrator};
 use crate::{
-    conversation::{Outcome, Record, ResidentSourceCapture},
+    conversation::{ContextBudget, ResidentSourceCapture},
     llm::LLMEngine,
     storage::Namespace,
     writer,
@@ -35,29 +35,28 @@ impl<M: LLMEngine> Orchestrator<M> {
                 let root = self
                     .ledger
                     .expected(Namespace::Conversation, conversation)?;
-                let mut turns: Vec<_> = self
-                    .ledger
-                    .inspect(conversation, false)?
+                const HISTORY_BYTES: usize = 24 * 1024;
+                let context = self.ledger.recent_model_context(
+                    conversation,
+                    &ContextBudget {
+                        max_text_bytes: HISTORY_BYTES,
+                        max_turns: 6,
+                        provider_token_limit: Some(HISTORY_BYTES),
+                    },
+                    |turns| {
+                        Ok(turns
+                            .iter()
+                            .filter_map(|turn| turn.text.as_deref())
+                            .map(str::len)
+                            .sum())
+                    },
+                )?;
+                let turns: Vec<_> = context
+                    .turns
                     .into_iter()
-                    .filter_map(|record| {
-                        let Record::Turn(turn) = record else {
-                            return None;
-                        };
-                        if matches!(
-                            turn.outcome,
-                            Outcome::Interpreted | Outcome::Generated | Outcome::Completed
-                        ) {
-                            turn.text
-                                .filter(|text| text.len() <= 2048)
-                                .map(|text| (turn.sequence, turn.role, turn.mode, text))
-                        } else {
-                            None
-                        }
-                    })
+                    .map(|turn| (turn.sequence, turn.role, turn.mode, turn.text))
                     .collect();
-                turns.sort_by_key(|turn| turn.0);
-                let recent = &turns[turns.len().saturating_sub(6)..];
-                Ok((conversation, root, serde_json::to_string(recent)?))
+                Ok((conversation, root, serde_json::to_string(&turns)?))
             })
             .transpose()?;
 

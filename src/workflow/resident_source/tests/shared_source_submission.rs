@@ -1,5 +1,7 @@
 use super::*;
-use crate::conversation::{Mode, Role};
+use crate::conversation::{
+    BindingAcquisition, BindingReceipt, ExpectedHeads, Mode, Role, SourceObservation, Turn,
+};
 use crate::workflow::{conversation_dispatch::Dispatch, selected_backend::RefusingBackend};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -7,9 +9,11 @@ const NOTE: &str = "Make a note from this page.";
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
 const DRAFT: &str = "Page note\n\nThe page records an equation and its result.\n";
+const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
 struct SubmissionModel {
     writer: bool,
+    last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
     images: Vec<String>,
@@ -59,6 +63,17 @@ impl crate::LLMEngine for SubmissionModel {
                 assert!(self.text[0].contains("circled or highlighted"));
                 assert!(STANDARD.decode(image)?.starts_with(b"\x89PNG"));
                 *self.source.borrow_mut() = Some(image.clone());
+                if let Some(latest) = &self.last_visible_text {
+                    assert_eq!(self.text.len(), 2);
+                    let history: Vec<(u64, Role, Mode, String)> =
+                        serde_json::from_str(&self.text[1])?;
+                    assert_eq!(history.len(), 6);
+                    assert_eq!(history[0].3, "Prior question 2");
+                    assert_eq!(&history[5].3, latest);
+                    assert!(!history.iter().any(|turn| turn.3 == UNPUBLISHED));
+                    return Ok(r#"{"intent":"unresolved"}"#.into());
+                }
+                assert_eq!(self.text.len(), 1, "fresh notebook has no history part");
                 if writer {
                     Ok(
                         serde_json::json!({"intent":"writer-current-page","request":NOTE})
@@ -92,9 +107,108 @@ impl crate::LLMEngine for SubmissionModel {
     }
 }
 
+fn seed_history(
+    ledger: &Ledger,
+    runtime: &RuntimeIdentity,
+    document: ConversationId,
+    page: ConversationId,
+) -> Result<String> {
+    let conversation = ConversationId::new_v4();
+    ledger.create(conversation, ConversationId::new_v4(), 1)?;
+    let latest = "Prior context: two  spaces, exact words, and a paragraph.\n\n".repeat(50);
+    assert!(latest.len() > 2048);
+    let earlier = (0..7).map(|index| {
+        (
+            Role::User,
+            Mode::Reader,
+            Outcome::Interpreted,
+            format!("Prior question {index}"),
+        )
+    });
+    let recent = [
+        (
+            Role::User,
+            Mode::Reader,
+            Outcome::Interpreted,
+            latest.clone(),
+        ),
+        (
+            Role::Assistant,
+            Mode::Writer,
+            Outcome::Generated,
+            UNPUBLISHED.to_owned(),
+        ),
+    ];
+    for (role, mode, outcome, text) in earlier.chain(recent) {
+        ledger.append(
+            ConversationId::new_v4(),
+            ledger.expected(Namespace::Conversation, conversation)?,
+            Turn {
+                id: ConversationId::new_v4(),
+                conversation,
+                exchange: ConversationId::new_v4(),
+                sequence: 0,
+                role,
+                mode,
+                outcome,
+                text: Some(text),
+                sources: vec![],
+                correction_of: None,
+                created_ms: 2,
+                updated_ms: 2,
+                completion: None,
+            },
+            vec![],
+        )?;
+    }
+    let hex = |bytes: [u8; 32]| {
+        bytes
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let operation = ConversationId::new_v4();
+    ledger.bind(
+        operation,
+        ledger.expected(Namespace::Conversation, conversation)?,
+        ExpectedHeads::default(),
+        BindingReceipt {
+            operation,
+            conversation,
+            request_fingerprint: "shared-submission".into(),
+            adapter_fingerprint: hex(runtime.adapter_sha256),
+            source: SourceObservation {
+                document,
+                page,
+                session: "shared-submission-session".into(),
+                visit: "shared-submission-visit".into(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: hex(runtime.profile_sha256),
+                evidence_procedure: "shared-submission-fixture".into(),
+            },
+            intended_target: Some(page),
+            observed_document: document,
+            observed_page: page,
+            expected_order: vec![page],
+            observed_order: vec![page],
+            persisted_revision: "shared-submission-binding".into(),
+            observed_ms: 3,
+            evidence_origin: "installed-native-guarded-v1".into(),
+            acquisition: BindingAcquisition::ExistingCurrent,
+        },
+    )?;
+    Ok(latest)
+}
+
 #[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request) in [(true, false), (true, true), (false, true)] {
+    for (reader_enabled, writer_request, bound_history) in [
+        (true, false, false),
+        (true, true, false),
+        (false, true, false),
+        (true, false, true),
+    ] {
         let mode = if writer_request {
             "reconnect-source-handoff-text-refusal"
         } else {
@@ -116,6 +230,12 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(5))
             .unwrap();
+        let ledger = Ledger::new(store.clone());
+        let last_visible_text = if bound_history {
+            Some(seed_history(&ledger, runtime.identity(), document, page)?)
+        } else {
+            None
+        };
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.session = Some(Box::new(OwnedSession {
@@ -144,13 +264,13 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             RefusingBackend::with_resident_releases(vec![released(Instant::now())])
                 .with_test_output(Box::new(output)),
         );
-        let ledger = Ledger::new(store.clone());
         let dispatch =
             Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
         let steps = Rc::new(Cell::new(0));
         let source = Rc::new(RefCell::new(None));
         let model = SubmissionModel {
             writer: writer_request,
+            last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
             images: vec![],
@@ -160,6 +280,14 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))?;
+        if bound_history {
+            assert_eq!(steps.get(), 1);
+            assert!(written.borrow().is_empty());
+            assert!(conversation.get().is_none());
+            drop((service, dispatch, ledger, store));
+            std::fs::remove_dir_all(base)?;
+            continue;
+        }
         assert_eq!(steps.get(), 3);
         assert!(!events.borrow().contains(&"current-target-writer-received"));
         assert!(!events.borrow().contains(&"insert"));
