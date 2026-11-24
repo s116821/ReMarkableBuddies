@@ -54,7 +54,9 @@ impl ConversationOperation {
 
 #[derive(Parser)]
 #[command(author, version = env!("READER_BUDDY_VERSION"))]
-#[command(about = "ReMarkable Reader Buddy - AI-powered reading assistant for reMarkable tablets")]
+#[command(
+    about = "Buddy for reMarkable tablets. Reader answers questions about marked content. Writer drafts and refines notes."
+)]
 pub struct Args {
     /// Explicit one-shot disposable native Reader output; development build only.
     #[cfg(all(
@@ -702,7 +704,7 @@ fn main() -> Result<()> {
         .filter_module("ureq", log::LevelFilter::Off)
         .filter_module("ureq_proto", log::LevelFilter::Off)
         .init();
-    info!("=== ReMarkable Reader Buddy Starting ===");
+    info!("ReMarkableBuddies starting");
     let store = remarkable_reader_buddy::reader_runtime::ordinary_store(&config, admitted_store)
         .map_err(|report| report.into_ordinary_startup_error())?;
     let ledger = remarkable_reader_buddy::conversation::Ledger::new(store.clone());
