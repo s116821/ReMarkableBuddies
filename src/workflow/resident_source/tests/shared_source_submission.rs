@@ -16,7 +16,7 @@ enum Circled {
 }
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
-const DRAFT: &str = "Page note\n\nThe page records an equation and its result.\n";
+const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
 const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
 struct SubmissionModel {
@@ -146,7 +146,7 @@ impl crate::LLMEngine for SubmissionModel {
                 } else {
                     assert_eq!(input["request"], NOTE);
                     assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
-                    Ok("# Page note\n\nThe page records an equation and its result.".into())
+                    Ok(DRAFT.into())
                 }
             }
             (1, false) => {
@@ -304,7 +304,10 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             None
         };
         let owner = workflow.resident_source.as_mut().unwrap();
-        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?;
         owner.session = Some(Box::new(OwnedSession {
             runtime,
             _fixture: native,
@@ -375,24 +378,25 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         )?;
 
         if writer_request {
-            let exact_request = if circled == Some(Circled::Selected) {
+            let (exact_request, saved_draft) = if circled == Some(Circled::Selected) {
                 assert!(!position.exists(), "native insertion selected the new page");
-                let rendered = written.borrow();
-                assert_eq!(rendered.len(), 1);
-                assert!(rendered[0].contains("About: selected equation"));
-                assert!(rendered[0].contains("The selected equation gives four."));
                 assert!(records.iter().any(|record| matches!(record, Record::RegionSource(region)
                     if region.normalized.document.document == document && region.about == "About: selected equation")));
-                CIRCLE_NOTE
+                (CIRCLE_NOTE, "# Circled note\n\nAbout: selected equation\n\nThe selected equation gives four.")
             } else {
                 assert!(position.exists(), "draft must go onto the adjacent page");
-                assert_eq!(written.borrow().as_slice(), &[DRAFT]);
-                NOTE
+                (NOTE, DRAFT)
             };
+            let response = saved_draft.strip_prefix("# ").unwrap();
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[format!("Q: {exact_request}\n\nA: {response}\n")]
+            );
             assert_eq!(records.iter().filter(|record| matches!(record, Record::Turn(turn)
                 if turn.role == Role::User && turn.mode == Mode::Writer && turn.text.as_deref() == Some(exact_request))).count(), 1);
             assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
-                if turn.role == Role::Assistant && turn.mode == Mode::Writer && turn.outcome == Outcome::Generated)));
+                if turn.role == Role::Assistant && turn.mode == Mode::Writer
+                    && turn.outcome == Outcome::Generated && turn.text.as_deref() == Some(saved_draft))));
             let evidence = records
                 .iter()
                 .find_map(|record| match record {

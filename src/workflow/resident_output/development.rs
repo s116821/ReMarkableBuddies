@@ -1201,7 +1201,7 @@ impl DisplayFormat {
             } => {
                 let body = match self {
                     Self::Legacy => crate::workflow::Workflow::compose_qa(question, answer, center),
-                    Self::Unified => format!("Q: {question}\n\nA: {answer}\n"),
+                    Self::Unified => format_exchange(question, answer),
                 };
                 (body, about)
             }

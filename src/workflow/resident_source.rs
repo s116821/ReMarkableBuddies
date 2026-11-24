@@ -2378,7 +2378,7 @@ pub(crate) mod tests {
         assert!(!events.borrow().contains(&"insert"));
         assert_eq!(
             preview.borrow().as_slice(),
-            &["Regional note\n\nAbout: 24 / 6\n\nSelected equation equals four.\n"],
+            &["Q: Make a note about this marked source\n\nA: Regional note\n\nAbout: 24 / 6\n\nSelected equation equals four.\n"],
         );
         let records = ledger.inspect(conversation, false).unwrap();
         assert!(records.iter().any(|record| matches!(record,
@@ -3244,9 +3244,20 @@ pub(crate) mod tests {
     #[cfg(feature = "installed-resident-output")]
     #[test]
     fn writer_places_an_exact_fit_on_a_relevant_page_and_reports_refusal_before_insertion() {
-        use crate::workflow::selected_backend::RefusingBackend;
+        use crate::workflow::{
+            resident_output::{
+                development::fits_test_keyboard, format_exchange, ResidentOutputText,
+            },
+            selected_backend::RefusingBackend,
+        };
 
-        let draft = format!("Note\n\n{}\n", "a".repeat(505));
+        let question = "Make a note from this page.";
+        let answer = format!(
+            "Note\n\n{}",
+            "a".repeat(512 - format_exchange(question, "Note\n\n").len())
+        );
+        assert!(fits_test_keyboard(ResidentOutputText::Plain(&answer), true));
+        let draft = format_exchange(question, &answer);
         assert_eq!(draft.len(), 512);
         for role in [
             PageUse::RelevantBuddy,
@@ -3287,7 +3298,7 @@ pub(crate) mod tests {
             let result = workflow.place_resident_writer_draft(
                 &ledger,
                 conversation,
-                super::super::resident_output::ResidentOutputText::Plain(&draft),
+                ResidentOutputText::Plain(&draft),
                 None,
             );
             match role {
