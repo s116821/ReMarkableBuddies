@@ -42,8 +42,20 @@ impl WriterSelection {
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn same_draft_and_source(&self, current: &Self) -> bool {
-        self.draft.revision_id == current.draft.revision_id
-            && self.source.revision_id == current.source.revision_id
+        // Export admission publishes exact copies of these records as direct
+        // successors so it can guard them atomically with the effect.
+        let unchanged = |old: &Envelope, observed: &Envelope| {
+            old.envelope_version == observed.envelope_version
+                && old.domain_schema_version == observed.domain_schema_version
+                && old.namespace == observed.namespace
+                && old.record_id == observed.record_id
+                && old.kind == observed.kind
+                && old.payload == observed.payload
+                && old.media_descriptors == observed.media_descriptors
+                && (old.revision_id == observed.revision_id
+                    || (observed.parents.len() == 1 && observed.parents.contains(&old.revision_id)))
+        };
+        unchanged(&self.draft, &current.draft) && unchanged(&self.source, &current.source)
     }
 
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {

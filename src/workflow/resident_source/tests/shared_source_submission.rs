@@ -392,10 +392,11 @@ fn installed_source_page_saves_reuse_the_note_after_placement_refusal() -> Resul
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Writer draft cannot be typed"));
+        let refusal = result.unwrap_err();
+        assert!(
+            refusal.to_string().contains("Writer draft cannot be typed"),
+            "{refusal:#}"
+        );
         assert_eq!(steps.get(), 3);
         assert!(!position.exists());
         assert!(!events.borrow().contains(&"insert"));
