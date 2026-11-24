@@ -1164,6 +1164,16 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Result<()> {
     use crate::conversation::Role;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Case {
+        Offline,
+        Required,
+        FileBeforeAnswer,
+        OrderBeforeVerification,
+        OrderAfterAnswer,
+        ConversationBeforeVerification,
+    }
+
     let executable = retained_command();
     let fixture = Fixture::new();
     let root = fixture.0.join("original-pdf");
@@ -1184,24 +1194,88 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         pdf_bytes("alpha acceleration DECOY_DOCUMENT_MUST_NOT_BE_QUERIED"),
     )?;
 
-    for drift in [false, true] {
+    for case in [
+        Case::Offline,
+        Case::Required,
+        Case::FileBeforeAnswer,
+        Case::OrderBeforeVerification,
+        Case::OrderAfterAnswer,
+        Case::ConversationBeforeVerification,
+    ] {
         fs::write(&path, &bytes)?;
         let events = Arc::new(Mutex::new(vec![]));
-        let mut script = Scripted::new(Reading::Deny, false, false, events.clone());
+        let required = case == Case::Required;
+        let peer = required.then(|| SearchPeer::new(events.clone(), None));
+        let scope =
+            researched_fixture::Scope::new(peer.as_ref().map(|peer| peer.endpoint.clone()), false);
+        let mut script = Scripted::new(
+            if required {
+                Reading::Clear
+            } else {
+                Reading::Deny
+            },
+            required,
+            false,
+            events.clone(),
+        );
         let frames = script.frames.clone();
-        if drift {
-            script.hook = Some(Box::new(|stage, pending| {
-                if stage == 2 && pending {
-                    fs::write(&path, b"changed before answer handoff").unwrap();
-                }
-            }));
-        }
+        let path = &path;
         let (result, records) = crate::workflow::ordinary_pdf_receiver_fixture(
             document,
             page,
             root.clone(),
             executable.clone(),
-            script,
+            |ledger, order_change| {
+                let ledger = Ledger::new(ledger.store().clone());
+                script.hook = Some(Box::new(move |stage, pending| {
+                    match (case, stage, pending) {
+                        (Case::FileBeforeAnswer, 2, true) => {
+                            fs::write(path, b"changed before answer handoff").unwrap();
+                        }
+                        (Case::OrderBeforeVerification, 1, true)
+                        | (Case::OrderAfterAnswer, 2, false) => {
+                            fs::write(&order_change, Uuid::new_v4().to_string()).unwrap();
+                        }
+                        (Case::ConversationBeforeVerification, 1, true) => {
+                            let user = ledger
+                                .store()
+                                .snapshot_heads_matching(
+                                    &[Namespace::Conversation],
+                                    crate::storage::MAX_ITEMS,
+                                    |_| true,
+                                )
+                                .unwrap()
+                                .iter()
+                                .find_map(|envelope| match Ledger::decode(envelope).unwrap() {
+                                    Record::Turn(turn) if turn.role == Role::User => Some(turn),
+                                    _ => None,
+                                })
+                                .unwrap();
+                            let root = ledger
+                                .expected(Namespace::Conversation, user.conversation)
+                                .unwrap();
+                            ledger
+                                .append(
+                                    Uuid::new_v4(),
+                                    root,
+                                    crate::conversation::Turn {
+                                        id: Uuid::new_v4(),
+                                        exchange: Uuid::new_v4(),
+                                        sequence: 0,
+                                        outcome: Outcome::Interpreted,
+                                        sources: vec![],
+                                        text: Some("Concurrent Reader question".into()),
+                                        ..user
+                                    },
+                                    vec![],
+                                )
+                                .unwrap();
+                        }
+                        _ => {}
+                    }
+                }));
+                script
+            },
         )?;
         let frames = frames.lock().unwrap();
         let assistants = records
@@ -1211,39 +1285,76 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(records.iter().any(|record| matches!(
+        let question = if required { QUESTION } else { OPT_OUT };
+        let interpreted = !matches!(
+            case,
+            Case::OrderBeforeVerification | Case::ConversationBeforeVerification
+        );
+        assert_eq!(records.iter().any(|record| matches!(
             record, Record::Turn(turn)
-                if turn.outcome == Outcome::Interpreted && turn.text.as_deref() == Some(OPT_OUT)
-        )));
+                if turn.outcome == Outcome::Interpreted && turn.text.as_deref() == Some(question)
+        )), interpreted, "{case:?}");
         assert_eq!(
             records
                 .iter()
                 .filter(|r| matches!(r, Record::RequestEvidence(_)))
                 .count(),
-            1
+            usize::from(interpreted),
+            "{case:?}",
         );
-        if drift {
-            assert!(result.is_err());
-            assert_eq!(frames.len(), 2);
-            assert!(assistants.is_empty());
+        assert_eq!(scope.constructions(), usize::from(required));
+        let expected_calls = match case {
+            Case::OrderBeforeVerification | Case::ConversationBeforeVerification => 1,
+            Case::FileBeforeAnswer => 2,
+            _ => 3,
+        };
+        assert_eq!(frames.len(), expected_calls, "{case:?}: {result:?}");
+        if !matches!(case, Case::Offline | Case::Required) {
+            let error = result.expect_err("Changed request reached publication");
+            let cause = format!("{error:#}");
+            if matches!(case, Case::OrderBeforeVerification | Case::OrderAfterAnswer) {
+                assert!(
+                    cause.contains("Resident PDF source or page order changed"),
+                    "{cause}"
+                );
+            }
+            assert!(assistants.is_empty(), "{case:?}");
             continue;
         }
 
         result?;
-        assert_eq!(
-            *events.lock().unwrap(),
-            ["analysis", "verification", "answer"]
-        );
+        let expected_events = if required {
+            vec!["analysis", "verification", "research", "answer"]
+        } else {
+            vec!["analysis", "verification", "answer"]
+        };
+        assert_eq!(*events.lock().unwrap(), expected_events);
         assert_eq!(frames.len(), 3);
         assert_eq!(frames[0].images, frames[1].images);
         assert!(!frames[2].images.is_empty());
         let context: Value = serde_json::from_str(&frames[2].texts[1])?;
-        assert_eq!(
-            context["research"]["disabled_reason"],
-            "request-no-internet"
-        );
         let request = &context["context"]["request_context"];
-        assert_eq!(request["request"]["text"], OPT_OUT);
+        assert_eq!(request["request"]["text"], question);
+        if let Some(peer) = &peer {
+            let requests = peer.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["model"], "gpt-5.6-terra");
+            assert_eq!(requests[0]["tool_choice"], "required");
+            let encoded = requests[0]["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap();
+            let search: Value = serde_json::from_str(encoded)?;
+            assert_eq!(&search["request_context"], request);
+            assert_eq!(
+                context["research"]["identity"]["context_sha256"],
+                digest(encoded.as_bytes())
+            );
+        } else {
+            assert_eq!(
+                context["research"]["disabled_reason"],
+                "request-no-internet"
+            );
+        }
         let retrieval = &request["retrieval"];
         assert_eq!(retrieval["source"]["document"], json!(document));
         assert_eq!(retrieval["source"]["source_sha256"], digest(&bytes));
@@ -1260,6 +1371,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         };
         let answer = draft.text.as_deref().unwrap();
         assert!(answer.contains(&format!("[S1] Document {document}, page 2")));
+        if required {
+            assert!(answer.contains("[R1] Fixture research - https://example.invalid/alpha"));
+        }
         assert!(!answer.contains("ANALYSIS_PROPOSAL_MUST_NOT_PUBLISH"));
     }
     Ok(())

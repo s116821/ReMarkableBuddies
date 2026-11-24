@@ -34,6 +34,8 @@ pub(super) struct Attempt {
     reader_preparation: Option<ReaderPreparation>,
     selected: Option<selected::Selected>,
     target_frame: Option<crate::conversation::target_source::SourceFrame>,
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    prepared_pdf_root: Option<Uuid>,
     marked_capture: Option<crate::storage::captured::Captured>,
     pub(super) marked_source: Option<Box<crate::device::backend::MarkedSourceBinding>>,
     pub(super) marked_destination: Option<super::exchange_history::UserPresentationTarget>,
@@ -156,6 +158,8 @@ pub(crate) fn assert_attachment_behavior(
         reader_preparation: None,
         selected: None,
         target_frame: None,
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        prepared_pdf_root: None,
         marked_capture: None,
         marked_source: None,
         marked_destination: None,
@@ -214,6 +218,8 @@ impl Attempt {
             reader_preparation: None,
             selected: Some(selected),
             target_frame: None,
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            prepared_pdf_root: None,
             marked_capture: None,
             marked_source: None,
             marked_destination: None,
@@ -478,6 +484,8 @@ impl Attempt {
             ledger.expected(Namespace::Conversation, conversation)?
         };
         let mut marked_source = None;
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let mut prepared_pdf_root = None;
         let (evidence, kind) = match acquired {
             AcquiredEvidence::Legacy { images } => {
                 let images = images
@@ -533,13 +541,17 @@ impl Attempt {
                 (prepared.evidence.id, EvidenceKind::Development)
             }
             AcquiredEvidence::ResidentHistorical(capture) => {
-                let prepared = ledger.prepare_resident_historical(
+                let (prepared, _receipt) = ledger.prepare_resident_historical_with_receipt(
                     Uuid::new_v4(),
                     expected,
                     user.clone(),
                     Uuid::new_v4(),
                     &capture,
                 )?;
+                #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+                {
+                    prepared_pdf_root = Some(_receipt.historical.applied_root_revision);
+                }
                 (prepared.evidence.id, EvidenceKind::ResidentHistorical)
             }
             AcquiredEvidence::Sdk {
@@ -563,6 +575,8 @@ impl Attempt {
             reader_preparation: None,
             selected: None,
             target_frame: None,
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            prepared_pdf_root,
             marked_capture: None,
             marked_source,
             marked_destination: destination.filter(|_| modeled_binding.is_some()),
@@ -915,6 +929,77 @@ impl Attempt {
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(super) fn retained_source(&self) -> Uuid {
         self.evidence
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn capture_pdf_reading(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<crate::storage::captured::Captured> {
+        let root = self
+            .prepared_pdf_root
+            .context("Ordinary PDF prepared root absent")?;
+        ledger.capture_prepared_pdf(&self.user, root)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn interpret_ordinary_pdf(
+        &mut self,
+        ledger: &Ledger,
+        text: &str,
+        candidate: Option<&crate::conversation::target::Candidate>,
+        selection: &crate::analysis::ReaderSelection,
+        prepared: &crate::storage::captured::Captured,
+    ) -> Result<ExpectedHeads> {
+        let mut user = self.user.clone();
+        user.text = Some(text.into());
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = now()?;
+        let user_revision = prepared
+            .records
+            .iter()
+            .find(|(_, reference)| {
+                reference.namespace == Namespace::Conversation && reference.record == user.id
+            })
+            .context("Prepared PDF turn absent")?
+            .1
+            .revision;
+        let expected_user = ExpectedHeads([user_revision].into_iter().collect());
+        let root = self
+            .prepared_pdf_root
+            .context("Ordinary PDF prepared root absent")?;
+        let expected_root = ExpectedHeads([root].into_iter().collect());
+        let receipt = if let Some(frame) = self.target_frame.as_mut() {
+            anyhow::ensure!(
+                frame.expected_root() == expected_root,
+                "Prepared PDF target root changed"
+            );
+            let unresolved = unresolved_target();
+            ledger.advance_with_captured_source_target(
+                Uuid::new_v4(),
+                expected_user,
+                user.clone(),
+                frame,
+                candidate.unwrap_or(&unresolved),
+                Some(selection.center),
+                Some(prepared),
+            )?
+        } else {
+            ledger.interpret_captured_pdf(
+                expected_root,
+                expected_user,
+                user.clone(),
+                self.evidence,
+                selection,
+                prepared,
+            )?
+        };
+        self.user = user;
+        Ok(ExpectedHeads(
+            [receipt.historical.applied_root_revision]
+                .into_iter()
+                .collect(),
+        ))
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]

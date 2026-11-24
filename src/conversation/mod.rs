@@ -1334,6 +1334,30 @@ impl Ledger {
             Some((capture, target)),
         )
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn interpret_captured_pdf(
+        &self,
+        root: ExpectedHeads,
+        user: ExpectedHeads,
+        turn: Turn,
+        capture: Uuid,
+        selection: &crate::analysis::ReaderSelection,
+        prepared: &crate::storage::captured::Captured,
+    ) -> Result<WriteResult> {
+        self.advance_with_capture(
+            Uuid::new_v4(),
+            root,
+            user,
+            turn,
+            None,
+            None,
+            Some((capture, selection)),
+            Some(prepared),
+            None,
+            None,
+        )
+        .map(|(result, _)| result)
+    }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
     pub fn record_attempt_outcome(
         &self,
@@ -1641,7 +1665,7 @@ impl Ledger {
                 root,
                 records,
                 binding,
-                None,
+                captured,
                 published,
                 None,
             )?;

@@ -114,6 +114,11 @@ impl PreparedRequestEvidence {
     pub(crate) fn original_root(&self) -> ExpectedHeads {
         ExpectedHeads(BTreeSet::from([self.root.revision]))
     }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn original_generation(&self) -> Uuid {
+        self.capture.generation
+    }
 }
 
 /// Exact ordinary ledger heads carried through one live source-aware follow-up.
@@ -227,6 +232,33 @@ pub(super) fn matches(envelope: &Envelope, conversation: Uuid) -> bool {
         || (envelope.namespace == Namespace::Conversation && envelope.record_id == conversation)
 }
 impl Ledger {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn capture_prepared_pdf(&self, user: &Turn, root: Uuid) -> Result<Captured> {
+        let capture = self.store.capture(user.conversation, matches)?;
+        ensure!(
+            capture.records.iter().any(|(envelope, _)| {
+                envelope.namespace == Namespace::Conversation
+                    && envelope.record_id == user.conversation
+                    && envelope.revision_id == root
+            }),
+            "Prepared PDF conversation root changed"
+        );
+        let (turn, _) = capture
+            .records
+            .iter()
+            .find(|(envelope, _)| {
+                envelope.namespace == Namespace::Conversation && envelope.record_id == user.id
+            })
+            .context("Prepared PDF turn absent")?;
+        ensure!(
+            turn.parents.is_empty()
+                && matches!(Self::decode(turn)?, Record::Turn(saved) if saved == *user),
+            "Prepared PDF turn changed"
+        );
+        capture.with_current(&self.store, || Ok(()))?;
+        Ok(capture)
+    }
+
     pub(crate) fn append_followup_user(
         &self,
         operation: Uuid,

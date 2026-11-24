@@ -317,7 +317,7 @@ fn pdf_mapping(
 ) -> Result<Option<(u32, u32)>> {
     let count = content["cPages"]["original"]["value"]
         .as_u64()
-        .filter(|count| (1..=256).contains(count))
+        .filter(|&count| count > 0 && (allow_null_redirect || count <= 256))
         .context("Invalid original PDF page count")?;
     let order = ordered_pages(content)?;
     // Ordinary navigation accepts explicit null for notes. Selected PDF
@@ -357,7 +357,11 @@ fn pdf_mapping(
         .find(|row| row.id == page)
         .context("Reader page is absent from the original PDF order")?
         .redirect;
-    Ok(redirect.map(|redirect| (count as u32, redirect as u32)))
+    let Some(redirect) = redirect else {
+        return Ok(None);
+    };
+    ensure!(count <= 256, "Invalid original PDF page count");
+    Ok(Some((count as u32, redirect as u32)))
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -584,6 +588,25 @@ mod tests {
             ]}
         });
 
+        content["cPages"]["original"]["value"] = json!(257);
+        let oversized = serde_json::to_vec(&content).unwrap();
+        assert_eq!(ordinary_pdf_mapping(&oversized, &note_facts).unwrap(), None);
+        assert!(ordinary_pdf_mapping(&oversized, &original_facts).is_err());
+        assert!(original_pdf_mapping(&oversized, &original_facts).is_err());
+        let reordered = ReaderFacts::new(
+            PageKey {
+                document,
+                page: note,
+            },
+            vec![note, original],
+        )
+        .unwrap();
+        assert!(ordinary_pdf_mapping(&oversized, &reordered).is_err());
+        for file_type in ["notebook", "epub"] {
+            let non_pdf = serde_json::to_vec(&json!({"fileType": file_type})).unwrap();
+            assert_eq!(ordinary_pdf_mapping(&non_pdf, &note_facts).unwrap(), None);
+        }
+        content["cPages"]["original"]["value"] = json!(1);
         let missing = serde_json::to_vec(&content).unwrap();
         assert_eq!(ordinary_pdf_mapping(&missing, &note_facts).unwrap(), None);
         assert_eq!(

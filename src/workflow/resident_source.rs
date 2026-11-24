@@ -32,7 +32,7 @@ pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
 #[cfg(feature = "installed-resident-output")]
 type OrdinaryPdfCapture = (
     ResidentSourceCapture,
-    Result<Option<original_pdf::ObservedOriginalPdf>>,
+    Result<Option<original_pdf::OrdinaryPdfSource>>,
 );
 
 #[derive(Debug)]
@@ -602,28 +602,33 @@ impl ResidentSourceOwner {
             health,
             Some(deadline),
             |_| Ok(()),
-            |owner, health, facts| {
+            |_owner, _, facts| {
+                // Only metadata is sampled here. Writer arbitration precedes
+                // every byte read from either asset.
                 #[cfg(test)]
-                let fixture = owner.ordinary_pdf_fixture.clone();
-                let mut progress = || owner.original_pdf_progress(health, deadline, &mut || Ok(()));
-                #[cfg(test)]
-                if let Some((root, _)) = fixture {
-                    return Ok(original_pdf::ObservedOriginalPdf::observe_ordinary_fixture(
-                        &root,
-                        facts,
-                        deadline,
-                        &mut progress,
-                    ));
+                if let Some((root, _)) = &_owner.ordinary_pdf_fixture {
+                    return Ok(original_pdf::OrdinaryPdfSource::pin_fixture(root, facts).map(Some));
                 }
-                // Defer source-specific admission until the acquired page has
-                // selected Reader. A queued Writer still owns its ordinary route.
-                Ok(original_pdf::ObservedOriginalPdf::observe_ordinary(
-                    facts,
-                    deadline,
-                    &mut progress,
-                ))
+                Ok(original_pdf::OrdinaryPdfSource::pin(facts).map(Some))
             },
         )
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn read_ordinary_pdf(
+        &mut self,
+        health: &mut ServiceHealth,
+        source: original_pdf::OrdinaryPdfSource,
+    ) -> Result<Option<original_pdf::ObservedOriginalPdf>> {
+        let facts = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        let deadline = self.deadline.context("Resident source deadline absent")?;
+        self.acquisition_current(health)?;
+        source.read(&facts, deadline, &mut || {
+            self.original_pdf_progress(health, deadline, &mut || Ok(()))
+        })
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -927,6 +932,57 @@ fn unsettled_output_insertion(
 }
 
 impl ResidentSourceOwner {
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn require_ordinary_pdf_current(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+    ) -> Result<()> {
+        let original = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        self.reconnect_for_observation(health, deadline)?;
+        let current = self.output_observe(health, deadline)?;
+        // Provider and indexing work can outlast an idle client connection.
+        // Retain the same owner and open a fresh read-only connection when needed.
+        self.session
+            .as_mut()
+            .context("resident Session absent")?
+            .finish();
+        self.reconnect = true;
+        ensure!(
+            current == original,
+            "Resident PDF source or page order changed"
+        );
+        Ok(())
+    }
+
+    fn reconnect_for_observation(
+        &mut self,
+        health: &mut ServiceHealth,
+        end: Instant,
+    ) -> Result<()> {
+        admitted_progress(end, || self.progress(health))?;
+        if self.reconnect {
+            let reconnect_end = end.min(Instant::now() + Duration::from_secs(30));
+            let result = self
+                .session
+                .as_mut()
+                .context("resident Session absent")?
+                .reconnect(
+                    health,
+                    self.input.as_mut().context("resident input guard absent")?,
+                    reconnect_end,
+                );
+            if let Err(error) = result {
+                return self.failure(health, error);
+            }
+            self.reconnect = false;
+        }
+        Ok(())
+    }
+
     fn output_observe(
         &mut self,
         health: &mut ServiceHealth,
@@ -1107,21 +1163,7 @@ impl ResidentSourceOwner {
                 .bind_owned_keyboard(&keyboard)?;
         }
 
-        admitted_progress(end, || self.progress(health))?;
-        if self.reconnect {
-            let reconnect_end = end.min(Instant::now() + Duration::from_secs(30));
-            let result = self.session.as_mut().unwrap().reconnect(
-                health,
-                self.input
-                    .as_mut()
-                    .context("resident output guard absent")?,
-                reconnect_end,
-            );
-            if let Err(error) = result {
-                return self.failure(health, error);
-            }
-            self.reconnect = false;
-        }
+        self.reconnect_for_observation(health, end)?;
         let fresh = self.output_observe(health, end)?;
         exact(&fresh, &original)?;
         if let Some(target) = unsettled_output_insertion(ledger, &fresh)? {
@@ -1701,19 +1743,67 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
-    fn ordinary_installed_current_target_reaches_writer_and_refuses_an_unbound_page() {
-        let (mut workflow, store, base, events, _notify) = workflow(
-            "reconnect-source-handoff",
-            vec![released(Instant::now())],
-            Duration::ZERO,
-        );
-        workflow.resident_source.as_mut().unwrap().selection =
-            InstalledReaderSelection::fixture_with_installed_output();
-        events.borrow_mut().push("current-target-writer-queued");
-        let config = crate::config::Config {
-            paths: store.paths.clone(),
-            ..Default::default()
+    fn ordinary_installed_current_target_reaches_writer_without_reading_the_pdf() {
+        use std::{
+            ffi::CString,
+            fs::{self, File},
+            io::Read,
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::{ffi::OsStrExt, fs::DirBuilderExt},
+            },
         };
+
+        let mode = "reconnect-source-handoff";
+        let (mut workflow, store, base, events, _notify) =
+            workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let document = ConversationId::new_v4();
+        let page = ConversationId::new_v4();
+        let root = base.join("writer-pdf");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let table = root.join(format!("{document}.content"));
+        let pdf = root.join(format!("{document}.pdf"));
+        crate::storage::files::atomic_json(
+            &table,
+            &serde_json::json!({
+                "fileType": "pdf",
+                "cPages": {"original": {"value": 1}, "pages": [
+                    {"id": page, "idx": {"value": "a"}, "redir": {"value": 0}}
+                ]}
+            }),
+        )
+        .unwrap();
+        fs::write(&pdf, vec![0; 256 * 1024]).unwrap();
+
+        // Observe content access at the filesystem boundary. The Writer must
+        // reach dispatch even when either read would outlast its budget.
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        assert!(fd >= 0);
+        let mut watch = unsafe { File::from_raw_fd(fd) };
+        for path in [&table, &pdf] {
+            let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert!(
+                unsafe {
+                    libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS)
+                } >= 0
+            );
+        }
+
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.ordinary_pdf_fixture = Some((root, PathBuf::new()));
+        owner.factory = Box::new(OwnedFactory {
+            source: Some((document, page)),
+            events: events.clone(),
+            mode,
+            delay: Duration::ZERO,
+        });
+        events.borrow_mut().push("current-target-writer-queued");
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": store.paths,
+            "reader": { "researched_pdf": {} }
+        }))
+        .unwrap();
         let ledger = Ledger::new(store.clone());
         let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
             .unwrap()
@@ -1737,6 +1827,10 @@ pub(crate) mod tests {
         );
         assert!(events.borrow().contains(&"current-target-writer-received"));
         assert_eq!(calls.get(), 0);
+        assert_eq!(
+            watch.read(&mut [0; 4096]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         drop(reader);
         drop(dispatch);
         drop(store);
@@ -2020,40 +2114,59 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "installed-resident-output")]
-    pub(crate) fn ordinary_pdf_receiver_fixture(
+    pub(crate) fn ordinary_pdf_receiver_fixture<M: crate::LLMEngine>(
         document: ConversationId,
         page: ConversationId,
         root: PathBuf,
         executable: PathBuf,
-        model: impl crate::LLMEngine,
+        model: impl FnOnce(&Ledger, PathBuf) -> M,
     ) -> Result<(Result<()>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
         let (mut workflow, store, base, events, _notify) =
             workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let order_change = native.ordinary_pdf_order_change();
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.ordinary_pdf_fixture = Some((root, executable));
-        owner.factory = Box::new(OwnedFactory {
-            source: Some((document, page)),
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
             events: events.clone(),
-            mode,
-            delay: Duration::ZERO,
-        });
+            delivery_fault: false,
+            writer_slot: None,
+        }));
+        crate::storage::files::atomic(
+            &store.paths.credentials.join("fixture_model_key"),
+            b"PRIVATE_RESEARCH_FIXTURE",
+        )?;
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
             "paths": store.paths,
-            "reader": { "researched_pdf": {} },
+            "model": "gpt-6.1-terra",
+            "model_credential": "fixture_model_key",
+            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
             "research_policy": "required"
         }))?;
         config.validate_values()?;
         let ledger = Ledger::new(store.clone());
         let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
-        let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        let mut reader = Orchestrator::new(
+            workflow,
+            model(&ledger, order_change),
+            Ledger::new(store.clone()),
+        );
         reader.set_local_handwriting(&dispatch)?;
         let result = reader.run_iteration_with_trigger(true, Some(&dispatch));
-        assert_eq!(
-            &*events.borrow(),
-            &["activate", "spawn", "observe", "capture"]
-        );
+        {
+            let events = events.borrow();
+            assert_eq!(&events[..2], &["observe", "capture"]);
+            assert_eq!(events.len() % 2, 0);
+            assert!(events[2..]
+                .chunks_exact(2)
+                .all(|pair| pair == ["reconnect", "observe"]));
+        }
         let records = store
             .snapshot_heads_matching(
                 &[Namespace::Conversation],

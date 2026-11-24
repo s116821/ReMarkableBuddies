@@ -27,6 +27,11 @@ impl Fixture {
         )
         .unwrap();
     }
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn ordinary_pdf_order_change(&self) -> PathBuf {
+        self.0.join("ordinary-pdf-order-change")
+    }
+
     fn store(&self) -> Arc<Store> {
         Arc::new(
             Store::open(StorePaths {

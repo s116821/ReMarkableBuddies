@@ -300,7 +300,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             };
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let observed_pdf = observed_pdf?;
+        let observed_pdf = ordinary_pdf::classify(&mut self.workflow, observed_pdf?)?;
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let result = match observed_pdf {

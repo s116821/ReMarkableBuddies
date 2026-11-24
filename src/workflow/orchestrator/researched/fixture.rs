@@ -56,7 +56,7 @@ impl Drop for Scope {
 
 /// Called only after the real destination/model admission and selected stage
 /// decision. Fixture input cannot grant either of those permissions.
-pub(super) fn endpoint(selected: &str) -> Result<String> {
+pub(in crate::workflow) fn endpoint(selected: &str) -> Result<String> {
     ACTIVE.with(|active| {
         let active = active.borrow();
         let Some(state) = active.as_ref() else {

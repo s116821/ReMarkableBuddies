@@ -187,7 +187,14 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                observed = source_facts
+                order_change = root.parent / "ordinary-pdf-order-change"
+                if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
+                    # Keep the active page and original assets fixed. Only the SDK
+                    # observation shows that the native order has changed.
+                    extra = uuid.UUID(order_change.read_text()).bytes
+                    observed = source_document + source_page + struct.pack(">H", 2) + extra + source_page
+                send(request[:202] + b"\x03" + digest + b"\x00" + observed)
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.

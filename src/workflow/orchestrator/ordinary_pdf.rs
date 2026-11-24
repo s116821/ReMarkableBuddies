@@ -13,11 +13,13 @@ use crate::{
     },
     llm::LLMEngine,
     retrieval::{pdf_worker::PendingIndex, IndexKey, Provider, Retrieved},
-    storage::Namespace,
+    storage::{captured::Captured, Namespace, Uuid},
     workflow::{
         conversation_dispatch::{followup_research, Dispatch},
         reader_intent::{self, Intent},
-        resident_source::original_pdf::{CapturedOriginalPdf, ObservedOriginalPdf, OriginalPdfPin},
+        resident_source::original_pdf::{
+            CapturedOriginalPdf, ObservedOriginalPdf, OrdinaryPdfSource, OriginalPdfPin,
+        },
         AcquiredEvidence,
     },
 };
@@ -28,7 +30,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-type Acquisition = (AcquiredEvidence, Result<Option<ObservedOriginalPdf>>);
+type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryPdfSource>>);
 
 pub(super) fn acquire(
     workflow: &mut Workflow,
@@ -51,6 +53,37 @@ pub(super) fn acquire(
         return Ok((AcquiredEvidence::ResidentHistorical(Box::new(capture)), pdf));
     }
     Ok((workflow.acquire_reader_evidence()?, Ok(None)))
+}
+
+pub(super) fn classify(
+    workflow: &mut Workflow,
+    source: Option<OrdinaryPdfSource>,
+) -> Result<Option<ObservedOriginalPdf>> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let owner = workflow
+        .resident_source
+        .as_mut()
+        .context("Resident PDF owner absent")?;
+    let health = workflow
+        .service_health
+        .as_mut()
+        .context("Resident PDF health owner absent")?;
+    owner.read_ordinary_pdf(health, source)
+}
+
+fn require_source_current(workflow: &mut Workflow, deadline: Instant) -> Result<()> {
+    workflow.check_request_progress()?;
+    let owner = workflow
+        .resident_source
+        .as_mut()
+        .context("Resident PDF owner absent")?;
+    let health = workflow
+        .service_health
+        .as_mut()
+        .context("Resident PDF health owner absent")?;
+    owner.require_ordinary_pdf_current(health, deadline)
 }
 
 struct OriginalPdf {
@@ -134,6 +167,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         dispatch: &Dispatch<'_>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
+        let prepared = attempt.capture_pdf_reading(&self.ledger)?;
         let config = dispatch.config;
         let declaration = config
             .reader
@@ -171,8 +205,11 @@ impl<M: LLMEngine> Orchestrator<M> {
         } else {
             format!("{prompt}\n{SOURCE_SUBJECT_PROMPT}")
         };
-        let proposed = self.read_ordinary_pdf(attempt, &pdf, &prompt, &encoded, false)?;
+        let proposed =
+            self.read_ordinary_pdf(attempt, &prepared, &pdf, &prompt, &encoded, false)?;
         if proposed.trim().eq_ignore_ascii_case("NONE") {
+            require_source_current(&mut self.workflow, pdf.deadline)?;
+            prepared.with_current(self.ledger.store(), || Ok(()))?;
             self.workflow.report_failure(super::Failure::Selection)?;
             return attempt.outcome(
                 &self.ledger,
@@ -204,6 +241,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             .collect::<Vec<_>>();
         let verified = self.read_ordinary_pdf(
             attempt,
+            &prepared,
             &pdf,
             &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
             &verification,
@@ -227,12 +265,13 @@ impl<M: LLMEngine> Orchestrator<M> {
             Intent::Unclear => anyhow::bail!("PDF question web intent is unclear"),
         };
         pdf.check_file()?;
-        self.workflow.check_request_progress()?;
-        attempt.interpret_source_target(
+        require_source_current(&mut self.workflow, pdf.deadline)?;
+        let interpreted_root = attempt.interpret_ordinary_pdf(
             &self.ledger,
             &result.question,
             result.target.as_ref(),
-            Some(&result.selection),
+            &result.selection,
+            &prepared,
         )?;
         if attempt.source_target_enabled() {
             result.about = Some(match result.target.as_ref() {
@@ -248,12 +287,21 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .map(OrdinarySearch::for_installed_pdf),
             deadline,
         };
-        self.answer_ordinary_pdf(attempt, &pdf, dispatch, policy, research, &mut result)
+        self.answer_ordinary_pdf(
+            attempt,
+            &pdf,
+            dispatch,
+            policy,
+            research,
+            &mut result,
+            (&interpreted_root, prepared.generation),
+        )
     }
 
     fn read_ordinary_pdf(
         &mut self,
         attempt: &Attempt,
+        prepared: &Captured,
         pdf: &OriginalPdf,
         prompt: &str,
         images: &[String],
@@ -293,15 +341,18 @@ impl<M: LLMEngine> Orchestrator<M> {
             self.workflow.deliver_reader_acquisition()?;
         }
         let workflow = RefCell::new(&mut self.workflow);
+        let store = self.ledger.store();
         let progress = || {
             pdf.check_deadline()?;
             attempt.model_progress()?;
-            workflow.borrow_mut().check_request_progress()
+            workflow.borrow_mut().check_request_progress()?;
+            prepared.with_current(store, || Ok(()))
         };
         let submit = |call: &mut dyn FnMut() -> Result<()>| {
             progress()?;
             pdf.check_file()?;
-            call()
+            require_source_current(&mut workflow.borrow_mut(), pdf.deadline)?;
+            prepared.with_current(store, call)
         };
         let reply = followup_research::once(&submit, |handoff| {
             model
@@ -312,6 +363,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         Ok(reply)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn answer_ordinary_pdf(
         &mut self,
         attempt: &mut Attempt,
@@ -320,6 +372,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         policy: crate::conversation::receiving::memory::research::ResearchPolicy,
         research: followup_research::ResearchRequest<'_>,
         result: &mut AnalysisResult,
+        (expected, generation): (&crate::conversation::ExpectedHeads, Uuid),
     ) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -328,14 +381,17 @@ impl<M: LLMEngine> Orchestrator<M> {
         let ledger = &self.ledger;
         let conversation = attempt.user.conversation;
         let user = attempt.user.id;
-        let expected = ledger.expected(Namespace::Conversation, conversation)?;
         let prepared = {
             let mut progress = || {
                 pdf.check_deadline()?;
                 attempt.model_progress()?;
                 self.workflow.check_request_progress()?;
+                let (live_generation, heads) = ledger
+                    .store()
+                    .conditional_snapshot(Namespace::Conversation, conversation)?;
                 ensure!(
-                    ledger.expected(Namespace::Conversation, conversation)? == expected,
+                    live_generation == generation
+                        && matches!(heads.as_slice(), [head] if expected.0.contains(&head.revision_id)),
                     "PDF conversation changed during retrieval"
                 );
                 Ok(())
@@ -370,17 +426,19 @@ impl<M: LLMEngine> Orchestrator<M> {
             )?
         };
         ensure!(
-            prepared.context().request() == &attempt.user && prepared.original_root() == expected,
+            prepared.context().request() == &attempt.user
+                && &prepared.original_root() == expected
+                && prepared.original_generation() == generation,
             "Interpreted PDF request changed"
         );
         pdf.check_file()?;
-        self.workflow.check_request_progress()?;
+        require_source_current(&mut self.workflow, pdf.deadline)?;
         let (context, mut evidence) = ledger.persist_followup_evidence(
             crate::writer::stage(attempt.user.exchange, "reader-pdf-evidence"),
             timestamp,
             prepared,
         )?;
-        attempt.advance_pdf_evidence(ledger, &expected, evidence.root())?;
+        attempt.advance_pdf_evidence(ledger, expected, evidence.root())?;
         result.answer = {
             let workflow = RefCell::new(&mut self.workflow);
             let progress = || {
@@ -394,6 +452,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             let submit = |call: &mut dyn FnMut() -> Result<()>| {
                 progress()?;
                 pdf.check_file()?;
+                require_source_current(&mut workflow.borrow_mut(), pdf.deadline)?;
                 attempt.check_selected()?;
                 evidence.with_current(ledger, call)
             };
@@ -411,7 +470,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             )?
         };
         pdf.check_file()?;
-        self.workflow.check_request_progress()?;
+        require_source_current(&mut self.workflow, pdf.deadline)?;
         attempt.check_selected()?;
         attempt.generated_from_pdf(ledger, &mut evidence, result.answer.clone())?;
         self.place_answer(attempt, result, true, &mut |ledger| {
