@@ -2162,10 +2162,11 @@ pub(crate) mod tests {
         {
             let events = events.borrow();
             assert_eq!(&events[..2], &["observe", "capture"]);
-            assert_eq!(events.len() % 2, 0);
-            assert!(events[2..]
-                .chunks_exact(2)
-                .all(|pair| pair == ["reconnect", "observe"]));
+            let (observations, remainder) = events[2..].as_chunks::<2>();
+            assert!(remainder.is_empty());
+            assert!(observations
+                .iter()
+                .all(|pair| *pair == ["reconnect", "observe"]));
         }
         let records = store
             .snapshot_heads_matching(

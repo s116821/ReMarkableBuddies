@@ -147,51 +147,54 @@ pub(in crate::workflow) fn answer(
     };
     let directive = research.directive;
     let deadline = research.deadline;
-    let context =
-        if directive == ResearchDirective::NoInternet || policy == ResearchPolicy::Disabled {
+    let context = if directive == ResearchDirective::NoInternet
+        || policy == ResearchPolicy::Disabled
+    {
+        context.with_research(
+            ResearchInput {
+                policy,
+                directive,
+                provider: None,
+                options,
+            },
+            budget(),
+            count,
+        )?
+    } else {
+        let search = research
+            .search
+            .as_ref()
+            .context("Reader follow-up research unavailable")?;
+        let models = search.resolve(config)?;
+        let (model, endpoint, credential) = models.required_search()?;
+        let endpoint = search.endpoint(endpoint);
+        #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+        let endpoint = crate::workflow::orchestrator::researched_fixture::endpoint(endpoint)?;
+        #[cfg(not(all(test, target_os = "linux", feature = "development-resident-bootstrap")))]
+        let endpoint = endpoint.to_owned();
+        check()?;
+        once(&submit, |handoff| {
+            let mut progress = |_| check();
+            let provider = OpenAIWebResearch::new(
+                model.into(),
+                endpoint,
+                credential.into(),
+                TransportOptions::default(),
+                &mut progress,
+            )?
+            .with_guarded_dispatch(handoff, deadline);
             context.with_research(
                 ResearchInput {
                     policy,
                     directive,
-                    provider: None,
+                    provider: Some(&provider),
                     options,
                 },
                 budget(),
                 count,
-            )?
-        } else {
-            let search = research
-                .search
-                .as_ref()
-                .context("Reader follow-up research unavailable")?;
-            let models = search.resolve(config)?;
-            let (model, endpoint, credential) = models.required_search()?;
-            let endpoint = search.endpoint(endpoint);
-            #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
-            let endpoint = crate::workflow::orchestrator::researched_fixture::endpoint(endpoint)?;
-            check()?;
-            once(&submit, |handoff| {
-                let mut progress = |_| check();
-                let provider = OpenAIWebResearch::new(
-                    model.into(),
-                    endpoint.into(),
-                    credential.into(),
-                    TransportOptions::default(),
-                    &mut progress,
-                )?
-                .with_guarded_dispatch(handoff, deadline);
-                context.with_research(
-                    ResearchInput {
-                        policy,
-                        directive,
-                        provider: Some(&provider),
-                        options,
-                    },
-                    budget(),
-                    count,
-                )
-            })?
-        };
+            )
+        })?
+    };
     check()?;
     let draft = once(&submit, |handoff| {
         answer::answer_followup_guarded(
