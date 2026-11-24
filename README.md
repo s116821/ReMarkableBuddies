@@ -244,18 +244,24 @@ Options:
 
 ### Testing
 
-```bash
-# Run the production Reader workflow locally with scripted model replies
-cargo run -- --simulate docs/simulator/scenarios/blank-answer.json
+On an authorized development tablet, test the installed, running Buddy service.
+Use the [one-page Reader workflow](#using-reader-on-the-tablet) with a real finger
+hold and the configured provider. Check that the adjacent page visibly answers
+the question and that the original ink is intact. If a press produces no request,
+record that failure. A saved answer and the answer seen on the display are separate
+observations. [Shared tablet checklist](https://github.com/s116821/ReMarkableBuddiesDocs/blob/main/.agents/skills/reader-buddy-testing/SKILL.md)
 
-# Build explicit development examples for an authorized RM2 (not release assets)
-cross build --release --target armv7-unknown-linux-gnueabihf --example screenshot --example reader_once
-# Copy target/armv7-unknown-linux-gnueabihf/release/examples/{screenshot,reader_once}
-# to the authorized tablet, then run there:
-./screenshot /tmp/page.png
-# Stop the normal service first; this immediately runs a real, potentially paid Q&A:
-./reader_once
+For development while the tablet is occupied, the [local simulator](docs/simulator.md)
+can exercise a recorded scenario. Automated component and regression checks run in CI.
+
+```bash
+cargo run -- --simulate docs/simulator/scenarios/blank-answer.json
 ```
+
+### Diagnostic reference
+
+The development examples below document individual operations for diagnosing a
+specific failure. Tablet acceptance follows the installed-service workflow above.
 
 For capture profiling, `./screenshot /tmp/page.png --image-only` uses the fresh
 owned-pixel path used by status guards. Its diagnostic PNG save occurs after the
@@ -263,14 +269,10 @@ owned-pixel path used by status guards. Its diagnostic PNG save occurs after the
 duration when assessing this path. Normal screenshot mode retains encoded native
 detail and overview output.
 
-The old `--input-png` and `--save-screenshot` flags were unused and are removed.
-`--no-draw` did not provide a working simulator and is also removed. Use
-`--simulate` for the maintained [local simulator](docs/simulator.md), or bounded
-diagnostic probes for offline device actions.
-Production `--once`, `--no-trigger` and `--screenshot-only` are removed; use the
-explicit examples above. `reader_once` uses environment credentials/endpoint, the
-default model, skips the trigger wait, and leaves image dumps disabled. Restore the normal service
-after the bounded diagnostic. Paper Pro examples use the aarch64 target.
+For older scripts, `--input-png`, `--save-screenshot`, `--no-draw`, `--once`,
+`--no-trigger` and `--screenshot-only` have been removed. The development
+example `reader_once` skips the gesture and uses its own default model with
+environment credentials. Its output covers only that invocation.
 
 For answer-page eligibility diagnosis without a model call or input-device
 initialization, build `--example page_eligibility` and run

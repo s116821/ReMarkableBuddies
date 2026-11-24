@@ -217,13 +217,12 @@ Core crates:
 Default execution requires reMarkable hardware. The maintained simulator runs the
 same Reader orchestrator through `DeviceBackend` and `LLMEngine` interfaces:
 `cargo run -- --simulate docs/simulator/scenarios/blank-answer.json`.
-See [scenario format and fidelity](simulator.md). Desktop behavioral and simulator
-tests run with `cargo test --all-targets`. For bounded device checks, explicitly build/copy the examples described in
-[README testing](../README.md#testing) and use:
-- the `screenshot FILE` example to capture without credentials or input initialization
-- the `reader_once` example to run one real-device question without a held gesture
-  (environment credentials/endpoint, default model and LL; stop/restore normal service)
-- `READER_BUDDY_DEBUG_DUMP=true` to retain optional local capture diagnostics
+See [scenario format and fidelity](simulator.md). CI runs the automated desktop
+and simulator checks. On the tablet, exercise the installed service through its
+physical gesture, configured model and visible answer page. Use the
+[tablet testing instructions](../README.md#testing) for hardware acceptance.
+The [diagnostic reference](../README.md#diagnostic-reference) covers capture
+and page-state inspection when investigating a failure.
 
 The former `--input-png`, `--no-draw` and `--save-screenshot` switches are removed;
 they did not provide a working offline simulator.
