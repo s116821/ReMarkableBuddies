@@ -1,6 +1,9 @@
 //! Saved inputs for an admitted ordinary notebook. No pixels or publication permit.
 use super::{open_at, Asset, Directory, SourceProgress, INSTALLED_ROOT, TABLE_BYTES};
-use crate::{conversation::Ledger, device::native_page::ordered_pages};
+use crate::{
+    conversation::{Ledger, SourceObservation},
+    device::native_page::ordered_pages,
+};
 use anyhow::{ensure, Context, Result};
 use nix::libc;
 use remarkable_open_sdk::{native_adapter::ReaderFacts, Uuid};
@@ -41,6 +44,21 @@ impl SavedNotebookSource {
     /// Identity of the persisted inputs, independent of render output.
     pub fn revision(&self) -> &str {
         &self.revision
+    }
+
+    /// Supply the receiver's independent saved-content field. Native order,
+    /// rendered images and effect admission still come from their own guards.
+    pub fn bind_content_revision(&self, observation: &mut SourceObservation) -> Result<()> {
+        ensure!(
+            observation.document.as_bytes() == self.document.as_bytes()
+                && self
+                    .original_pages
+                    .iter()
+                    .any(|page| { observation.page.as_bytes() == page.as_bytes() }),
+            "Saved notebook revision does not match the observed original page"
+        );
+        observation.content_revision = Some(self.revision.clone());
+        Ok(())
     }
 }
 

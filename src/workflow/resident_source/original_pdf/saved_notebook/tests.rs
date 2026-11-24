@@ -116,6 +116,27 @@ fn saved_notebook_stays_current_only_for_the_same_ordered_source_inputs() -> Res
     let order = vec![f.first, f.last];
     let initial = f.get(order.clone(), HashSet::new())?;
     assert_eq!(initial.original_pages(), order);
+    let mut observation = SourceObservation {
+        document: uuid::Uuid::from_bytes(*f.document.as_bytes()),
+        page: uuid::Uuid::from_bytes(*f.first.as_bytes()),
+        session: "fixture".into(),
+        visit: "fixture-visit".into(),
+        content_revision: None,
+        order_revision: Some("independent order witness".into()),
+        capability_revision: "fixture-profile".into(),
+        evidence_procedure: "fixture".into(),
+    };
+    initial.bind_content_revision(&mut observation)?;
+    assert_eq!(
+        observation.content_revision.as_deref(),
+        Some(initial.revision())
+    );
+    assert_eq!(
+        observation.order_revision.as_deref(),
+        Some("independent order witness")
+    );
+    observation.page = uuid::Uuid::from_bytes(*f.output.as_bytes());
+    assert!(initial.bind_content_revision(&mut observation).is_err());
     assert!(f.get(vec![f.last, f.first], HashSet::new()).is_err());
 
     f.table(true);
