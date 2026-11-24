@@ -955,6 +955,61 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_installed_refinements_admit_the_configured_local_writer_memory() -> Result<()> {
+        use crate::{memory, workflow::resident_output::SelectedConversationRequest};
+        use std::sync::Arc;
+
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open()?;
+        let config = memory_config(&ledger, Uuid::new_v4(), true)?;
+        let dispatch = Dispatch::local(&config, &ledger)?;
+        let local = dispatch.local_memory().unwrap();
+        let provider: Arc<dyn memory::Provider> = local.clone();
+        let request = writer::Request::Refine {
+            conversation: Uuid::new_v4(),
+            operation: Uuid::new_v4(),
+            draft: Uuid::new_v4(),
+            request: "Refine the force note.".into(),
+        };
+        let refinement = |require_current_draft| SelectedConversationRequest::WriterRefinement {
+            request: request.clone(),
+            require_current_draft,
+        };
+        let installed = refinement(true);
+        let store = ledger.store();
+        let admitted = installed
+            .installed_writer_memory(store, Some(&provider))?
+            .unwrap();
+        assert!(Arc::ptr_eq(&admitted, &provider));
+        assert!(installed.installed_writer_memory(store, None)?.is_none());
+        assert!(refinement(false)
+            .installed_writer_memory(store, Some(&provider))?
+            .is_none());
+        assert!(SelectedConversationRequest::BlankStart(None)
+            .installed_writer_memory(store, Some(&provider))?
+            .is_none());
+
+        let foreign = SimulatorLedger::new();
+        assert!(installed
+            .installed_writer_memory(foreign.open()?.store(), Some(&provider))
+            .is_err());
+        let selected: Arc<dyn memory::Provider> = Arc::new(memory::selected::SelectedMemory::new(
+            store.clone(),
+            memory::catalog::Identity {
+                group: Uuid::new_v4(),
+                profile: config.memory.profile.unwrap(),
+                binding_sha256: digest(b"selected Writer memory control"),
+            },
+        )?);
+        assert!(installed
+            .installed_writer_memory(store, Some(&selected))
+            .is_err());
+        assert_eq!(local.query_count(), 0);
+        Ok(())
+    }
+
     #[test]
     fn eighth_request_and_any_request_after_failure_refuse_without_backend_entry() -> Result<()> {
         let mut model = CheckedModel::new(Box::new(scripted()));

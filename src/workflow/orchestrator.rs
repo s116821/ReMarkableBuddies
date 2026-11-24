@@ -223,6 +223,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             let super::AcquiredEvidence::ResidentHistorical(capture) = acquired else {
                 anyhow::bail!("selected conversation requires the retained native source");
             };
+            let writer_memory =
+                request.installed_writer_memory(self.ledger.store(), self.memory.as_ref())?;
             return match request {
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
@@ -230,7 +232,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                 SelectedConversationRequest::WriterRefinement {
                     request,
                     require_current_draft,
-                } => self.run_resident_writer_refinement(&request, &capture, require_current_draft),
+                } => self.run_resident_writer_refinement(
+                    &request,
+                    &capture,
+                    require_current_draft,
+                    writer_memory.as_deref(),
+                ),
             };
         }
         // A queued refinement can expire or belong to another open page.
@@ -342,6 +349,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         request: &crate::writer::Request,
         capture: &crate::conversation::ResidentSourceCapture,
         require_current_draft: bool,
+        memory: Option<&dyn crate::memory::Provider>,
     ) -> Result<()> {
         use super::resident_output::ResidentOutputOutcome;
         use crate::{storage::Namespace, writer};
@@ -428,11 +436,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             );
         }
         let mut produced = None;
-        let report = writer::run_owned(
+        let report = writer::run_owned_with_memory(
             &self.ledger,
             &mut self.llm,
             request,
             &self.personalization,
+            memory,
             &mut || self.workflow.check_request_progress().is_err(),
             writer::OwnedRun {
                 owner: &owner,
