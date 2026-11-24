@@ -12,7 +12,7 @@ use remarkable_open_sdk::{
     native_adapter::{HistoricalCapture, ReaderFacts, RuntimeIdentity},
     navigation::LogicalDirection,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 #[cfg(all(
     feature = "development-resident-bootstrap",
     feature = "development-input-diagnostics"
@@ -50,6 +50,29 @@ pub enum SelectedConversationRequest {
         request: crate::writer::Request,
         require_current_draft: bool,
     },
+}
+
+impl SelectedConversationRequest {
+    pub(crate) fn installed_writer_memory(
+        &self,
+        store: &crate::storage::Store,
+        configured: Option<&Arc<dyn crate::memory::Provider>>,
+    ) -> Result<Option<Arc<dyn crate::memory::Provider>>> {
+        // Only the installed queue selects the current draft. Development plans
+        // keep their declared inputs, including when local memory is enabled.
+        let (
+            Self::WriterRefinement {
+                require_current_draft: true,
+                ..
+            },
+            Some(provider),
+        ) = (self, configured)
+        else {
+            return Ok(None);
+        };
+        provider.admit_ordinary_writer(store)?;
+        Ok(Some(Arc::clone(provider)))
+    }
 }
 
 pub enum ReaderAbout<'a> {
