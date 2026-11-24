@@ -168,8 +168,7 @@ impl RequestInput {
 
     pub fn poll(&mut self) -> Result<InputProgress> {
         // Poll even after cancellation so a later observer failure stays fatal.
-        let quiet = self.sample_quiet()?;
-        self.canceled |= !quiet;
+        self.sample_quiet()?;
         Ok(if self.canceled {
             InputProgress::Canceled
         } else {
@@ -188,7 +187,9 @@ impl RequestInput {
                 return Err(error);
             }
         };
-        Ok(events.is_empty() && self.observer.quiescent())
+        let quiet = events.is_empty() && self.observer.quiescent();
+        self.canceled |= !quiet;
+        Ok(quiet)
     }
 
     pub(crate) fn require_quiet(&mut self) -> Result<()> {
@@ -260,15 +261,24 @@ mod tests {
             Interaction::Redo,
             Interaction::Invalidated,
         ] {
-            let mut guard = RequestInput::scripted(vec![
-                Ok(vec![interaction]),
-                quiet(),
-                Err(anyhow::anyhow!("lost observer")),
-            ]);
-            assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
-            assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
-            assert!(guard.poll().is_err());
-            assert!(guard.poll().is_err());
+            for sampled in [false, true] {
+                let mut guard = RequestInput::scripted(vec![
+                    Ok(vec![interaction]),
+                    quiet(),
+                    quiet(),
+                    Err(anyhow::anyhow!("lost observer")),
+                ]);
+                if sampled {
+                    assert!(!guard.sample_quiet().unwrap());
+                    assert!(guard.sample_quiet().unwrap());
+                } else {
+                    assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                    assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                }
+                assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                assert!(guard.poll().is_err());
+                assert!(guard.poll().is_err());
+            }
         }
     }
 
