@@ -2,7 +2,7 @@
 
 ReMarkableBuddies (Buddy) is one reMarkable tablet app with two workflows.
 Reader answers handwritten questions about circled or highlighted content.
-Writer turns notebook content into note drafts that you can refine or export.
+Writer generates and refines note drafts from source text in a conversation.
 See [using Writer on the tablet](#using-writer-on-the-tablet) or the
 [Writer draft commands](docs/reference/writer-drafts.md).
 
@@ -28,6 +28,22 @@ Legacy `openspec/...` references in component guides resolve there after migrati
 - **On-Device Rendering**: Displays question and answer directly on your reMarkable tablet
 - **Answer Page Detection**: Recognizes blank pages or existing answer pages for seamless Q&A flow
 
+### Handwritten question marks
+
+Automatic question erasure is disabled in the standard installation. Under the
+planned Reader convention, a handwritten `?` anywhere in a fragment lets Buddy
+erase that fragment after capture. The mark gives permission without a
+separate intent check or confirmation prompt. When enabled, erasure preserves
+surrounding notes, circles, highlights, and underlying content. Unmarked
+handwriting stays in place. Typed requests and Writer keep their existing
+behavior. Buddy will save the screenshot and interpreted question before
+erasure, then show that question on the Buddy page even if it cannot answer.
+You can review and correct the saved interpretation; erasure does not confirm
+that Buddy read it correctly.
+
+Tablet support and live handwriting recognition still require qualification.
+See [the technical notes](docs/TECHNICAL.md#marked-questions-and-erasure).
+
 ## Using Reader on the tablet
 
 On a reMarkable 2 with firmware 3.28.0.172, Buddy's complete resident
@@ -52,34 +68,18 @@ but can reject valid handwriting when the readings differ; agreement is not a
 guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
 for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
 
-### Handwritten question marks
-
-Automatic question erasure is disabled in the standard installation. Under the
-planned Reader convention, a handwritten `?` anywhere in a fragment lets Buddy
-erase that fragment after capture. The mark gives permission without a
-separate intent check or confirmation prompt. When enabled, erasure preserves
-surrounding notes, circles, highlights, and underlying content. Unmarked
-handwriting stays in place. Typed requests and Writer keep their existing
-behavior. Buddy will save the screenshot and interpreted question before
-erasure, then show that question on the Buddy page even if it cannot answer.
-You can review and correct the saved interpretation; erasure does not confirm
-that Buddy read it correctly.
-
-Tablet support and live handwriting recognition still require qualification.
-See [the technical notes](docs/TECHNICAL.md#marked-questions-and-erasure).
-
 ## Using Writer on the tablet
 
-The combined preview with handwritten Writer requests uses the same lower-right
-hold as Reader. With Writer enabled, open the notebook page you want to use.
+Handwritten Writer requests require the combined Reader/Writer development
+preview on reMarkable 2 with Writer enabled. The `v0.78.3` release predates
+this input. With automatic page insertion enabled, a one-page notebook is enough.
 
-1. Write “Make a note from this page” to use the whole page. To use just one passage or drawing, draw a closed circle around it and write “Make a note about the circled part” beside it.
+1. Open the notebook page you want to use. Write “Make a note from this page” for a whole-page draft. To use one passage or drawing, circle it and write “Make a note about the circled part” beside it.
 2. Hold one finger still in the **lower-right corner** for three seconds, then release once.
-3. On the adjacent Buddy page, check the request Buddy read and the draft below it. For a circled passage, the draft's **About** line identifies what Buddy understood you to have selected.
+3. On a successful run, the adjacent Buddy page shows the request Buddy read and the draft beneath it. For a circled note, check the **About** line against the content you selected.
 
-You can start on a single page. With automatic page insertion enabled, Buddy
-can add the adjacent page. A note request saves a draft in Buddy. Sending it
-to a connected destination is a separate export action.
+This gesture saves a draft in Buddy. Export to a connected notes service is
+a separate action.
 
 ## Undo and redo the latest answer
 
