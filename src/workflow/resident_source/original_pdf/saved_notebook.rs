@@ -69,6 +69,18 @@ pub enum NotebookSourceAcquisition {
     Unavailable(anyhow::Error),
 }
 
+/// The exact source bytes read for an original page's saved revision.
+pub struct SavedNotebookPage<'a> {
+    pub page: Uuid,
+    pub scene: &'a [u8],
+    pub template_stem: &'a str,
+    pub template_svg: Option<&'a [u8]>,
+    pub template_png: Option<&'a [u8]>,
+}
+
+pub type SavedNotebookPageConsumer<'a> =
+    dyn for<'page> FnMut(SavedNotebookPage<'page>) -> Result<()> + 'a;
+
 /// The service supplies fresh Reader facts and its ordinary ownership ledger.
 /// Missing scene data is never evidence of a blank.
 pub fn acquire_saved_notebook(
@@ -76,6 +88,28 @@ pub fn acquire_saved_notebook(
     ledger: &Ledger,
     deadline: Instant,
     progress: &mut dyn FnMut() -> Result<()>,
+) -> NotebookSourceAcquisition {
+    acquire_installed(facts, ledger, deadline, progress, None)
+}
+
+/// Visit the exact bounded inputs in original order while their handles are pinned.
+/// The consumer must discard any outputs if acquisition returns `Unavailable`.
+pub fn acquire_saved_notebook_with_pages(
+    facts: &ReaderFacts,
+    ledger: &Ledger,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    consume: &mut SavedNotebookPageConsumer<'_>,
+) -> NotebookSourceAcquisition {
+    acquire_installed(facts, ledger, deadline, progress, Some(consume))
+}
+
+fn acquire_installed(
+    facts: &ReaderFacts,
+    ledger: &Ledger,
+    deadline: Instant,
+    progress: &mut dyn FnMut() -> Result<()>,
+    consume: Option<&mut SavedNotebookPageConsumer<'_>>,
 ) -> NotebookSourceAcquisition {
     let result = (|| {
         let mut progress = SourceProgress::new(deadline, progress);
@@ -99,13 +133,16 @@ pub fn acquire_saved_notebook(
             })
             .collect::<Result<HashSet<_>>>()?;
         let source = acquire(
-            Path::new(INSTALLED_ROOT),
-            Path::new(TEMPLATES),
-            (0, Some(0)),
-            false,
+            SourcePaths {
+                root: Path::new(INSTALLED_ROOT),
+                templates: Path::new(TEMPLATES),
+                owner: (0, Some(0)),
+                fixture: false,
+            },
             facts,
             &excluded,
             &mut progress,
+            consume,
         )?;
         let after = ledger.notebook_page_associations(document, &pages, || progress.poll())?;
         ensure!(before == after, "Notebook Buddy ownership changed");
@@ -157,9 +194,14 @@ impl Inputs<'_, '_> {
         Ok(digest)
     }
 
-    fn scene(&mut self, dirs: &[Directory], name: String) -> Result<String> {
+    fn scene(
+        &mut self,
+        dirs: &[Directory],
+        name: String,
+        raw: Option<&mut Vec<u8>>,
+    ) -> Result<String> {
         let digest = self
-            .read(dirs, 1, name, ASSET_BYTES, None)
+            .read(dirs, 1, name, ASSET_BYTES, raw)
             .context("Original saved scene unavailable; blank has not been proven")?;
         let (_, asset) = self.assets.last().context("Saved scene pin unavailable")?;
         let mut header = [0; SCENE_HEADER.len()];
@@ -172,16 +214,18 @@ impl Inputs<'_, '_> {
         Ok(digest)
     }
 
-    fn optional(
+    fn template_asset(
         &mut self,
         dirs: &[Directory],
-        dir: usize,
         name: String,
-        max: usize,
-    ) -> Result<Option<String>> {
+        retain: bool,
+    ) -> Result<Option<TemplateAsset>> {
+        let dir = 2;
         self.progress.poll()?;
         if exists(&dirs[dir], &name)? {
-            return self.read(dirs, dir, name, max, None).map(Some);
+            let mut bytes = retain.then(Vec::new);
+            let digest = self.read(dirs, dir, name, ASSET_BYTES, bytes.as_mut())?;
+            return Ok(Some(TemplateAsset { digest, bytes }));
         }
         self.missing.push((dir, name));
         Ok(None)
@@ -208,10 +252,21 @@ impl Inputs<'_, '_> {
     }
 }
 
-#[derive(Serialize)]
-struct TemplateInputs<'a> {
-    registry_entry: &'a Value,
-    asset_digests: Vec<Option<String>>,
+struct TemplateAsset {
+    digest: String,
+    bytes: Option<Vec<u8>>,
+}
+
+struct TemplateInputs {
+    svg: Option<TemplateAsset>,
+    png: Option<TemplateAsset>,
+}
+
+struct SourcePaths<'a> {
+    root: &'a Path,
+    templates: &'a Path,
+    owner: (u32, Option<u32>),
+    fixture: bool,
 }
 
 #[derive(Serialize)]
@@ -219,17 +274,16 @@ struct Original<'a> {
     id: &'a str,
     page_layout: &'a Value,
     scene_sha256: &'a str,
-    template: &'a TemplateInputs<'a>,
+    template_svg_sha256: Option<&'a str>,
+    template_png_sha256: Option<&'a str>,
 }
 
 fn acquire(
-    root: &Path,
-    templates: &Path,
-    owner: (u32, Option<u32>),
-    fixture: bool,
+    paths: SourcePaths<'_>,
     facts: &ReaderFacts,
     excluded: &HashSet<Uuid>,
     progress: &mut SourceProgress<'_>,
+    mut consume: Option<&mut SavedNotebookPageConsumer<'_>>,
 ) -> Result<SavedNotebookSource> {
     let document = facts.page().document;
     ensure!(
@@ -251,14 +305,19 @@ fn acquire(
     };
     inputs.progress.boundary()?;
     let dirs = [
-        Directory::open(root, owner, fixture, &mut inputs.work)?,
+        Directory::open(paths.root, paths.owner, paths.fixture, &mut inputs.work)?,
         Directory::open(
-            &root.join(document.to_string()),
-            owner,
-            fixture,
+            &paths.root.join(document.to_string()),
+            paths.owner,
+            paths.fixture,
             &mut inputs.work,
         )?,
-        Directory::open(templates, owner, fixture, &mut inputs.work)?,
+        Directory::open(
+            paths.templates,
+            paths.owner,
+            paths.fixture,
+            &mut inputs.work,
+        )?,
     ];
     let mut content = Vec::new();
     inputs.read(
@@ -346,56 +405,58 @@ fn acquire(
             .context("Missing explicit original template assignment")?
             .to_owned();
         if !template_assets.contains_key(&template) {
-            let mut entries = registry.iter().filter(|entry| entry["name"] == template);
-            let entry = entries.next().context("Unresolved stock template asset")?;
-            let stem = entry["filename"]
-                .as_str()
-                .context("Unresolved stock template asset")?;
             ensure!(
-                entries.next().is_none()
-                    && !stem.is_empty()
-                    && stem.len() < 128
-                    && stem
+                template.len() < 128
+                    && template
                         .bytes()
                         .all(|c| c.is_ascii_alphanumeric() || b"_ -".contains(&c)),
-                "Ambiguous or invalid stock template"
+                "Invalid stock template asset stem"
             );
-            let mut assets = Vec::new();
-            for extension in ["svg", "png"] {
-                assets.push(inputs.optional(
-                    &dirs,
-                    2,
-                    format!("{stem}.{extension}"),
-                    ASSET_BYTES,
-                )?);
-            }
             ensure!(
-                assets.iter().any(Option::is_some),
+                registry.iter().any(|entry| entry["filename"] == template),
+                "Unregistered stock template asset stem"
+            );
+            let retain = consume.is_some();
+            let svg = inputs.template_asset(&dirs, format!("{template}.svg"), retain)?;
+            let png = inputs.template_asset(&dirs, format!("{template}.png"), retain)?;
+            ensure!(
+                svg.is_some() || png.is_some(),
                 "Stock template assets absent"
             );
-            template_assets.insert(
-                template.clone(),
-                TemplateInputs {
-                    registry_entry: entry,
-                    asset_digests: assets,
-                },
-            );
+            template_assets.insert(template.clone(), TemplateInputs { svg, png });
         }
         page_layout
             .as_object_mut()
             .context("Invalid original page layout")?
             .remove("idx");
-        let scene_sha256 = inputs.scene(&dirs, format!("{id}.rm"))?;
+        let mut scene = consume.is_some().then(Vec::new);
+        let scene_sha256 = inputs.scene(&dirs, format!("{id}.rm"), scene.as_mut())?;
+        if let (Some(consume), Some(scene)) = (consume.as_mut(), scene.as_deref()) {
+            let assets = &template_assets[&template];
+            inputs.progress.poll()?;
+            consume(SavedNotebookPage {
+                page: *page,
+                scene,
+                template_stem: &template,
+                template_svg: assets.svg.as_ref().and_then(|asset| asset.bytes.as_deref()),
+                template_png: assets.png.as_ref().and_then(|asset| asset.bytes.as_deref()),
+            })?;
+            inputs.progress.poll()?;
+        }
         originals.push((id, page_layout, scene_sha256, template));
     }
     inputs.verify(&dirs)?;
     let exact = originals
         .iter()
-        .map(|(id, layout, digest, template)| Original {
-            id,
-            page_layout: layout,
-            scene_sha256: digest,
-            template: &template_assets[template],
+        .map(|(id, layout, digest, template)| {
+            let assets = &template_assets[template];
+            Original {
+                id,
+                page_layout: layout,
+                scene_sha256: digest,
+                template_svg_sha256: assets.svg.as_ref().map(|asset| asset.digest.as_str()),
+                template_png_sha256: assets.png.as_ref().map(|asset| asset.digest.as_str()),
+            }
         })
         .collect::<Vec<_>>();
     let revision = format!(
