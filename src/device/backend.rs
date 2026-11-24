@@ -199,6 +199,7 @@ pub trait DeviceBackend {
     #[cfg(target_os = "linux")]
     fn wait_for_resident_reader(
         &mut self,
+        _timestamp_release: bool,
         _progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::request_input::ReleasedReaderInput> {
         anyhow::bail!("Resident released-input handoff unavailable")
@@ -934,6 +935,7 @@ impl DeviceBackend for RealDevice {
     #[cfg(target_os = "linux")]
     fn wait_for_resident_reader(
         &mut self,
+        timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::request_input::ReleasedReaderInput> {
         self.status_wait_cancellation.check()?;
@@ -963,6 +965,7 @@ impl DeviceBackend for RealDevice {
         super::request_input::RequestInput::wait_released_reader(
             self.resident_corner.clone(),
             blank_start,
+            timestamp_release && blank_start,
             progress,
         )
     }

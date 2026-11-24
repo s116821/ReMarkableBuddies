@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{ErrorKind, Read},
@@ -88,8 +89,60 @@ impl LegacyAdoption {
 struct Pending {
     submission: Submission,
     expires: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_by: Option<u64>,
     #[serde(skip)]
     digest: String,
+}
+
+/// Identity observed when a Writer-only corner gesture is released.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedRefinement {
+    activation: Uuid,
+    slot_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotAction {
+    Inspect,
+    Claim,
+}
+
+impl Pending {
+    fn publish(mut self, path: &Path, clock: impl FnOnce() -> Result<u64>) -> Result<()> {
+        // Deposit the complete request at its final path under the submission
+        // lock. Only then can the clock witness that this request existed.
+        files::atomic_json(path, &self)?;
+        if matches!(self.submission, Submission::RefineOnTablet { .. }) {
+            let published = clock()?;
+            ensure!(
+                published < self.expires,
+                "Writer request expired during publication"
+            );
+            self.published_by = Some(published);
+            files::atomic_json(path, &self)?;
+        }
+        Ok(())
+    }
+
+    fn refinement(&self, activation: Uuid, now: u64) -> Result<Option<SelectedRefinement>> {
+        if self.published_by.is_none_or(|published| published >= now)
+            || now >= self.expires
+            || !matches!(
+                &self.submission,
+                Submission::RefineOnTablet {
+                    refinement: Request::Refine { .. },
+                    ..
+                }
+            )
+        {
+            return Ok(None);
+        }
+        Ok(Some(SelectedRefinement {
+            activation,
+            slot_digest: Sha256::digest(serde_json::to_vec(self)?).into(),
+        }))
+    }
 }
 
 impl Submission {
@@ -157,13 +210,20 @@ fn read(lease: &Lease, name: &str) -> Result<Option<Pending>> {
     Ok(Some(pending))
 }
 
-pub(crate) fn submit(submission: Submission) -> Result<()> {
+pub(crate) fn submit(
+    submission: Submission,
+    config_path: Option<std::path::PathBuf>,
+) -> Result<()> {
     if let Submission::RefineOnTablet {
         document,
         page,
         refinement,
     } = &submission
     {
+        ensure!(
+            crate::config::Config::load(config_path)?.admits_writer(false),
+            "Writer is disabled"
+        );
         ensure!(!document.is_nil() && !page.is_nil(), "empty Writer source");
         ensure!(
             matches!(refinement, Request::Refine { .. }),
@@ -225,15 +285,75 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
         read(&lease, &name)?.is_none_or(|request| request.expires <= now),
         "a local request is already awaiting its page"
     );
-    files::atomic_json(
-        &lease.path.join(name),
-        &Pending {
-            submission,
-            expires: now + LIFETIME_SECS,
-            digest: String::new(),
-        },
-    )?;
+    Pending {
+        submission,
+        expires: now + LIFETIME_SECS,
+        digest: String::new(),
+        published_by: None,
+    }
+    .publish(&lease.path.join(name), boot_seconds)?;
     lease.current()
+}
+
+pub(crate) fn at_release(
+    lease: &Lease,
+    released_boot_second: u64,
+) -> Result<Option<SelectedRefinement>> {
+    lease.record.group.current_caller()?;
+    // The current draft and its page binding are verified before a claim.
+    let pending = read(lease, &name(lease))?;
+    lease.current()?;
+    let now = boot_seconds()?;
+    match pending {
+        Some(slot) if released_boot_second <= now && now < slot.expires => {
+            slot.refinement(lease.record().activation(), released_boot_second)
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn request_for_page(
+    activation: Uuid,
+    document: Uuid,
+    page: Uuid,
+    selected: SelectedRefinement,
+    action: SlotAction,
+) -> Result<Option<Request>> {
+    let lease = caller(activation)?;
+    request_locked(&lease, document, page, selected, action, boot_seconds()?)
+}
+
+fn request_locked(
+    lease: &Lease,
+    document: Uuid,
+    page: Uuid,
+    selected: SelectedRefinement,
+    action: SlotAction,
+    now: u64,
+) -> Result<Option<Request>> {
+    let name = name(lease);
+    let Some(pending) = read(lease, &name)? else {
+        return Ok(None);
+    };
+    if pending.refinement(lease.record().activation(), now)? != Some(selected) {
+        return Ok(None);
+    }
+    let Submission::RefineOnTablet {
+        document: expected_document,
+        page: expected_page,
+        refinement,
+    } = pending.submission
+    else {
+        anyhow::bail!("unexpected command in Writer slot");
+    };
+    if document != expected_document || page != expected_page {
+        return Ok(None);
+    }
+    if action == SlotAction::Claim {
+        discard_locked(lease, &name)?;
+    }
+    lease.current()?;
+    Ok(Some(refinement))
 }
 
 /// Explicit installed intent; it never confers rendering permission.
@@ -263,7 +383,6 @@ impl RegionalRequest {
     }
 }
 pub(crate) enum InstalledRequest {
-    Refine(Request),
     GenerateRegion(RegionalRequest),
     GenerateCurrentTarget(RegionalRequest),
 }
@@ -274,9 +393,6 @@ impl Pending {
             Submission::GenerateCurrentTargetOnTablet { .. }
         );
         match self.submission {
-            Submission::RefineOnTablet { refinement, .. } => {
-                Ok(InstalledRequest::Refine(refinement))
-            }
             Submission::GenerateRegionOnTablet {
                 document,
                 page,
@@ -462,11 +578,12 @@ fn take_locked(lease: &Lease, document: Uuid, page: Uuid) -> Result<Option<Insta
     let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
+    // Only the request selected at finger release may refine the current draft.
+    if matches!(pending.submission, Submission::RefineOnTablet { .. }) {
+        return Ok(None);
+    }
     let expired = boot_seconds()? >= pending.expires;
-    // An observed regional intent always belongs to the selected receiver.
-    // Refinement's expiry/page None results mean Reader may continue, so they
-    // must never hide this intent. Keep unexpired (including foreign) bytes;
-    // retire an expired owned slot, but still refuse this ordinary attempt.
+    // A queued region belongs to the selected receiver even if it expired.
     if matches!(
         pending.submission,
         Submission::GenerateRegionOnTablet { .. }
@@ -477,27 +594,24 @@ fn take_locked(lease: &Lease, document: Uuid, page: Uuid) -> Result<Option<Insta
         lease.current()?;
         anyhow::bail!("fresh regional Writer requires the selected receiver");
     }
-    let matching_page = !expired && pending.page()? == (document, page);
-    if matches!(
-        pending.submission,
-        Submission::GenerateCurrentTargetOnTablet { .. }
-    ) && (expired || !matching_page)
-    {
-        if expired {
-            discard_locked(lease, &name)?;
-        }
-        lease.current()?;
-        anyhow::bail!("current-target Writer request expired or belongs to another page");
-    }
-    if !expired && !matching_page {
-        return Ok(None);
-    }
-    discard_locked(lease, &name)?;
+    ensure!(
+        matches!(
+            pending.submission,
+            Submission::GenerateCurrentTargetOnTablet { .. }
+        ),
+        "unexpected command in Writer slot"
+    );
     if expired {
-        return Ok(None);
+        discard_locked(lease, &name)?;
     }
+    ensure!(
+        !expired && pending.page()? == (document, page),
+        "current-target Writer request expired or belongs to another page"
+    );
+    let request = pending.request()?;
+    discard_locked(lease, &name)?;
     lease.current()?;
-    Ok(Some(pending.request()?))
+    Ok(Some(request))
 }
 
 fn legacy_pending(lease: &Lease) -> Result<Option<LegacyAdoption>> {
@@ -599,6 +713,7 @@ impl FixtureSlot {
             &Pending {
                 submission,
                 expires: boot_seconds().unwrap() + LIFETIME_SECS,
+                published_by: None,
                 digest: String::new(),
             },
         )
@@ -628,6 +743,62 @@ impl FixtureSlot {
     pub(crate) fn pending(&self) -> bool {
         let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap()).unwrap();
         read(&lease, &name(&lease)).unwrap().is_some()
+    }
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(in crate::workflow) struct RefinementFixtureSlot {
+    lease: Lease,
+    _fixture: super::tests::Fixture,
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+impl RefinementFixtureSlot {
+    pub(in crate::workflow) fn new(
+        document: Uuid,
+        page: Uuid,
+        refinement: Request,
+        published: u64,
+    ) -> Result<Self> {
+        let fixture = super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record())?;
+        lock(&lease)?;
+        Pending {
+            submission: Submission::RefineOnTablet {
+                document,
+                page,
+                refinement,
+            },
+            expires: published + LIFETIME_SECS,
+            published_by: None,
+            digest: String::new(),
+        }
+        .publish(&lease.path.join(name(&lease)), || Ok(published))?;
+        Ok(Self {
+            lease,
+            _fixture: fixture,
+        })
+    }
+
+    pub(in crate::workflow) fn at_release(
+        &self,
+        released: u64,
+    ) -> Result<Option<SelectedRefinement>> {
+        let Some(pending) = read(&self.lease, &name(&self.lease))? else {
+            return Ok(None);
+        };
+        pending.refinement(self.lease.record().activation(), released)
+    }
+
+    pub(in crate::workflow) fn for_page(
+        &self,
+        document: Uuid,
+        page: Uuid,
+        selected: SelectedRefinement,
+        action: SlotAction,
+        now: u64,
+    ) -> Result<Option<Request>> {
+        request_locked(&self.lease, document, page, selected, action, now)
     }
 }
 
@@ -859,47 +1030,149 @@ mod tests {
             .is_none());
     }
     #[test]
-    fn ordinary_ingress_refinement_retains_page_expiry_and_consume_behavior() {
+    fn ordinary_generation_lookup_leaves_refinements_for_the_release_that_selected_them() {
         let request = request();
         let slot = FixtureSlot::new(request.clone());
-        let refinement = Request::Refine {
-            conversation: Uuid::new_v4(),
-            operation: Uuid::new_v4(),
-            request: "Make the note shorter".into(),
-            draft: Uuid::new_v4(),
-        };
         let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
         let path = lease.path.join(name(&lease));
-        let pending = Pending {
-            submission: Submission::RefineOnTablet {
-                document: request.document,
-                page: request.page,
-                refinement: refinement.clone(),
-            },
-            expires: boot_seconds().unwrap() + LIFETIME_SECS,
-            digest: String::new(),
-        };
-        files::atomic_json(&path, &pending).unwrap();
-        let before = fs::read(&path).unwrap();
-        assert!(ordinary(&slot, request.document, Uuid::new_v4())
-            .unwrap()
-            .is_none());
-        assert_eq!(fs::read(&path).unwrap(), before);
-        let Some(InstalledRequest::Refine(received)) =
-            ordinary(&slot, request.document, request.page).unwrap()
-        else {
-            panic!("matching refinement was not delivered")
-        };
-        assert_eq!(
-            serde_json::to_vec(&received).unwrap(),
-            serde_json::to_vec(&refinement).unwrap()
+        let now = boot_seconds().unwrap();
+        let pending = refinement_slot(
+            request.document,
+            request.page,
+            Uuid::new_v4(),
+            now + LIFETIME_SECS,
         );
-        assert!(!slot.pending());
-        files::atomic_json(&path, &pending).unwrap();
+        pending.publish(&path, || Ok(now)).unwrap();
+        let before = fs::read(&path).unwrap();
+        for page in [Uuid::new_v4(), request.page] {
+            assert!(ordinary(&slot, request.document, page).unwrap().is_none());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
         expire(&slot);
         assert!(ordinary(&slot, request.document, request.page)
             .unwrap()
             .is_none());
-        assert!(!slot.pending());
+        assert!(slot.pending());
+    }
+
+    fn refinement_slot(document: Uuid, page: Uuid, operation: Uuid, expires: u64) -> Pending {
+        Pending {
+            submission: Submission::RefineOnTablet {
+                document,
+                page,
+                refinement: Request::Refine {
+                    conversation: Uuid::new_v4(),
+                    operation,
+                    draft: Uuid::new_v4(),
+                    request: "Shorten the note".into(),
+                },
+            },
+            expires,
+            published_by: None,
+            digest: String::new(),
+        }
+    }
+
+    #[test]
+    fn release_during_atomic_publication_cannot_select_the_later_refinement() {
+        let fixture = super::super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
+        lock(&lease).unwrap();
+        let activation = lease.record().activation();
+        let slot_name = name(&lease);
+        let path = lease.path.join(&slot_name);
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let make_slot = || refinement_slot(document, page, operation, 119 + LIFETIME_SECS);
+        let release = 120;
+
+        files::fail_next_atomic(path.clone(), files::AtomicFailure::BeforeRename);
+        assert!(make_slot()
+            .publish(&path, || panic!("clock before publication"))
+            .is_err());
+        assert!(read(&lease, &slot_name).unwrap().is_none());
+
+        make_slot()
+            .publish(&path, || {
+                let deposited = read(&lease, &slot_name)?
+                    .expect("the complete request is already at its final path");
+                assert_eq!(deposited.submission.identities().1, operation);
+                assert!(deposited.refinement(activation, release)?.is_none());
+                Ok(release + 1)
+            })
+            .unwrap();
+        let slot = read(&lease, &slot_name).unwrap().unwrap();
+        assert!(slot.refinement(activation, release).unwrap().is_none());
+        assert!(slot.refinement(activation, release + 1).unwrap().is_none());
+        let selected = slot.refinement(activation, release + 2).unwrap().unwrap();
+        assert!(request_locked(
+            &lease,
+            document,
+            page,
+            selected,
+            SlotAction::Claim,
+            release + 2
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn writer_only_corner_consumes_only_its_live_request_and_named_page() {
+        let fixture = super::super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
+        lock(&lease).unwrap();
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let mut slot = refinement_slot(document, page, operation, 120);
+        slot.published_by = Some(0);
+        let path = lease.path.join(name(&lease));
+        files::atomic_json(&path, &slot).unwrap();
+        let activation = lease.record().activation();
+        let selected = slot.refinement(activation, 118).unwrap().unwrap();
+        assert!(request_locked(
+            &lease,
+            document,
+            Uuid::new_v4(),
+            selected,
+            SlotAction::Claim,
+            119
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            request_locked(&lease, document, page, selected, SlotAction::Inspect, 119)
+                .unwrap()
+                .is_some()
+        );
+        assert!(path.is_file());
+        assert!(
+            request_locked(&lease, document, page, selected, SlotAction::Claim, 120)
+                .unwrap()
+                .is_none()
+        );
+        assert!(path.is_file());
+        slot.expires = 240;
+        slot.published_by = Some(120);
+        files::atomic_json(&path, &slot).unwrap();
+        assert!(slot.refinement(activation, 119).unwrap().is_none());
+        assert!(slot.refinement(activation, 120).unwrap().is_none());
+        assert!(
+            request_locked(&lease, document, page, selected, SlotAction::Claim, 121)
+                .unwrap()
+                .is_none()
+        );
+        let fresh = slot.refinement(activation, 121).unwrap().unwrap();
+        let result = request_locked(&lease, document, page, fresh, SlotAction::Claim, 122)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.operation(), operation);
+        assert!(
+            request_locked(&lease, document, page, fresh, SlotAction::Claim, 122)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -99,7 +99,8 @@ impl InstalledReaderSelection {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(crate) fn has_installed_output(&self) -> bool {
+    /// A validated installation with the shared conversation page and Writer receiver.
+    pub fn has_installed_output(&self) -> bool {
         self.installed_output
     }
 
@@ -307,6 +308,17 @@ impl Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(crate) fn writer_at_release(
+        &self,
+        released_boot_second: u64,
+    ) -> Result<Option<super::super::writer_request::SelectedRefinement>> {
+        super::super::writer_request::at_release(&self.pending.lease, released_boot_second)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
@@ -314,6 +326,27 @@ impl Session {
     ) -> Result<Option<super::super::writer_request::InstalledRequest>> {
         self.pending.lease.current()?;
         super::super::writer_request::take(self.pending.lease.record().activation(), document, page)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn writer_request_for_page(
+        &self,
+        document: crate::storage::Uuid,
+        page: crate::storage::Uuid,
+        selected: super::super::writer_request::SelectedRefinement,
+        action: super::super::writer_request::SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        self.pending.lease.current()?;
+        super::super::writer_request::request_for_page(
+            self.pending.lease.record().activation(),
+            document,
+            page,
+            selected,
+            action,
+        )
     }
 
     #[cfg(all(

@@ -25,6 +25,7 @@ pub(crate) enum ResidentGesture {
 pub struct ReleasedReaderInput {
     pub(crate) input: RequestInput,
     pub(crate) released_at: Instant,
+    pub(crate) released_boot_second: Option<u64>,
     pub(crate) gesture: ResidentGesture,
 }
 
@@ -40,19 +41,47 @@ impl RequestInput {
     pub(crate) fn wait_released_reader(
         corner: TriggerCorner,
         blank_start: bool,
+        timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<ReleasedReaderInput> {
-        let mut input = InputObserver::new(corner.clone(), None)?;
-        if blank_start {
-            input.enable_blank_start();
-        }
-        Self::wait_released_with(
-            &mut input,
+        Self::wait_for_gesture_with(
             corner.clone(),
+            blank_start,
+            timestamp_release,
             progress,
-            || InputObserver::new(corner.clone(), None),
+            |clock| InputObserver::open(corner.clone(), None, clock),
             || std::thread::sleep(Duration::from_millis(10)),
         )
+    }
+
+    pub(super) fn wait_for_gesture_with(
+        corner: TriggerCorner,
+        blank_start: bool,
+        timestamp_release: bool,
+        progress: &mut dyn FnMut() -> Result<()>,
+        mut open: impl FnMut(bool) -> Result<InputObserver>,
+        mut pace: impl FnMut(),
+    ) -> Result<ReleasedReaderInput> {
+        let mut use_clock = timestamp_release;
+        loop {
+            let mut input = open(use_clock)?;
+            if blank_start {
+                input.enable_blank_start();
+            }
+            let result = Self::wait_released_with(
+                &mut input,
+                corner.clone(),
+                progress,
+                || open(false),
+                &mut pace,
+            );
+            if !use_clock || !input.lost_initial_clock_frame() {
+                return result;
+            }
+            // No gesture was ever observed on this client. Drop it completely
+            // and reseed once on a fresh descriptor for the next gesture.
+            use_clock = false;
+        }
     }
     fn wait_released_with(
         prior: &mut InputObserver,
@@ -64,13 +93,14 @@ impl RequestInput {
         loop {
             progress()?;
             let events = prior.poll()?;
-            progress()?;
             if let Some(event) = events
                 .iter()
                 .copied()
                 .find(|event| matches!(event, Interaction::Reader | Interaction::BlankStart))
             {
                 let released_at = Instant::now();
+                let released_boot_second = prior.reader_release_second();
+                progress()?;
                 ensure!(
                     events == [event] && prior.quiescent(),
                     "Resident trigger lacks a quiet complete release"
@@ -87,6 +117,7 @@ impl RequestInput {
                 progress()?;
                 return Ok(ReleasedReaderInput {
                     released_at,
+                    released_boot_second,
                     gesture: if event == Interaction::BlankStart {
                         ResidentGesture::BlankStart
                     } else {
@@ -103,6 +134,7 @@ impl RequestInput {
             }
             // Idle input is not a request. It cannot authorize activation or
             // manufacture release; loss is fatal rather than a Touch fallback.
+            progress()?;
             pace();
         }
     }
