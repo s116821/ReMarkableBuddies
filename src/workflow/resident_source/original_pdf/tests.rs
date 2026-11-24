@@ -84,7 +84,6 @@ pub(crate) fn assert_ordinary_pdf_reuse(
     executable: &Path,
     initial: &[u8],
     revised: &[u8],
-    oversized: &[u8],
 ) -> Result<()> {
     let observe = |fixture: &Fixture| -> Result<ObservedOriginalPdf> {
         OrdinaryPdfSource::pin_fixture(&fixture.root, &fixture.facts)?
@@ -119,12 +118,8 @@ pub(crate) fn assert_ordinary_pdf_reuse(
 
     let fixture = Fixture::new();
     fs::write(fixture.pdf_path(), initial)?;
-    let ((first, reused), key, cache) = query(&fixture, None, "alpha acceleration", 2)?;
+    let ((_, reused), key, cache) = query(&fixture, None, "alpha acceleration", 2)?;
     assert!(!reused && cache.is_some());
-    let ((second, reused), again, cache) = query(&fixture, cache, "unrelated first page", 1)?;
-    assert!(reused);
-    assert_ne!(first, second);
-    assert_eq!(key, again);
 
     fs::write(fixture.pdf_path(), revised)?;
     let ((_, reused), changed, cache) = query(&fixture, cache, "beta velocity", 2)?;
@@ -159,21 +154,6 @@ pub(crate) fn assert_ordinary_pdf_reuse(
             &mut || Ok(()),
         )
         .is_err());
-    fixture.table(0, 1);
-    let ((_, reused), _, cache) = query(&fixture, None, "beta velocity", 2)?;
-    assert!(!reused && cache.is_some());
-
-    // Valid normalized bytes above the retention bound go through the cold index.
-    fs::write(other.pdf_path(), oversized)?;
-    let mut table: serde_json::Value = serde_json::from_slice(&fs::read(other.table_path())?)?;
-    table["cPages"]["original"]["value"] = json!(7);
-    fs::write(other.table_path(), serde_json::to_vec(&table)?)?;
-    let ((large, reused), large_key, cache) = query(&other, cache, "velocity marker", 7)?;
-    assert!(!reused && cache.is_none());
-    let ((second_large, reused), key, cache) = query(&other, cache, "marker", 7)?;
-    assert!(!reused && cache.is_none());
-    assert_ne!(large, second_large);
-    assert_eq!(key, large_key);
     Ok(())
 }
 

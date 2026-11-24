@@ -1175,10 +1175,22 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 }
 
 #[cfg(feature = "installed-resident-output")]
-fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> Result<()> {
+fn assert_pdf_reuse_between_service_questions(
+    executable: &std::path::Path,
+    oversized: &[u8],
+) -> Result<()> {
     use crate::conversation::Role;
     use crate::workflow::OrdinaryPdfFixtureRounds;
     use anyhow::Context;
+    use std::{cell::Cell, rc::Rc};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Service {
+        Running,
+        Restarted,
+        Drifted,
+        Oversized,
+    }
 
     const SECOND_QUESTION: &str = "Explain unrelated first page. Don't use the internet.";
     let fixture = Fixture::new();
@@ -1200,19 +1212,57 @@ fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> R
     fs::write(&pdf, &bytes)?;
     files::atomic_json(&table, &initial)?;
 
-    for restart in [false, true] {
-        let questions = if restart {
-            &[(SECOND_QUESTION, 1)][..]
-        } else {
-            &[(OPT_OUT, 2), (SECOND_QUESTION, 1)][..]
+    for service in [
+        Service::Running,
+        Service::Restarted,
+        Service::Drifted,
+        Service::Oversized,
+    ] {
+        let (questions, expected_reuse) = match service {
+            Service::Running => (
+                &[(OPT_OUT, Some(2)), (SECOND_QUESTION, Some(1))][..],
+                &[false, true][..],
+            ),
+            Service::Restarted => (&[(SECOND_QUESTION, Some(1))][..], &[false][..]),
+            Service::Drifted => (
+                &[
+                    (OPT_OUT, Some(2)),
+                    ("Describe alpha acceleration. Don't use the internet.", None),
+                    (
+                        "Locate alpha acceleration. Don't use the internet.",
+                        Some(2),
+                    ),
+                ][..],
+                &[false, true, false][..],
+            ),
+            Service::Oversized => (
+                &[
+                    ("Where is velocity marker? Don't use the internet.", Some(7)),
+                    (
+                        "Explain the velocity marker. Don't use the internet.",
+                        Some(7),
+                    ),
+                ][..],
+                &[false, false][..],
+            ),
         };
+        if service == Service::Oversized {
+            let mut large_table = initial.clone();
+            large_table["cPages"]["original"]["value"] = json!(7);
+            files::atomic_json(&table, &large_table)?;
+            fs::write(&pdf, oversized)?;
+        }
+        let current_round = Rc::new(Cell::new(0));
         let mut update_order = |round, order: &std::path::Path| -> Result<()> {
-            if round == 1 {
-                // Model the SDK-visible order and durable table after the normal
-                // answer-page insertion, with the original page open again.
+            current_round.set(round);
+            if service == Service::Running && round == 1 {
+                // Model the new on-disk table after Buddy-page insertion.
                 files::atomic_json(&table, &after_insertion)?;
             }
-            if round == 1 || restart {
+            if matches!(service, Service::Restarted | Service::Drifted)
+                || service == Service::Running && round != 0
+            {
+                // Restore the same valid order before the request following drift.
                 fs::write(order, inserted_page.to_string())?;
             }
             Ok(())
@@ -1231,13 +1281,24 @@ fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> R
                 count: questions.len(),
                 before_round: Some(&mut update_order),
             },
-            |_, _, _| model,
+            |_, order_change, _| {
+                let round = current_round.clone();
+                model.hook = Some(Box::new(move |stage, pending| {
+                    if service == Service::Drifted && round.get() == 1 && stage == 2 && !pending {
+                        fs::write(&order_change, Uuid::new_v4().to_string()).unwrap();
+                    }
+                }));
+                model
+            },
             |_, _| Ok(()),
-        )?;
-        for result in results {
-            result.with_context(|| format!("Ordinary PDF service reuse run, restart={restart}"))?;
-        }
-        assert_eq!(frames.lock().unwrap().len(), questions.len() * 3);
+        )
+        .with_context(|| format!("Run ordinary PDF service case {service:?}"))?;
+        assert_eq!(results.len(), questions.len());
+        assert_eq!(
+            frames.lock().unwrap().len(),
+            questions.len() * 3,
+            "{service:?}: {results:?}"
+        );
         assert_eq!(scope.constructions(), 0);
         let workers = scope.ordinary_pdf_workers();
         assert_eq!(
@@ -1245,17 +1306,24 @@ fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> R
                 .iter()
                 .map(|&(_, reused)| reused)
                 .collect::<Vec<_>>(),
-            if restart {
-                vec![false]
-            } else {
-                vec![false, true]
-            }
+            expected_reuse,
+            "{service:?}"
         );
-        if let [first, second] = workers.as_slice() {
-            assert_ne!(first.0, second.0);
-        }
-        assert_eq!(fs::read(&pdf)?, bytes);
-        for &(question, expected_page) in questions {
+        assert_eq!(
+            workers
+                .iter()
+                .map(|&(request, _)| request)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            workers.len()
+        );
+        let expected_file = if service == Service::Oversized {
+            oversized
+        } else {
+            &bytes
+        };
+        assert_eq!(fs::read(&pdf)?, expected_file);
+        for (&(question, expected_page), result) in questions.iter().zip(results) {
             let user = records
                 .iter()
                 .find_map(|record| match record {
@@ -1267,15 +1335,38 @@ fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> R
                     _ => None,
                 })
                 .context("Verified service question absent")?;
-            let reference = format!("[S1] Document {document}, page {expected_page}");
-            assert!(
-                records.iter().any(|record| matches!(
-                    record, Record::Turn(turn) if turn.role == Role::Assistant
-                        && turn.exchange == user.exchange
-                        && turn.text.as_deref().is_some_and(|answer| answer.contains(&reference))
-                )),
-                "Expected page {expected_page} for the exact question"
-            );
+            let evidence = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::RequestEvidence(evidence) if evidence.request_turn == user.id => {
+                        Some(evidence)
+                    }
+                    _ => None,
+                })
+                .context("Exact service request evidence absent")?;
+            let frame: Value = serde_json::from_str(&evidence.frame_json)?;
+            assert_eq!(frame["request"]["text"], question);
+            let answer = records.iter().find_map(|record| match record {
+                Record::Turn(turn)
+                    if turn.role == Role::Assistant && turn.exchange == user.exchange =>
+                {
+                    Some(turn)
+                }
+                _ => None,
+            });
+            if let Some(page) = expected_page {
+                result
+                    .with_context(|| format!("Complete ordinary PDF service case {service:?}"))?;
+                assert_eq!(frame["retrieval"]["passages"][0]["page"], page);
+                let text = answer
+                    .and_then(|turn| turn.text.as_deref())
+                    .context("Service answer absent")?;
+                assert!(text.contains(&format!("[S1] Document {document}, page {page}")));
+            } else {
+                let error = result.expect_err("Warm answer survived native order drift");
+                assert!(format!("{error:#}").contains("Resident PDF source or page order changed"));
+                assert!(answer.is_none());
+            }
         }
     }
     Ok(())
@@ -1308,20 +1399,18 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
     }
 
     let executable = retained_command();
-    assert_pdf_reuse_between_service_questions(&executable).context(
-        "Exercise the installed Reader across a Buddy page insertion and service restart",
-    )?;
     let large_page = ".".repeat(400 * 1024);
     let oversized = pdf_pages(
         [large_page.as_str(); 6]
             .into_iter()
             .chain(["velocity marker"]),
     );
+    assert_pdf_reuse_between_service_questions(&executable, &oversized)
+        .context("Exercise ordinary PDF service reuse, drift, restart and oversized input")?;
     crate::workflow::assert_ordinary_pdf_reuse(
         &executable,
         &pdf_bytes("alpha acceleration original source"),
         &pdf_bytes("beta velocity revised source"),
-        &oversized,
     )
     .context("Exercise ordinary PDF source reuse with the retained binary")?;
     let fixture = Fixture::new();
