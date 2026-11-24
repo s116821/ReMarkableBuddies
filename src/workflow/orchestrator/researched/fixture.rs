@@ -86,9 +86,9 @@ pub(in crate::workflow) fn after_ordinary_pdf_interpret(
         successor.revision_id = Uuid::new_v4();
         successor.operation_id = Uuid::new_v4();
         store.commit(vec![successor], Default::default())?;
-        assert_eq!(
-            store.conditional_snapshot(Namespace::Conversation, user.conversation)?,
-            original
+        ensure!(
+            store.conditional_snapshot(Namespace::Conversation, user.conversation)? == original,
+            "Fixture replacement changed the conversation root or Store generation"
         );
     }
     Ok(())
