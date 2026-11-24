@@ -427,7 +427,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
         )?;
         let text = format!("{title}\n\n{body}\n");
-        self.workflow.validate_resident_new_page_text(&text)?;
+        self.workflow.validate_resident_writer_body(&text)?;
         match self.workflow.render_resident_answer(
             &self.ledger,
             *conversation,

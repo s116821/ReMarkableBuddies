@@ -335,11 +335,16 @@ impl Workflow {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn validate_resident_new_page_text(&mut self, text: &str) -> Result<()> {
-        self.device
+    pub(super) fn validate_resident_writer_body(&mut self, text: &str) -> Result<()> {
+        let backend = self
+            .device
             .resident_output_backend()
-            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?
-            .validate_new_page_text(text)
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        anyhow::ensure!(
+            backend.supports_page_text(resident_output::ResidentOutputText::Plain(text), false)?,
+            "Writer draft cannot be typed on the tablet"
+        );
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
