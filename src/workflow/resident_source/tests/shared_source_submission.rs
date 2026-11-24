@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 const NOTE: &str = "Make a note from this page.";
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
-const DRAFT: &str = "Page note\n\nThe page records an equation and its result.\n";
+const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
 const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
 struct SubmissionModel {
@@ -95,7 +95,7 @@ impl crate::LLMEngine for SubmissionModel {
                 let input = serde_json::from_str::<serde_json::Value>(self.text.last().unwrap())?;
                 assert_eq!(input["request"], NOTE);
                 assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
-                Ok("# Page note\n\nThe page records an equation and its result.".into())
+                Ok(DRAFT.into())
             }
             (1, false) => {
                 assert!(!self.images.is_empty());
@@ -300,11 +300,17 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
 
         if writer_request {
             assert!(position.exists(), "draft must go onto the adjacent page");
-            assert_eq!(written.borrow().as_slice(), &[DRAFT]);
+            assert_eq!(
+                written.borrow().as_slice(),
+                &["Q: Make a note from this page.\n\nA: Page note\n\nThe page records an equation and its result.\n"]
+            );
             assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
                 if turn.role == Role::User && turn.mode == Mode::Writer && turn.text.as_deref() == Some(NOTE))));
-            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
-                if turn.role == Role::Assistant && turn.mode == Mode::Writer && turn.outcome == Outcome::Generated)));
+            assert!(records
+                .iter()
+                .any(|record| matches!(record, Record::Turn(turn)
+                if turn.role == Role::Assistant && turn.mode == Mode::Writer
+                    && turn.outcome == Outcome::Generated && turn.text.as_deref() == Some(DRAFT))));
             let evidence = records
                 .iter()
                 .find_map(|record| match record {
