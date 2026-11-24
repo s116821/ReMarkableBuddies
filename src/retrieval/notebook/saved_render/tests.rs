@@ -80,7 +80,7 @@ fn saved_render_keeps_blank_page_and_full_extent_in_native_order() -> Result<()>
     let first = Uuid::new_v4();
     let buddy = Uuid::new_v4();
     let last = Uuid::new_v4();
-    let last_y = DEFAULT_HEIGHT + 200;
+    let last_y = MAX_HEIGHT - 24;
     let mut raster = NotebookRaster::default();
     raster.push(saved_page(first, &scene(None)), &mut || Ok(()))?;
     raster.push(
