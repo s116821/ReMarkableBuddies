@@ -268,6 +268,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .is_empty(),
                 "blank start already exists without a resolved page binding"
             );
+            #[cfg(feature = "installed-resident-output")]
+            if let Some(original) = self.blocked_unbound_insertion() {
+                self.workflow.check_request_progress()?;
+                anyhow::bail!(
+                    "Blank start cannot insert a page until original operation {} is reconciled",
+                    original.0
+                );
+            }
             let created_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
@@ -426,15 +434,18 @@ impl<M: LLMEngine> Orchestrator<M> {
         Ok(())
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    fn blocked_unbound_insertion(&self) -> Option<remarkable_open_sdk::OperationId> {
+        self.workflow
+            .resident_source
+            .as_ref()?
+            .blocked_unbound_insertion()
+    }
+
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         if attempt.resident_output() && attempt.resident_answer.is_none() {
-            if let Some(original) = self
-                .workflow
-                .resident_source
-                .as_ref()
-                .and_then(|owner| owner.blocked_reader_insertion())
-            {
+            if let Some(original) = self.blocked_unbound_insertion() {
                 self.workflow.check_request_progress()?;
                 attempt.outcome(
                     &self.ledger,

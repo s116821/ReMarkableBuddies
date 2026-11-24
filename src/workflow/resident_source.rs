@@ -298,12 +298,12 @@ impl ResidentSourceOwner {
         self.selection.has_installed_output()
     }
 
-    /// An unbound single-page notebook has no installed output route other
-    /// than insertion. Legacy adoption requires an adjacent page. The SDK's
-    /// retained loss is authoritative even when this is a different notebook.
+    /// An unbound final page has no successor to reuse or adopt. The original
+    /// operation can block insertion even when it belongs to another notebook.
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn blocked_reader_insertion(&self) -> Option<OperationId> {
-        if self.installed_output_selected() && self.captured_source.as_ref()?.order().len() == 1 {
+    pub(super) fn blocked_unbound_insertion(&self) -> Option<OperationId> {
+        let source = self.captured_source.as_ref()?;
+        if self.installed_output_selected() && source.order().last() == Some(&source.page().page) {
             return self.session.as_ref()?.runtime().unresolved_operation();
         }
         None
@@ -1831,6 +1831,11 @@ mod tests {
                 true,
             ),
             (
+                "reconnect-source-handoff-indeterminate-last-page",
+                Reply::Indeterminate,
+                true,
+            ),
+            (
                 "reconnect-source-handoff-rejected",
                 Reply::Rejected(Rejection::Unsupported),
                 false,
@@ -1841,8 +1846,15 @@ mod tests {
                 false,
             ),
         ] {
+            let mut releases = vec![released(Instant::now())];
+            if blocked {
+                releases.push(ReleasedReaderInput {
+                    gesture: ResidentGesture::BlankStart,
+                    ..released(Instant::now())
+                });
+            }
             let (mut workflow, store, base, events, _notify) =
-                workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+                workflow(mode, releases, Duration::ZERO);
             let fixture = Fixture::new();
             let mut runtime = fixture
                 .start_with_store(store.clone(), mode, Duration::from_secs(5))
@@ -1910,7 +1922,7 @@ mod tests {
                 assert_eq!(calls.get(), 1);
             }
             assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
-            assert_eq!(std::fs::read(journal).unwrap(), bytes);
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
             let entries = store
                 .snapshot_heads_matching(&[Namespace::Source], 2, |_| true)
                 .unwrap();
@@ -1935,6 +1947,37 @@ mod tests {
             assert!(!turns.iter().any(
                 |r| matches!(r, Record::Turn(t) if t.role == crate::conversation::Role::Assistant)
             ));
+            if blocked {
+                let saved_heads = || {
+                    store
+                        .snapshot_heads_matching(
+                            &[Namespace::Conversation, Namespace::Source],
+                            crate::storage::MAX_ITEMS,
+                            |_| true,
+                        )
+                        .unwrap()
+                };
+                let before = saved_heads();
+                let error = reader.run_iteration().unwrap_err();
+                assert!(error.to_string().contains(&original.0.to_string()));
+                assert!(
+                    saved_heads() == before,
+                    "blocked blank start changed Buddy history"
+                );
+                assert_eq!(calls.get(), 0);
+                assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                assert_eq!(
+                    &*events.borrow(),
+                    &[
+                        "reconnect",
+                        "observe",
+                        "capture",
+                        "reconnect",
+                        "observe",
+                        "capture"
+                    ]
+                );
+            }
             drop(reader);
             drop(ledger);
             drop(store);
