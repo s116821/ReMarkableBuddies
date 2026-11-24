@@ -901,6 +901,10 @@ impl ResidentSourceOwner {
                             "insertion result does not match original source/allocated target/order");
                         log::info!("Resident insertion observed on {target}");
                     }
+                    Ok(Reply::Rejected(reason)) => {
+                        log::info!("Resident page insertion refused: {reason:?}");
+                        return Ok(Outcome::InsertionRefused);
+                    }
                     Ok(other) => {
                         anyhow::bail!("resident insertion unresolved; no retry: {other:?}")
                     }
@@ -1191,6 +1195,29 @@ mod tests {
             );
             super::super::resident_request::finish(&mut self.runtime, result)
         }
+        fn insert(
+            &mut self,
+            health: &mut ServiceHealth,
+            input: &mut RequestInput,
+            conversation: ConversationId,
+            operation: OperationId,
+            insertion: InsertAfter,
+            deadline: Instant,
+        ) -> std::result::Result<Reply, RequestFailure> {
+            self.events.borrow_mut().push("insert");
+            let result = self.runtime.insert_admitted(
+                conversation,
+                operation,
+                insertion,
+                deadline,
+                &mut OwnedAdmission {
+                    health,
+                    input,
+                    policy_fault: false,
+                },
+            );
+            super::super::resident_request::finish(&mut self.runtime, result)
+        }
         fn finish(&mut self) {
             self.runtime.retire_connection();
         }
@@ -1392,6 +1419,7 @@ mod tests {
     #[derive(Default)]
     struct RecognitionProbe {
         conversation: Option<ConversationId>,
+        confirmed_source: bool,
     }
 
     impl ResidentOutputBackend for RecognitionProbe {
@@ -1416,7 +1444,11 @@ mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
             assert!(self.conversation.replace(conversation).is_none());
-            Ok(PageUse::Unresolved)
+            Ok(if self.confirmed_source {
+                PageUse::ConfirmedNonBuddy
+            } else {
+                PageUse::Unresolved
+            })
         }
 
         fn adopt(
@@ -1452,6 +1484,104 @@ mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
             panic!("unexpected renderer request");
+        }
+    }
+
+    #[test]
+    fn reader_records_the_original_insertion_reply_on_the_generated_answer() {
+        use crate::conversation::{AttemptReason, Role};
+        use crate::workflow::selected_backend::RefusingBackend;
+        use remarkable_open_sdk::native_adapter::Rejection;
+
+        for (mode, reply, outcome, reason) in [
+            (
+                "reconnect-source-handoff-current-rejected",
+                Reply::Rejected(Rejection::ExecutorBeforeMutation),
+                Outcome::Failed,
+                AttemptReason::NoSuccessor,
+            ),
+            (
+                "reconnect-source-handoff-current-indeterminate",
+                Reply::Indeterminate,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+            ),
+        ] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow(mode, vec![], Duration::ZERO);
+            let fixture = Fixture::new();
+            let runtime = fixture
+                .start_with_store(store.clone(), mode, Duration::from_secs(5))
+                .unwrap();
+            let owner = workflow.resident_source.as_mut().unwrap();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-profile"),
+                runtime.identity(),
+            )
+            .unwrap();
+            owner.session = Some(Box::new(OwnedSession {
+                runtime,
+                _fixture: fixture,
+                events: events.clone(),
+                delivery_fault: false,
+            }));
+            let source = RecognitionProbe {
+                confirmed_source: true,
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                    .with_test_output(Box::new(source)),
+            );
+            let calls = Rc::new(Cell::new(0));
+            let model = Provider {
+                calls: calls.clone(),
+                batches: Rc::new(RefCell::new(vec![])),
+                images: vec![],
+                payload_delay: Duration::ZERO,
+                kill_pid: None,
+                no_selection: false,
+            };
+            let ledger = Ledger::new(store.clone());
+            let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+            let result = reader.run_iteration();
+            if reply == Reply::Indeterminate {
+                assert!(result.unwrap_err().to_string().contains("Indeterminate"));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                events.borrow().iter().filter(|e| **e == "insert").count(),
+                1
+            );
+            let attempts = resident_client::attempts(&store).unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
+            let records = ledger.inspect(attempts[0].conversation, false).unwrap();
+            let answer = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn) if turn.role == Role::Assistant => Some(turn),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(answer.outcome, outcome);
+            assert!(answer
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("Because the model fixture says so."));
+            assert!(records.iter().any(|record| matches!(record,
+                Record::OutcomeFact(fact) if fact.turn == answer.id && fact.outcome == outcome && fact.reason == reason
+            )));
+            assert!(!records
+                .iter()
+                .any(|record| matches!(record, Record::Binding(_))));
+            drop(reader);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
         }
     }
 
