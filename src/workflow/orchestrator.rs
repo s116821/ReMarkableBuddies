@@ -367,6 +367,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                         return self
                             .run_resident_circled_writer(request, target, capture, dispatch);
                     }
+                    SourceIntent::WriterWholeNotebook { .. } => {
+                        anyhow::bail!(
+                            "Whole-notebook Writer needs complete ordered coverage of the notebook's source pages"
+                        );
+                    }
                     SourceIntent::Unresolved => {
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());

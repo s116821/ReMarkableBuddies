@@ -47,6 +47,39 @@ enum Circled {
     Selected,
     MissingOutline,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Submission {
+    Reader,
+    CurrentPage,
+    BoundHistory,
+    Circled(Circled),
+    WholeNotebook,
+    Save(Save),
+}
+
+impl Submission {
+    fn expects_writer_output(self) -> bool {
+        matches!(
+            self,
+            Self::CurrentPage | Self::Circled(Circled::Selected) | Self::Save(_)
+        )
+    }
+
+    fn save(self) -> Option<Save> {
+        match self {
+            Self::Save(save) => Some(save),
+            _ => None,
+        }
+    }
+
+    fn circled(self) -> Option<Circled> {
+        match self {
+            Self::Circled(region) => Some(region),
+            _ => None,
+        }
+    }
+}
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
 const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
@@ -63,9 +96,7 @@ fn draft_at_export_display_boundary() -> String {
 }
 
 struct SubmissionModel {
-    writer: bool,
-    circled: Option<Circled>,
-    save: Option<Save>,
+    submission: Submission,
     last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
@@ -108,7 +139,7 @@ impl crate::LLMEngine for SubmissionModel {
     fn execute(&mut self) -> Result<String> {
         let step = self.steps.get();
         self.steps.set(step + 1);
-        match (step, self.writer) {
+        match (step, self.submission.expects_writer_output()) {
             (0, writer) => {
                 let [image] = self.images.as_slice() else {
                     panic!("expected exactly one original page at intent intake");
@@ -127,7 +158,14 @@ impl crate::LLMEngine for SubmissionModel {
                     return Ok(r#"{"intent":"unresolved"}"#.into());
                 }
                 assert_eq!(self.text.len(), 1, "fresh notebook has no history part");
-                if let Some(circled) = self.circled {
+                if self.submission == Submission::WholeNotebook {
+                    return Ok(serde_json::json!({
+                        "intent": "writer-whole-notebook",
+                        "request": "Make a note from my whole notebook.",
+                    })
+                    .to_string());
+                }
+                if let Some(circled) = self.submission.circled() {
                     let target = match circled {
                         Circled::Selected => serde_json::json!({
                             "subject": "selected equation",
@@ -144,7 +182,7 @@ impl crate::LLMEngine for SubmissionModel {
                     })
                     .to_string());
                 }
-                if let Some(save) = self.save {
+                if let Some(save) = self.submission.save() {
                     let intent = if save == Save::Ambiguous {
                         serde_json::json!({"intent":"clarify-export","request":save.wording()})
                     } else {
@@ -161,7 +199,7 @@ impl crate::LLMEngine for SubmissionModel {
                     Ok(r#"{"intent":"reader"}"#.into())
                 }
             }
-            (1, true) if self.circled == Some(Circled::Selected) => {
+            (1, true) if self.submission == Submission::Circled(Circled::Selected) => {
                 let original = image::load_from_memory(
                     &STANDARD.decode(self.source.borrow().as_deref().unwrap())?,
                 )?
@@ -186,7 +224,7 @@ impl crate::LLMEngine for SubmissionModel {
             (2, true) => {
                 assert!(self.images.is_empty());
                 let input = serde_json::from_str::<serde_json::Value>(self.text.last().unwrap())?;
-                if self.circled == Some(Circled::Selected) {
+                if self.submission == Submission::Circled(Circled::Selected) {
                     assert_eq!(input["request"], CIRCLE_NOTE);
                     assert_eq!(input["history"], serde_json::json!([]));
                     assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
@@ -196,9 +234,12 @@ impl crate::LLMEngine for SubmissionModel {
                     );
                     Ok("# Circled note\n\nThe selected equation gives four.".into())
                 } else {
-                    assert_eq!(input["request"], self.save.map_or(NOTE, Save::wording));
+                    assert_eq!(
+                        input["request"],
+                        self.submission.save().map_or(NOTE, Save::wording)
+                    );
                     assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
-                    match self.save {
+                    match self.submission.save() {
                         Some(Save::Update) => Ok("# Page note\n\nThe page computes four from twenty-four divided by six.".into()),
                         Some(save) if save.compact() => Ok(draft_at_export_display_boundary()),
                         _ => Ok(DRAFT.into()),
@@ -376,9 +417,7 @@ fn installed_source_page_saves_reuse_the_note_after_placement_refusal() -> Resul
         );
         let steps = Rc::new(Cell::new(0));
         let model = SubmissionModel {
-            writer: true,
-            circled: None,
-            save: Some(save),
+            submission: Submission::Save(save),
             last_visible_text: None,
             steps: steps.clone(),
             source: Rc::new(RefCell::new(None)),
@@ -476,19 +515,25 @@ fn installed_source_page_saves_reuse_the_note_after_placement_refusal() -> Resul
 
 #[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request, bound_history, circled, save) in [
-        (true, false, false, None, None),
-        (true, true, false, None, None),
-        (false, true, false, None, None),
-        (true, false, true, None, None),
-        (true, true, false, Some(Circled::Selected), None),
-        (false, true, false, Some(Circled::Selected), None),
-        (true, false, false, Some(Circled::MissingOutline), None),
-        (true, true, false, None, Some(Save::Explicit)),
-        (false, true, false, None, Some(Save::Ambiguous)),
-        (true, true, false, None, Some(Save::Compact)),
-        (false, true, false, None, Some(Save::CompactUncertain)),
+    for (reader_enabled, submission) in [
+        (true, Submission::Reader),
+        (true, Submission::CurrentPage),
+        (false, Submission::CurrentPage),
+        (true, Submission::BoundHistory),
+        (true, Submission::Circled(Circled::Selected)),
+        (false, Submission::Circled(Circled::Selected)),
+        (true, Submission::Circled(Circled::MissingOutline)),
+        (true, Submission::WholeNotebook),
+        (false, Submission::WholeNotebook),
+        (true, Submission::Save(Save::Explicit)),
+        (false, Submission::Save(Save::Ambiguous)),
+        (true, Submission::Save(Save::Compact)),
+        (false, Submission::Save(Save::CompactUncertain)),
     ] {
+        let writer_request = submission.expects_writer_output();
+        let circled = submission.circled();
+        let bound_history = submission == Submission::BoundHistory;
+        let save = submission.save();
         let compact = save.is_some_and(Save::compact);
         let inserts = compact || circled == Some(Circled::Selected);
         let mode = match (inserts, writer_request) {
@@ -573,9 +618,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let steps = Rc::new(Cell::new(0));
         let source = Rc::new(RefCell::new(None));
         let model = SubmissionModel {
-            writer: writer_request,
-            circled,
-            save,
+            submission,
             last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
@@ -585,8 +628,20 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
 
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
-        service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))?;
-        if bound_history || circled == Some(Circled::MissingOutline) {
+        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        let notebook_unavailable = submission == Submission::WholeNotebook;
+        if notebook_unavailable {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "Whole-notebook Writer needs complete ordered coverage of the notebook's source pages"
+            );
+            assert!(!events.borrow().contains(&"insert"));
+            assert!(!position.exists());
+            assert_eq!(destination.counts(), (0, 0, 0));
+        } else {
+            result?;
+        }
+        if bound_history || circled == Some(Circled::MissingOutline) || notebook_unavailable {
             assert_eq!(steps.get(), 1);
             assert!(written.borrow().is_empty());
             assert!(conversation.get().is_none());

@@ -11,7 +11,9 @@ use crate::{
     },
     device::interaction::Interaction,
     retrieval::{
-        notebook::{NotebookText, PageImage, SuppliedNotebook},
+        notebook::{
+            NotebookSourceReceipt, NotebookText, OrderedNotebookImages, PageImage, SuppliedNotebook,
+        },
         IndexKey, Provider,
     },
     storage::{Namespace, Uuid},
@@ -688,6 +690,69 @@ impl<'a> Dispatch<'a> {
                 submitted: std::cell::Cell::new(false),
             }),
         })
+    }
+
+    /// Consume a sealed acquisition. Both the admitted content revision and
+    /// every subsequent observation must cover the entire saved source.
+    #[allow(
+        dead_code,
+        reason = "the installed source owner supplies only viewport pixels"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn whole_notebook<E: LLMEngine>(
+        &mut self,
+        ledger: &Ledger,
+        engine: &mut E,
+        text: &str,
+        images: &OrderedNotebookImages<'_>,
+        receipt: &NotebookSourceReceipt,
+        model_profile: &str,
+        admitted: &RequestScope,
+        observe: &mut dyn FnMut() -> Result<SourceObservation>,
+    ) -> Result<(writer::notebook::runner::Report, Option<PendingOutput>)> {
+        use writer::notebook::{command::Request, ValidatedNotebook};
+
+        self.require_ledger(ledger)?;
+        ensure!(self.admits(Mode::Writer, false), "Writer disabled");
+        let order_revision = images.order_revision()?;
+        ensure!(
+            images.document == admitted.source.document
+                && admitted.source.order_revision.as_deref() == Some(order_revision.as_str()),
+            "notebook document or page order changed"
+        );
+        ensure!(
+            crate::storage::valid_digest(&receipt.saved_source_revision)
+                && admitted.source.content_revision.as_deref()
+                    == Some(receipt.saved_source_revision.as_str()),
+            "notebook saved source differs from acquisition receipt"
+        );
+        let request = Request::GenerateAcquiredNotebook {
+            conversation: admitted.conversation,
+            operation: admitted.operation,
+            request: text.into(),
+        };
+        request.preflight()?;
+        admitted.check(ledger, observe)?;
+        ensure!(
+            ledger
+                .store()
+                .value(
+                    Namespace::Conversation,
+                    crate::conversation::notebook::NotebookPlan::identity(admitted.operation),
+                )?
+                .is_none(),
+            "routed notebook operation consumed"
+        );
+        let normalized = images.normalize(
+            admitted.source.page,
+            &receipt.ordered_image_sha256,
+            model_profile,
+            engine,
+            &mut |_| admitted.check(ledger, observe),
+        )?;
+        let bytes = serde_json::to_vec(&normalized)?;
+        let frozen = ValidatedNotebook::from_bytes(&bytes, &crate::storage::digest(&bytes))?;
+        self.notebook(ledger, engine, &request, Some(frozen), admitted, observe)
     }
 
     pub(crate) fn notebook<E: LLMEngine>(
