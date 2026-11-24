@@ -507,6 +507,52 @@ impl Attempt {
         outcome: Outcome,
         reason: AttemptReason,
     ) -> Result<()> {
+        self.record_outcome(ledger, assistant, outcome, reason)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn start_resident_output(&mut self, ledger: &Ledger) -> Result<ExpectedHeads> {
+        let pending = self.record_outcome(
+            ledger,
+            true,
+            Outcome::ReconcileRequired,
+            AttemptReason::OutputPending,
+        )?;
+        Ok(ExpectedHeads(
+            [pending.historical.applied_root_revision].into(),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn refuse_after_restored_page(
+        &mut self,
+        ledger: &Ledger,
+        pending_root: ExpectedHeads,
+    ) -> Result<()> {
+        let mut draft = self
+            .assistant
+            .clone()
+            .context("pending Reader draft absent")?;
+        draft.outcome = Outcome::Failed;
+        draft.updated_ms = now()?;
+        ledger.record_restored_page_output_unavailable(
+            Uuid::new_v4(),
+            pending_root,
+            ledger.expected(Namespace::Conversation, draft.id)?,
+            draft.clone(),
+        )?;
+        self.assistant = Some(draft);
+        Ok(())
+    }
+
+    fn record_outcome(
+        &mut self,
+        ledger: &Ledger,
+        assistant: bool,
+        outcome: Outcome,
+        reason: AttemptReason,
+    ) -> Result<WriteResult> {
         anyhow::ensure!(
             self.selected.is_none(),
             "selected terminal publication requires controlled settlement; no ordinary fallback"
@@ -523,7 +569,7 @@ impl Attempt {
         let mut turn = original.clone();
         turn.outcome = outcome;
         turn.updated_ms = now()?;
-        ledger.record_attempt_outcome(
+        let written = ledger.record_attempt_outcome(
             Uuid::new_v4(),
             ledger.expected(Namespace::Conversation, turn.conversation)?,
             ledger.expected(Namespace::Conversation, turn.id)?,
@@ -535,6 +581,6 @@ impl Attempt {
         } else {
             self.user = turn
         };
-        Ok(())
+        Ok(written)
     }
 }

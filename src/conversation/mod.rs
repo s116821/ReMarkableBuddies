@@ -79,6 +79,12 @@ const TEXT_SOURCE_SCHEMA: u32 = 2;
 pub struct Ledger {
     store: Arc<Store>,
 }
+
+enum AdvanceReason {
+    Ordinary(AttemptReason),
+    #[cfg(target_os = "linux")]
+    RestoredPageOutputUnavailable,
+}
 impl Ledger {
     fn complete_store(&self) -> Result<()> {
         let unavailable_commits = self.store.unavailable_commits()?;
@@ -1126,19 +1132,46 @@ impl Ledger {
             expected_root,
             expected_turn,
             turn,
-            Some(reason),
+            Some(AdvanceReason::Ordinary(reason)),
             None,
         )
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_restored_page_output_unavailable(
+        &self,
+        operation: Uuid,
+        pending_root: ExpectedHeads,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+    ) -> Result<WriteResult> {
+        self.advance_fact(
+            operation,
+            pending_root,
+            expected_turn,
+            turn,
+            Some(AdvanceReason::RestoredPageOutputUnavailable),
+            None,
+        )
+    }
+
     fn advance_fact(
         &self,
         operation: Uuid,
         expected_root: ExpectedHeads,
         expected_turn: ExpectedHeads,
         turn: Turn,
-        reason: Option<AttemptReason>,
+        reason: Option<AdvanceReason>,
         resident_target: Option<(Uuid, &crate::analysis::ReaderSelection)>,
     ) -> Result<WriteResult> {
+        let (reason, restored_page) = match reason {
+            #[cfg(target_os = "linux")]
+            Some(AdvanceReason::RestoredPageOutputUnavailable) => {
+                (Some(AttemptReason::NativeOutputUnavailable), true)
+            }
+            Some(AdvanceReason::Ordinary(reason)) => (Some(reason), false),
+            None => (None, false),
+        };
         let fingerprint = if let Some((capture, selection)) = resident_target {
             let target = (capture, selection.center.normalized());
             match selection.recognized_subject() {
@@ -1222,8 +1255,16 @@ impl Ledger {
                     Some(AttemptReason::SubmittedUnverified | AttemptReason::DeviceUncertain),
                 )
             );
+        let allowed = if restored_page {
+            original.role == Role::Assistant
+                && original.mode == Mode::Reader
+                && original.outcome == Outcome::ReconcileRequired
+                && turn.outcome == Outcome::Failed
+        } else {
+            permitted || explicit_reconciliation || interpreted_reader_terminal
+        };
         ensure!(
-            permitted || explicit_reconciliation || interpreted_reader_terminal,
+            allowed,
             "invalid outcome transition; reconciliation is explicit"
         );
         if matches!(

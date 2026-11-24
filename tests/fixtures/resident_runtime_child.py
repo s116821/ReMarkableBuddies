@@ -88,13 +88,20 @@ connections = set()
 handshakes = set()
 count = 0
 # Explicit owned source-handoff model, never native current-page authority.
+source_document = uuid.uuid4().bytes
 source_page = uuid.uuid4().bytes
 source_order = [source_page]
-if mode == "reconnect-source-handoff-indeterminate-successor":
+if mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-source-handoff-text-refusal"):
     source_order.append(uuid.uuid4().bytes)
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
-source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
+encoded_order = struct.pack(">H", len(source_order)) + b"".join(source_order)
+source_facts = source_document + source_page + encoded_order
+
+def current_source_facts():
+    if mode == "reconnect-source-handoff-text-refusal" and (root.parent / "successor-position").is_file():
+        return source_document + source_order[1] + encoded_order
+    return source_facts
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
@@ -183,7 +190,7 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                send(request[:202] + b"\x03" + digest + b"\x00" + current_source_facts())
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
@@ -191,7 +198,7 @@ while True:
                 facts = request[204:]
                 assert not visual or not facts
                 if mode.startswith("reconnect-source-handoff"):
-                    assert facts == source_facts
+                    assert facts == current_source_facts()
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
