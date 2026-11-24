@@ -409,7 +409,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         else {
             anyhow::bail!("native Writer placement requires a refinement request");
         };
-        let owner = writer::Owner::acquire(self.ledger.store())
+        let store = self.ledger.store().clone();
+        let owner = writer::Owner::acquire(&store)
             .ok_or_else(|| anyhow::anyhow!("Writer is already active"))?;
         let expected = self
             .ledger
@@ -509,7 +510,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             receipt.source.document,
             receipt.source.page,
         )?;
-        let owner = writer::Owner::acquire(self.ledger.store())
+        let store = self.ledger.store().clone();
+        let owner = writer::Owner::acquire(&store)
             .ok_or_else(|| anyhow::anyhow!("Writer is already active"))?;
         self.workflow.deliver_reader_acquisition()?;
         let mut produced = None;
