@@ -29,16 +29,18 @@ An AI-powered reading assistant for the reMarkable tablet that watches for outli
 
 1. **Prepare Answer Page**: With the manual workflow, create a blank page immediately to the **right** of your question page before triggering.
 2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
-3. **Write Question**: Write your question near the selected content
-4. **Trigger**: Touch and **hold for at least 2 seconds** in the **lower-left corner**, then release
+3. **Write Question**: Write your question near the selected content. For example, circle `24 / 6` and write “What is the answer to this?” beside it.
+4. **Trigger**: Touch and **hold for at least 2 seconds** in the **lower-right corner**, then release
 5. **Capture**: The app takes a screenshot of your current page
-6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass over the page, without seeing the proposed question or answer, must agree before anything is written. Unreadable or conflicting readings produce an X instead.
+6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass reads the original page. If it cannot confirm the question, Reader stops before opening an answer page.
 7. **Page Check**: The manual workflow checks the immediate successor. It accepts a blank page or a recognized Reader Buddy answer page and leaves unrelated content intact.
 8. **Render**: Displays the question and answer on the answer page (with "=== Reader Buddy Answers ===" header on first use)
 
-The standard installation uses manual page preparation. The separately staged
-RM2 resident integration on firmware 3.28.0.172 can create a native page
-immediately after the source, or reuse the page already bound to the conversation.
+The standard binary archive uses manual page preparation. On RM2 firmware
+3.28.0.172, the complete resident installation includes the native adapter and
+recovery services. With that installation Reader can start from a single page
+and create an answer page immediately after it, or reuse the page already bound
+to the conversation.
 
 The circle selects the topic to explain. Answers may use surrounding page content
 and general knowledge; paper-specific values must match the visible paper. The
@@ -200,7 +202,7 @@ Options:
   --base-url <URL>          Custom OpenAI endpoint
   --log-level <LEVEL>       off/error/warn/info/debug/trace; overrides RUST_LOG
   --debug-dump              Save local page-image diagnostics
-  --trigger-corner <CORNER> Trigger corner: UR, UL, LR, LL [default: LL]
+  --trigger-corner <CORNER> Trigger corner: UR, UL, LR, LL [default: LR]
   -h, --help                Print help
   -V, --version             Print version
 ```
@@ -219,7 +221,7 @@ Options:
 # Use different model
 ./reader-buddy --model gpt-4o-mini
 
-# Change trigger corner to upper-right (default is lower-left)
+# Change trigger corner to upper-right (default is lower-right)
 ./reader-buddy --trigger-corner UR
 ```
 
@@ -250,7 +252,7 @@ The old `--input-png` and `--save-screenshot` flags were unused and are removed.
 diagnostic probes for offline device actions.
 Production `--once`, `--no-trigger` and `--screenshot-only` are removed; use the
 explicit examples above. `reader_once` uses environment credentials/endpoint, the
-default model and LL corner, with image dumps disabled. Restore the normal service
+default model, skips the trigger wait, and leaves image dumps disabled. Restore the normal service
 after the bounded diagnostic. Paper Pro examples use the aarch64 target.
 
 For answer-page eligibility diagnosis without a model call or input-device
@@ -500,7 +502,7 @@ Set the environment variable: `export OPENAI_API_KEY=your-key`
 - Ensure the outline is complete (no gaps)
 
 ### Touch trigger not working
-- Verify the trigger corner setting (default is **lower-left**)
+- Verify the trigger corner setting (default is **lower-right**)
 - Make sure you're using your hand/finger, not the pen
 - **Hold for 3 full seconds** - a quick tap won't trigger
 - The trigger zone is 68x68 pixels in the specified corner

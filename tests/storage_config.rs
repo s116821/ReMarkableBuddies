@@ -51,6 +51,8 @@ fn explicit_overrides_file_defaults_and_secret_redaction() {
     )
     .unwrap();
     assert_eq!(effective.model, "cli-model");
+    assert_eq!(effective.corner_name, "LL");
+    assert_eq!(effective.sources["trigger_corner"], "cli");
     assert_eq!(effective.key.expose(), "cli-secret");
     assert_eq!(effective.log_level, Some(log::LevelFilter::Off));
     let defaults = resolve(
@@ -63,7 +65,8 @@ fn explicit_overrides_file_defaults_and_secret_redaction() {
     )
     .unwrap();
     assert_eq!(defaults.model, DEFAULT_MODEL);
-    assert_eq!(defaults.corner_name, "LL");
+    assert_eq!(defaults.corner_name, "LR");
+    assert_eq!(defaults.sources["trigger_corner"], "default");
     assert!(!defaults.debug_dump);
 }
 
