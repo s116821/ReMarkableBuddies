@@ -94,6 +94,10 @@ pub enum ResidentOutputText<'a> {
     },
 }
 
+pub(super) fn format_exchange(request: &str, response: impl std::fmt::Display) -> String {
+    format!("Q: {request}\n\nA: {response}\n")
+}
+
 impl ResidentOutputText<'_> {
     pub(super) fn is_empty(&self) -> bool {
         matches!(self, Self::Plain(text) if text.is_empty())

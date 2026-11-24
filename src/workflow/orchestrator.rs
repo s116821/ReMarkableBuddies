@@ -13,6 +13,8 @@ use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WI
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod circled_writer;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod current_page_writer;
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod ordinary_pdf;
@@ -340,6 +342,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     SourceIntent::WriterCurrentPage { request } => {
                         return self.run_resident_current_page_writer(request, capture, dispatch);
                     }
+                    SourceIntent::WriterCircled { request, target } => {
+                        return self
+                            .run_resident_circled_writer(request, target, capture, dispatch);
+                    }
                     SourceIntent::Unresolved => {
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());
@@ -631,6 +637,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 model_profile,
                 owner: &owner,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+                accepted: None,
             },
             &mut produced,
         );
@@ -656,12 +663,24 @@ impl<M: LLMEngine> Orchestrator<M> {
         produced: Option<crate::conversation::WriterSelection>,
         protect_source: bool,
     ) -> Result<()> {
-        use super::resident_output::ResidentOutputText;
-        use crate::{storage::Namespace, writer};
+        use super::resident_output::{format_exchange, ResidentOutputText};
+        use crate::{conversation::Role, storage::Namespace, writer};
+        use anyhow::Context;
 
-        let selected =
-            produced.ok_or_else(|| anyhow::anyhow!("fresh Writer selection unavailable"))?;
+        let selected = produced.context("fresh Writer selection unavailable")?;
         let (draft, source) = selected.values()?;
+        // A refinement reuses the note's original source. Its request belongs to
+        // the new draft's exchange, even when several drafts share that source.
+        let user = self
+            .ledger
+            .writer_turn(writer::stage(draft.exchange, "user"), conversation)?;
+        anyhow::ensure!(
+            user.exchange == draft.exchange
+                && user.role == Role::User
+                && user.outcome == Outcome::Interpreted
+                && user.sequence < draft.sequence,
+            "Writer request does not precede the selected draft in its exchange"
+        );
         anyhow::ensure!(
             source.document.document == capture.document()
                 && self
@@ -676,13 +695,17 @@ impl<M: LLMEngine> Orchestrator<M> {
                 == association_before.map(|a| a.binding_revision()),
             "Writer page association changed during generation"
         );
+        let request = user
+            .text
+            .as_deref()
+            .context("Writer request text unavailable")?;
         let (title, body) = writer::parse_draft(
             draft
                 .text
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
+                .context("Writer draft text unavailable")?,
         )?;
-        let text = format!("{title}\n\n{body}\n");
+        let text = format_exchange(request, format_args!("{title}\n\n{body}"));
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)
         } else {

@@ -142,6 +142,7 @@ pub fn run<E: LLMEngine>(
             model_profile,
             owner: &owner,
             deadline,
+            accepted: None,
         },
         &mut produced,
     )
@@ -151,6 +152,7 @@ pub(crate) struct TargetRun<'a, 'store> {
     pub(crate) model_profile: &'a str,
     pub(crate) owner: &'a Owner<'store>,
     pub(crate) deadline: Instant,
+    pub(crate) accepted: Option<&'a Turn>,
 }
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
@@ -165,6 +167,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         model_profile,
         owner,
         deadline,
+        accepted,
     } = context;
     if input.validate().is_err()
         || !config.admits_writer(false)
@@ -196,16 +199,31 @@ pub(crate) fn run_owned<E: LLMEngine>(
             .geometry
             .as_ref()
             .context("bounded target absent")?;
+        let user = super::stage(operation, "user");
+        if let Some(accepted) = accepted {
+            ensure!(
+                accepted.id == user
+                    && accepted.exchange == operation
+                    && accepted.text.as_ref() == Some(text)
+                    && accepted.outcome == Outcome::Interpreted
+                    && target.introduced_by == user
+                    && frame.source().turn == user
+                    && accepted.sources == [frame.source().record.record]
+                    && ledger.writer_turn(user, conversation)? == *accepted,
+                "fresh regional Writer request differs from its target"
+            );
+        }
         let stage = super::stage(operation, "target-normalization");
         ensure!(
             ledger
                 .store()
                 .value(Namespace::Conversation, stage)?
                 .is_none()
-                && ledger
-                    .store()
-                    .value(Namespace::Conversation, super::stage(operation, "user"))?
-                    .is_none(),
+                && (accepted.is_some()
+                    || ledger
+                        .store()
+                        .value(Namespace::Conversation, user)?
+                        .is_none()),
             "target Writer already started; reconcile original operation"
         );
         let mut progress = || -> Result<()> {
@@ -355,7 +373,10 @@ pub(crate) fn run_owned<E: LLMEngine>(
                 historical_images: false,
                 produced,
             },
-            Some(regional),
+            Some(super::RegionalInput {
+                proof: regional,
+                accepted,
+            }),
         ))
     })();
     result.unwrap_or_else(|_| report(input, Status::Refused, Some(Failure::Storage)))

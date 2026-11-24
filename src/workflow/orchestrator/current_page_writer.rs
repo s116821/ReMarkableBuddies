@@ -2,16 +2,24 @@
 use super::{Dispatch, Orchestrator};
 use crate::{
     conversation::{
-        ExpectedHeads, Mode, Outcome, PreparedResidentCapture, ResidentSourceCapture, Role,
-        TextScope, Turn,
+        ExpectedHeads, HistoricalPageAssociation, Mode, Outcome, PreparedResidentCapture,
+        ResidentSourceCapture, Role, TextScope, Turn,
     },
     llm::LLMEngine,
     retrieval::notebook::{self, Normalized, TranscriptionPolicy},
-    storage::Namespace,
+    storage::{Namespace, Uuid},
     writer,
 };
 use anyhow::{ensure, Context, Result};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub(super) struct PreparedWriterCapture {
+    pub(super) association: Option<HistoricalPageAssociation>,
+    pub(super) conversation: Uuid,
+    pub(super) expected: ExpectedHeads,
+    pub(super) capture: PreparedResidentCapture,
+    pub(super) deadline: Instant,
+}
 
 impl<M: LLMEngine> Orchestrator<M> {
     pub(super) fn run_resident_current_page_writer(
@@ -28,88 +36,23 @@ impl<M: LLMEngine> Orchestrator<M> {
         let store = self.ledger.store().clone();
         let owner = writer::Owner::acquire(&store).context("Writer is already active")?;
 
-        let association = self.ledger.resident_answer_association(capture)?;
-        let conversation = if let Some(binding) = &association {
-            ensure!(
-                binding.receipt().source.page == capture.page()
-                    && binding.receipt().observed_page != capture.page(),
-                "current-page Writer requires the source page"
-            );
-            binding.receipt().conversation
-        } else {
-            ensure!(
-                self.blocked_unbound_insertion().is_none(),
-                "an earlier Buddy page insertion needs reconciliation"
-            );
-            writer::stage(operation, "conversation")
-        };
-        let preparation = writer::stage(operation, "source-capture");
-        ensure!(
-            self.ledger
-                .expected(Namespace::Conversation, preparation)?
-                .0
-                .is_empty(),
-            "current-page Writer already started"
-        );
-
-        self.workflow.deliver_reader_acquisition()?;
-        let deadline = Instant::now() + Duration::from_secs(300);
-        self.require_same_resident_source(deadline)?;
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?;
-        if association.is_none() {
-            self.ledger.create(
-                conversation,
-                writer::stage(operation, "conversation-create"),
-                timestamp,
-            )?;
-        }
-        let expected = self
-            .ledger
-            .expected(Namespace::Conversation, conversation)?;
-        // Reserve the capture before recognition. A replay of this action cannot
-        // submit the same image to the provider twice.
-        let (original_png, source_sha256, expected) = {
-            let (
+        let PreparedWriterCapture {
+            association,
+            conversation,
+            expected,
+            capture:
                 PreparedResidentCapture {
                     original_png,
                     evidence,
                     ..
                 },
-                prepared,
-            ) = self.ledger.prepare_resident_historical_with_receipt(
-                writer::stage(operation, "source-capture-admission"),
-                expected,
-                Turn {
-                    id: preparation,
-                    conversation,
-                    exchange: operation,
-                    sequence: 0,
-                    role: Role::User,
-                    mode: Mode::Writer,
-                    outcome: Outcome::Prepared,
-                    text: None,
-                    sources: vec![],
-                    correction_of: None,
-                    created_ms: timestamp,
-                    updated_ms: timestamp,
-                    completion: None,
-                },
-                writer::stage(operation, "source-evidence"),
-                capture,
-            )?;
-            let expected = ExpectedHeads(
-                prepared
-                    .current_root
-                    .iter()
-                    .map(|value| value.revision_id)
-                    .collect(),
-            );
-            (original_png, evidence.original_png.sha256, expected)
-        };
+            deadline,
+        } = self.prepare_installed_writer_capture(
+            capture,
+            operation,
+            writer::stage(operation, "source-capture"),
+        )?;
+        let source_sha256 = evidence.original_png.sha256;
 
         let recognition_deadline = deadline - Duration::from_secs(150);
         let mut progress = || {
@@ -202,6 +145,89 @@ impl<M: LLMEngine> Orchestrator<M> {
             produced,
             true,
         )
+    }
+
+    pub(super) fn prepare_installed_writer_capture(
+        &mut self,
+        capture: &ResidentSourceCapture,
+        operation: Uuid,
+        preparation: Uuid,
+    ) -> Result<PreparedWriterCapture> {
+        let association = self.ledger.resident_answer_association(capture)?;
+        let conversation = if let Some(binding) = &association {
+            ensure!(
+                binding.receipt().source.page == capture.page()
+                    && binding.receipt().observed_page != capture.page(),
+                "Writer requires the source page"
+            );
+            binding.receipt().conversation
+        } else {
+            ensure!(
+                self.blocked_unbound_insertion().is_none(),
+                "an earlier Buddy page insertion needs reconciliation"
+            );
+            writer::stage(operation, "conversation")
+        };
+        ensure!(
+            self.ledger
+                .expected(Namespace::Conversation, preparation)?
+                .0
+                .is_empty(),
+            "Writer already started this submission"
+        );
+        self.workflow.deliver_reader_acquisition()?;
+        let deadline = Instant::now() + Duration::from_secs(300);
+        self.require_same_resident_source(deadline)?;
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?;
+        if association.is_none() {
+            self.ledger.create(
+                conversation,
+                writer::stage(operation, "conversation-create"),
+                timestamp,
+            )?;
+        }
+        let expected = self
+            .ledger
+            .expected(Namespace::Conversation, conversation)?;
+        let (capture, prepared) = self.ledger.prepare_resident_historical_with_receipt(
+            writer::stage(operation, "source-capture-admission"),
+            expected,
+            Turn {
+                id: preparation,
+                conversation,
+                exchange: operation,
+                sequence: 0,
+                role: Role::User,
+                mode: Mode::Writer,
+                outcome: Outcome::Prepared,
+                text: None,
+                sources: vec![],
+                correction_of: None,
+                created_ms: timestamp,
+                updated_ms: timestamp,
+                completion: None,
+            },
+            writer::stage(operation, "source-evidence"),
+            capture,
+        )?;
+        let expected = ExpectedHeads(
+            prepared
+                .current_root
+                .iter()
+                .map(|value| value.revision_id)
+                .collect(),
+        );
+        Ok(PreparedWriterCapture {
+            association,
+            conversation,
+            expected,
+            capture,
+            deadline,
+        })
     }
 
     pub(super) fn require_same_resident_source(&mut self, deadline: Instant) -> Result<()> {

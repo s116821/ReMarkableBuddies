@@ -6,13 +6,22 @@ use crate::workflow::{conversation_dispatch::Dispatch, selected_backend::Refusin
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const NOTE: &str = "Make a note from this page.";
+const CIRCLE_NOTE: &str = "Make a note about the circled part.";
+const REGION_TEXT: &str = "Selected equation: 24 / 6 = 4.";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Circled {
+    Selected,
+    MissingOutline,
+}
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
-const DRAFT: &str = "Page note\n\nThe page records an equation and its result.\n";
+const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
 const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
 struct SubmissionModel {
     writer: bool,
+    circled: Option<Circled>,
     last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
@@ -74,6 +83,23 @@ impl crate::LLMEngine for SubmissionModel {
                     return Ok(r#"{"intent":"unresolved"}"#.into());
                 }
                 assert_eq!(self.text.len(), 1, "fresh notebook has no history part");
+                if let Some(circled) = self.circled {
+                    let target = match circled {
+                        Circled::Selected => serde_json::json!({
+                            "subject": "selected equation",
+                            "geometry": {"components": [[[100000,100000],[500000,100000],[500000,900000],[100000,900000]]]},
+                            "understanding": {"status": "interpreted"}
+                        }),
+                        Circled::MissingOutline => serde_json::json!({
+                            "subject": "selected equation", "geometry": null,
+                            "understanding": {"status": "uncertain", "reason": "No closed outline"}
+                        }),
+                    };
+                    return Ok(serde_json::json!({
+                        "intent": "writer-circled", "request": CIRCLE_NOTE, "target": target,
+                    })
+                    .to_string());
+                }
                 if writer {
                     Ok(
                         serde_json::json!({"intent":"writer-current-page","request":NOTE})
@@ -82,6 +108,21 @@ impl crate::LLMEngine for SubmissionModel {
                 } else {
                     Ok(r#"{"intent":"reader"}"#.into())
                 }
+            }
+            (1, true) if self.circled == Some(Circled::Selected) => {
+                let original = image::load_from_memory(
+                    &STANDARD.decode(self.source.borrow().as_deref().unwrap())?,
+                )?
+                .to_rgb8();
+                let [masked] = self.images.as_slice() else {
+                    panic!("expected only the masked source")
+                };
+                let masked = image::load_from_memory(&STANDARD.decode(masked)?)?.to_rgb8();
+                assert_eq!(masked.dimensions(), original.dimensions());
+                assert_eq!(masked.get_pixel(32, 32), original.get_pixel(32, 32));
+                assert_ne!(original.get_pixel(150, 30).0, [255, 255, 255]);
+                assert_eq!(masked.get_pixel(150, 30).0, [255, 255, 255]);
+                Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":REGION_TEXT}]}).to_string())
             }
             (1, true) => {
                 assert_eq!(
@@ -93,9 +134,20 @@ impl crate::LLMEngine for SubmissionModel {
             (2, true) => {
                 assert!(self.images.is_empty());
                 let input = serde_json::from_str::<serde_json::Value>(self.text.last().unwrap())?;
-                assert_eq!(input["request"], NOTE);
-                assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
-                Ok("# Page note\n\nThe page records an equation and its result.".into())
+                if self.circled == Some(Circled::Selected) {
+                    assert_eq!(input["request"], CIRCLE_NOTE);
+                    assert_eq!(input["history"], serde_json::json!([]));
+                    assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
+                    assert_eq!(
+                        input["source_provenance"]["region"]["about"],
+                        "About: selected equation"
+                    );
+                    Ok("# Circled note\n\nThe selected equation gives four.".into())
+                } else {
+                    assert_eq!(input["request"], NOTE);
+                    assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
+                    Ok(DRAFT.into())
+                }
             }
             (1, false) => {
                 assert!(!self.images.is_empty());
@@ -203,25 +255,40 @@ fn seed_history(
 
 #[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request, bound_history) in [
-        (true, false, false),
-        (true, true, false),
-        (false, true, false),
-        (true, false, true),
+    for (reader_enabled, writer_request, bound_history, circled) in [
+        (true, false, false, None),
+        (true, true, false, None),
+        (false, true, false, None),
+        (true, false, true, None),
+        (true, true, false, Some(Circled::Selected)),
+        (false, true, false, Some(Circled::Selected)),
+        (true, false, false, Some(Circled::MissingOutline)),
     ] {
-        let mode = if writer_request {
-            "reconnect-source-handoff-text-refusal"
-        } else {
-            "reconnect-source-handoff"
+        let mode = match (circled, writer_request) {
+            (Some(Circled::Selected), _) => "reconnect-source-handoff-writer-insert",
+            (_, true) => "reconnect-source-handoff-text-refusal",
+            _ => "reconnect-source-handoff",
         };
-        let (mut workflow, store, base, events, _notify) = workflow(mode, vec![], Duration::ZERO);
+        let base = std::env::temp_dir().join(format!("shared-source-{}", ConversationId::new_v4()));
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-            "paths": store.paths.clone(),
+            "paths": StorePaths {
+                data: base.join("data"),
+                cache: base.join("cache"),
+                credentials: base.join("credentials"),
+            },
             "product_settings": {
                 "reader_enabled": reader_enabled,
                 "writer_enabled": true
             }
         }))?;
+        let store = if circled.is_some() {
+            crate::reader_runtime::ordinary_store(&config, None)
+                .map_err(|report| report.into_ordinary_startup_error())?
+        } else {
+            Arc::new(Store::open(config.paths.clone())?)
+        };
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![], Duration::ZERO, &store);
         let native = Fixture::new();
         let document = ConversationId::new_v4();
         let page = ConversationId::new_v4();
@@ -237,7 +304,10 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             None
         };
         let owner = workflow.resident_source.as_mut().unwrap();
-        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?;
         owner.session = Some(Box::new(OwnedSession {
             runtime,
             _fixture: native,
@@ -253,7 +323,8 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let output = RecognitionProbe {
             conversation: conversation.clone(),
             confirmed_source: writer_request,
-            successor: writer_request.then(|| SuccessorProbe {
+            insertion_source: (circled == Some(Circled::Selected)).then_some(page),
+            successor: (writer_request && circled.is_none()).then(|| SuccessorProbe {
                 position: position.clone(),
                 interrupt_restore: false,
             }),
@@ -270,6 +341,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let source = Rc::new(RefCell::new(None));
         let model = SubmissionModel {
             writer: writer_request,
+            circled,
             last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
@@ -280,7 +352,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))?;
-        if bound_history {
+        if bound_history || circled == Some(Circled::MissingOutline) {
             assert_eq!(steps.get(), 1);
             assert!(written.borrow().is_empty());
             assert!(conversation.get().is_none());
@@ -290,7 +362,14 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         }
         assert_eq!(steps.get(), 3);
         assert!(!events.borrow().contains(&"current-target-writer-received"));
-        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| **event == "insert")
+                .count(),
+            usize::from(circled == Some(Circled::Selected))
+        );
         let records = ledger.inspect(
             conversation
                 .get()
@@ -299,12 +378,25 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         )?;
 
         if writer_request {
-            assert!(position.exists(), "draft must go onto the adjacent page");
-            assert_eq!(written.borrow().as_slice(), &[DRAFT]);
+            let (exact_request, saved_draft) = if circled == Some(Circled::Selected) {
+                assert!(!position.exists(), "native insertion selected the new page");
+                assert!(records.iter().any(|record| matches!(record, Record::RegionSource(region)
+                    if region.normalized.document.document == document && region.about == "About: selected equation")));
+                (CIRCLE_NOTE, "# Circled note\n\nAbout: selected equation\n\nThe selected equation gives four.")
+            } else {
+                assert!(position.exists(), "draft must go onto the adjacent page");
+                (NOTE, DRAFT)
+            };
+            let response = saved_draft.strip_prefix("# ").unwrap();
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[format!("Q: {exact_request}\n\nA: {response}\n")]
+            );
+            assert_eq!(records.iter().filter(|record| matches!(record, Record::Turn(turn)
+                if turn.role == Role::User && turn.mode == Mode::Writer && turn.text.as_deref() == Some(exact_request))).count(), 1);
             assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
-                if turn.role == Role::User && turn.mode == Mode::Writer && turn.text.as_deref() == Some(NOTE))));
-            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
-                if turn.role == Role::Assistant && turn.mode == Mode::Writer && turn.outcome == Outcome::Generated)));
+                if turn.role == Role::Assistant && turn.mode == Mode::Writer
+                    && turn.outcome == Outcome::Generated && turn.text.as_deref() == Some(saved_draft))));
             let evidence = records
                 .iter()
                 .find_map(|record| match record {

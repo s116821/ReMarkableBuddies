@@ -99,8 +99,11 @@ if mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-sourc
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
 source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
+inserted_target = None
 
 def current_source_facts():
+    if inserted_target is not None:
+        return source_document + inserted_target + struct.pack(">H", 2) + source_page + inserted_target
     if mode == "reconnect-source-handoff-text-refusal" and (root.parent / "successor-position").is_file():
         return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"
@@ -183,6 +186,12 @@ while True:
                 elif mode.endswith("-wrong-scope"):
                     response[146] ^= 1
                 send(response)
+                continue
+            if mode == "reconnect-source-handoff-writer-insert" and request[202:204] == b"\x02\x01":
+                assert inserted_target is None and request[204:-16] == source_facts
+                inserted_target = request[-16:]
+                assert inserted_target != source_page
+                send(request[:202] + b"\x03" + digest + b"\x01" + current_source_facts())
                 continue
             if mode in ("reconnect-source-handoff-current-rejected", "reconnect-source-handoff-current-indeterminate") and request[202:204] == b"\x02\x01":
                 assert request[204:-16] == source_facts and request[-16:] != source_page

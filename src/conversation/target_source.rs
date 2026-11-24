@@ -555,7 +555,7 @@ impl Ledger {
     }
 }
 impl Ledger {
-    fn current_target_reference(&self, conversation: Uuid) -> Result<Option<RecordRef>> {
+    pub(super) fn current_target_reference(&self, conversation: Uuid) -> Result<Option<RecordRef>> {
         let Some(state) = self
             .store
             .value(Namespace::Conversation, TargetState::id(conversation))?
