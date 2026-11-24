@@ -1239,6 +1239,16 @@ impl DisplayFormat {
     }
 }
 
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(in crate::workflow) fn fits_test_keyboard(
+    text: ResidentOutputText<'_>,
+    new_page: bool,
+) -> bool {
+    DisplayFormat::Unified
+        .text_for_keyboard(new_page, text, str::is_ascii)
+        .is_some()
+}
+
 impl ResidentRenderer for Renderer {
     fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
         self.render_output(ResidentOutputText::Plain(text), lease)

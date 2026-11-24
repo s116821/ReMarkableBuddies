@@ -1431,6 +1431,22 @@ mod tests {
         conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
         refuse_new_reader_text: bool,
+        #[cfg(feature = "installed-resident-output")]
+        writer_preview: Option<Rc<RefCell<Vec<String>>>>,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    struct WriterPreview(Rc<RefCell<Vec<String>>>);
+
+    #[cfg(feature = "installed-resident-output")]
+    impl ResidentRenderer for WriterPreview {
+        fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
+            lease.step(|pulse| {
+                pulse()?;
+                self.0.borrow_mut().push(text.to_owned());
+                pulse()
+            })
+        }
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -1596,6 +1612,14 @@ mod tests {
 
     impl ResidentOutputBackend for RecognitionProbe {
         fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
+            #[cfg(feature = "installed-resident-output")]
+            if matches!(text, ResidentOutputText::Plain(_)) {
+                return Ok(
+                    crate::workflow::resident_output::development::fits_test_keyboard(
+                        text, new_page,
+                    ),
+                );
+            }
             assert!(new_page && matches!(text, ResidentOutputText::Reader { .. }));
             Ok(!self.refuse_new_reader_text)
         }
@@ -1621,6 +1645,10 @@ mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
             assert!(self.conversation.replace(Some(conversation)).is_none());
+            #[cfg(feature = "installed-resident-output")]
+            if self.writer_preview.is_some() {
+                return Ok(PageUse::RelevantBuddy);
+            }
             Ok(if self.confirmed_source {
                 PageUse::ConfirmedNonBuddy
             } else {
@@ -1660,7 +1688,80 @@ mod tests {
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
+            #[cfg(feature = "installed-resident-output")]
+            if let Some(preview) = &self.writer_preview {
+                return Ok(Box::new(WriterPreview(preview.clone())));
+            }
             panic!("unexpected renderer request");
+        }
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_places_an_exact_fit_on_a_relevant_page_and_reports_refusal_before_insertion() {
+        use crate::workflow::selected_backend::RefusingBackend;
+
+        let draft = format!("Note\n\n{}\n", "a".repeat(505));
+        assert_eq!(draft.len(), 512);
+        for role in [
+            PageUse::RelevantBuddy,
+            PageUse::ConfirmedNonBuddy,
+            PageUse::Unresolved,
+        ] {
+            let (mut workflow, store, base, events, _notify) = workflow(
+                "reconnect-source-handoff-current-rejected",
+                vec![],
+                Duration::ZERO,
+            );
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.begin(released(Instant::now()), health).unwrap();
+            owner.acquire(health).unwrap();
+            owner.deliver(health).unwrap();
+            let runtime = owner.session.as_ref().unwrap().identity();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-profile"),
+                &runtime,
+            )
+            .unwrap();
+            let ledger = Ledger::new(store.clone());
+            let conversation = ConversationId::new_v4();
+            ledger
+                .create(conversation, ConversationId::new_v4(), 1)
+                .unwrap();
+            let written = Rc::new(RefCell::new(Vec::new()));
+            let probe = RecognitionProbe {
+                confirmed_source: role == PageUse::ConfirmedNonBuddy,
+                writer_preview: (role == PageUse::RelevantBuddy).then(|| written.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                RefusingBackend::with_resident_releases(vec![]).with_test_output(Box::new(probe)),
+            );
+
+            let result = workflow.place_resident_writer_draft(&ledger, conversation, &draft, None);
+            match role {
+                PageUse::RelevantBuddy => {
+                    result.unwrap();
+                    assert_eq!(written.borrow().as_slice(), std::slice::from_ref(&draft));
+                }
+                PageUse::ConfirmedNonBuddy => {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "Writer draft saved. Page output is unavailable."
+                    );
+                }
+                _ => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("placement is unresolved")),
+            }
+            assert!(!events.borrow().contains(&"insert"));
+            assert!(resident_client::attempts(&store).unwrap().is_empty());
+            drop(workflow);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
         }
     }
 

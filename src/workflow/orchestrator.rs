@@ -325,7 +325,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         capture: &crate::conversation::ResidentSourceCapture,
         require_current_draft: bool,
     ) -> Result<()> {
-        use super::resident_output::ResidentOutputOutcome;
         use crate::{storage::Namespace, writer};
 
         let writer::Request::Refine {
@@ -427,23 +426,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
         )?;
         let text = format!("{title}\n\n{body}\n");
-        self.workflow.validate_resident_writer_body(&text)?;
-        match self.workflow.render_resident_answer(
+        self.workflow.place_resident_writer_draft(
             &self.ledger,
             *conversation,
-            super::resident_output::ResidentOutputText::Plain(&text),
+            &text,
             association.as_ref(),
-            &mut || Ok(()),
-        )? {
-            ResidentOutputOutcome::SubmittedUnverified => {
-                info!("Writer refinement submitted to the resident page");
-            }
-            ResidentOutputOutcome::InsertionRefused => {
-                anyhow::bail!("Writer draft generated, but page insertion was refused");
-            }
-            _ => anyhow::bail!("Writer draft generated but native placement is unresolved"),
-        }
-        Ok(())
+        )
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
