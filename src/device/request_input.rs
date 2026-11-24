@@ -25,7 +25,21 @@ pub(crate) enum ResidentGesture {
 pub struct ReleasedReaderInput {
     pub(crate) input: RequestInput,
     pub(crate) released_at: Instant,
+    pub(crate) released_boot_second: u64,
     pub(crate) gesture: ResidentGesture,
+}
+
+/// Shared with the private Writer queue so system clock changes cannot reorder a gesture.
+pub(crate) fn boot_seconds() -> Result<u64> {
+    use nix::libc;
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(time.tv_sec.try_into()?)
 }
 
 pub struct RequestInput {
@@ -64,13 +78,14 @@ impl RequestInput {
         loop {
             progress()?;
             let events = prior.poll()?;
-            progress()?;
             if let Some(event) = events
                 .iter()
                 .copied()
                 .find(|event| matches!(event, Interaction::Reader | Interaction::BlankStart))
             {
                 let released_at = Instant::now();
+                let released_boot_second = boot_seconds()?;
+                progress()?;
                 ensure!(
                     events == [event] && prior.quiescent(),
                     "Resident trigger lacks a quiet complete release"
@@ -87,6 +102,7 @@ impl RequestInput {
                 progress()?;
                 return Ok(ReleasedReaderInput {
                     released_at,
+                    released_boot_second,
                     gesture: if event == Interaction::BlankStart {
                         ResidentGesture::BlankStart
                     } else {
@@ -103,6 +119,7 @@ impl RequestInput {
             }
             // Idle input is not a request. It cannot authorize activation or
             // manufacture release; loss is fatal rather than a Touch fallback.
+            progress()?;
             pace();
         }
     }

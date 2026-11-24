@@ -323,8 +323,16 @@ impl Workflow {
         if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) =
             (&self.resident_source, acquired)
         {
-            if let Some(request) = owner.take_installed_writer(capture)? {
-                return Ok(Some(request));
+            if let Some(request) = owner.installed_writer_for_page(
+                capture,
+                resident_supervisor::writer_request::SlotAction::Inspect,
+            )? {
+                return Ok(Some(
+                    resident_output::SelectedConversationRequest::WriterRefinement {
+                        request,
+                        require_current_draft: true,
+                    },
+                ));
             }
         }
         #[cfg(not(all(
@@ -581,7 +589,7 @@ impl Workflow {
     pub(super) fn wait_for_idle_batch(
         &mut self,
         deadline: Option<std::time::Instant>,
-        dispatch: Option<&conversation_dispatch::Dispatch<'_>>,
+        config: Option<&crate::config::Config>,
     ) -> Result<bool> {
         #[cfg(target_os = "linux")]
         if self.resident_source.is_some() {
@@ -603,8 +611,14 @@ impl Workflow {
                     return Err(error);
                 }
             };
-            if let Some(dispatch) = dispatch {
-                if !owner.admits_release(released.gesture, dispatch)? {
+            match owner.admits_release(&released, config) {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(error) => {
+                    owner.progress(health)?;
+                    log::warn!(
+                        "Could not select a pending Writer request for this gesture: {error:#}"
+                    );
                     return Ok(false);
                 }
             }
@@ -646,7 +660,10 @@ impl Workflow {
         }
         if events.contains(&Interaction::Reader) {
             self.invalidate_history();
-            let admitted = dispatch.is_none_or(|dispatch| dispatch.reader_trigger(&events));
+            let admitted = config.is_none_or(|settings| {
+                conversation_dispatch::RuntimeRoute::for_config(settings)
+                    .reader_trigger(settings, &events)
+            });
             if admitted {
                 self.prepare_reader_trigger()?;
             }

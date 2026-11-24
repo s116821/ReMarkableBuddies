@@ -300,26 +300,29 @@ impl Session {
     ))]
     pub(crate) fn writer_at_release(
         &self,
+        released_boot_second: u64,
     ) -> Result<Option<super::super::writer_request::SelectedRefinement>> {
-        super::super::writer_request::at_release(&self.pending.lease)
+        super::super::writer_request::at_release(&self.pending.lease, released_boot_second)
     }
 
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(crate) fn take_writer_request(
+    pub(crate) fn writer_request_for_page(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-        selected: Option<super::super::writer_request::SelectedRefinement>,
+        selected: super::super::writer_request::SelectedRefinement,
+        action: super::super::writer_request::SlotAction,
     ) -> Result<Option<crate::writer::Request>> {
         self.pending.lease.current()?;
-        super::super::writer_request::take(
+        super::super::writer_request::request_for_page(
             self.pending.lease.record().activation(),
             document,
             page,
             selected,
+            action,
         )
     }
 

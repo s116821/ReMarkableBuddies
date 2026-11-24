@@ -396,6 +396,32 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Writer target belongs to a different conversation"
         );
         if require_current_draft {
+            self.workflow.check_request_progress()?;
+            anyhow::ensure!(
+                self.ledger
+                    .expected(Namespace::Conversation, *conversation)?
+                    == expected,
+                "Writer conversation changed before claiming the current draft"
+            );
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            {
+                let resident =
+                    self.workflow.resident_source.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("installed Writer page owner unavailable")
+                    })?;
+                anyhow::ensure!(
+                    resident
+                        .installed_writer_for_page(
+                            capture,
+                            super::resident_supervisor::writer_request::SlotAction::Claim
+                        )?
+                        .is_some(),
+                    "Writer request changed or expired before claiming the current draft"
+                );
+            }
             info!(
                 "Installed Writer refinement accepted: {}",
                 request.operation()
@@ -1248,12 +1274,12 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     /// Run the main loop
     pub fn run_loop(&mut self) -> Result<()> {
-        self.run_loop_with_dispatch(None, None)
+        self.run_loop_with_settings(None)
     }
 
     pub fn run_local_loop(&mut self, dispatch: Dispatch<'_>) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
-        self.run_loop_with_dispatch(Some(&dispatch), Some(dispatch.config))
+        self.run_loop_with_settings(Some(dispatch.config))
     }
 
     pub fn run_reader_loop(&mut self, config: &Config) -> Result<()> {
@@ -1261,24 +1287,17 @@ impl<M: LLMEngine> Orchestrator<M> {
             config.reader_enabled(),
             "Reader route requires the Reader module"
         );
-        self.run_loop_with_dispatch(None, Some(config))
+        self.run_loop_with_settings(Some(config))
     }
 
-    fn run_loop_with_dispatch(
-        &mut self,
-        dispatch: Option<&Dispatch<'_>>,
-        config: Option<&Config>,
-    ) -> Result<()> {
+    fn run_loop_with_settings(&mut self, config: Option<&Config>) -> Result<()> {
         info!("Starting Reader Buddy main loop");
 
         loop {
             let _run = crate::measurement::Run::new();
-            if self.trigger_enabled {
-                // History remains owned until another Reader trigger or an
-                // invalidating input. Do not begin an iteration while idle.
-                if !self.workflow.wait_for_idle_batch(None, dispatch)? {
-                    continue;
-                }
+            // History remains owned until another trigger or invalidating input.
+            if self.trigger_enabled && !self.workflow.wait_for_idle_batch(None, config)? {
+                continue;
             }
             match self.run_iteration_with_trigger(false, config) {
                 Ok(_) => info!("Iteration completed successfully"),

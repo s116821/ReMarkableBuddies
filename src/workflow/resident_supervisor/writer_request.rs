@@ -1,6 +1,7 @@
 //! One local Writer request scoped to the installed activation and a page.
 use super::{libc, open_at, recovery, Lease};
 use crate::{
+    device::request_input::boot_seconds,
     storage::{files, Uuid},
     writer::Request,
 };
@@ -84,9 +85,21 @@ pub(crate) struct SelectedRefinement {
     slot_digest: [u8; 32],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlotAction {
+    Inspect,
+    Claim,
+}
+
 impl Pending {
     fn refinement(&self, activation: Uuid, now: u64) -> Result<Option<SelectedRefinement>> {
-        if now >= self.expires
+        // Legacy and current slots record their queue time in whole boot seconds.
+        // A fresh three-second hold orders the request and release unambiguously.
+        if self
+            .expires
+            .checked_sub(LIFETIME_SECS)
+            .is_none_or(|queued| queued >= now)
+            || now >= self.expires
             || !matches!(
                 &self.submission,
                 Submission::RefineOnTablet {
@@ -113,17 +126,6 @@ impl Submission {
             Self::AdoptLegacyPage { approval } => (Uuid::nil(), approval.operation),
         }
     }
-}
-
-fn boot_seconds() -> Result<u64> {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(time.tv_sec.try_into()?)
 }
 
 fn lock(lease: &Lease) -> Result<()> {
@@ -217,22 +219,28 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
     lease.current()
 }
 
-pub(crate) fn at_release(lease: &Lease) -> Result<Option<SelectedRefinement>> {
+pub(crate) fn at_release(
+    lease: &Lease,
+    released_boot_second: u64,
+) -> Result<Option<SelectedRefinement>> {
     lease.record.group.current_caller()?;
-    // Submission replaces the complete slot atomically. Only take() consumes it.
+    // The current draft and its page binding are verified before a claim.
     let pending = read(lease, &name(lease))?;
     lease.current()?;
     match pending {
-        Some(slot) => slot.refinement(lease.record().activation(), boot_seconds()?),
-        None => Ok(None),
+        Some(slot) if boot_seconds()? < slot.expires => {
+            slot.refinement(lease.record().activation(), released_boot_second)
+        }
+        _ => Ok(None),
     }
 }
 
-pub(crate) fn take(
+pub(crate) fn request_for_page(
     activation: Uuid,
     document: Uuid,
     page: Uuid,
-    selected: Option<SelectedRefinement>,
+    selected: SelectedRefinement,
+    action: SlotAction,
 ) -> Result<Option<Request>> {
     let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
     ensure!(
@@ -241,24 +249,24 @@ pub(crate) fn take(
     );
     lease.record.group.current_caller()?;
     lock(&lease)?;
-    take_locked(&lease, document, page, selected, boot_seconds()?)
+    request_locked(&lease, document, page, selected, action, boot_seconds()?)
 }
 
-fn take_locked(
+fn request_locked(
     lease: &Lease,
     document: Uuid,
     page: Uuid,
-    selected: Option<SelectedRefinement>,
+    selected: SelectedRefinement,
+    action: SlotAction,
     now: u64,
 ) -> Result<Option<Request>> {
     let name = name(lease);
     let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
-    if selected.is_some() && pending.refinement(lease.record().activation(), now)? != selected {
+    if pending.refinement(lease.record().activation(), now)? != Some(selected) {
         return Ok(None);
     }
-    let expired = now >= pending.expires;
     let Submission::RefineOnTablet {
         document: expected_document,
         page: expected_page,
@@ -267,12 +275,11 @@ fn take_locked(
     else {
         anyhow::bail!("unexpected command in Writer slot");
     };
-    if !expired && (document != expected_document || page != expected_page) {
+    if document != expected_document || page != expected_page {
         return Ok(None);
     }
-    discard_locked(lease, &name)?;
-    if expired {
-        return Ok(None);
+    if action == SlotAction::Claim {
+        discard_locked(lease, &name)?;
     }
     lease.current()?;
     Ok(Some(refinement))
@@ -368,27 +375,46 @@ mod tests {
         files::atomic_json(&path, &slot).unwrap();
         let activation = lease.record().activation();
         let selected = slot.refinement(activation, 118).unwrap().unwrap();
+        assert!(request_locked(
+            &lease,
+            document,
+            Uuid::new_v4(),
+            selected,
+            SlotAction::Claim,
+            119
+        )
+        .unwrap()
+        .is_none());
         assert!(
-            take_locked(&lease, document, Uuid::new_v4(), Some(selected), 119)
+            request_locked(&lease, document, page, selected, SlotAction::Inspect, 119)
+                .unwrap()
+                .is_some()
+        );
+        assert!(path.is_file());
+        assert!(
+            request_locked(&lease, document, page, selected, SlotAction::Claim, 120)
                 .unwrap()
                 .is_none()
         );
-        assert!(take_locked(&lease, document, page, Some(selected), 120)
-            .unwrap()
-            .is_none());
         assert!(path.is_file());
         slot.expires = 240;
         files::atomic_json(&path, &slot).unwrap();
-        assert!(take_locked(&lease, document, page, Some(selected), 121)
-            .unwrap()
-            .is_none());
+        assert!(slot.refinement(activation, 119).unwrap().is_none());
+        assert!(slot.refinement(activation, 120).unwrap().is_none());
+        assert!(
+            request_locked(&lease, document, page, selected, SlotAction::Claim, 121)
+                .unwrap()
+                .is_none()
+        );
         let fresh = slot.refinement(activation, 121).unwrap().unwrap();
-        let result = take_locked(&lease, document, page, Some(fresh), 122)
+        let result = request_locked(&lease, document, page, fresh, SlotAction::Claim, 122)
             .unwrap()
             .unwrap();
         assert_eq!(result.operation(), operation);
-        assert!(take_locked(&lease, document, page, Some(fresh), 122)
-            .unwrap()
-            .is_none());
+        assert!(
+            request_locked(&lease, document, page, fresh, SlotAction::Claim, 122)
+                .unwrap()
+                .is_none()
+        );
     }
 }

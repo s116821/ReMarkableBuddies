@@ -5,7 +5,7 @@ use super::resident_runtime::ReadOnlyAdmission;
     feature = "development-resident-bootstrap",
     feature = "development-input-diagnostics"
 ))]
-use super::resident_supervisor::writer_request::SelectedRefinement;
+use super::resident_supervisor::writer_request::{SelectedRefinement, SlotAction};
 use super::{
     resident_request::{FailureKind, RequestFailure},
     resident_runtime::{ReadOnlyRequest as Request, ResidentRuntime},
@@ -58,18 +58,19 @@ trait SourceSession {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn writer_at_release(&self) -> Result<Option<SelectedRefinement>> {
+    fn writer_at_release(&self, _released_boot_second: u64) -> Result<Option<SelectedRefinement>> {
         Ok(None)
     }
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn take_writer_request(
+    fn writer_request_for_page(
         &self,
         _document: crate::storage::Uuid,
         _page: crate::storage::Uuid,
-        _selected: Option<SelectedRefinement>,
+        _selected: SelectedRefinement,
+        _action: SlotAction,
     ) -> Result<Option<crate::writer::Request>> {
         Ok(None)
     }
@@ -113,8 +114,8 @@ impl SourceSession for Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn writer_at_release(&self) -> Result<Option<SelectedRefinement>> {
-        Session::writer_at_release(self)
+    fn writer_at_release(&self, released_boot_second: u64) -> Result<Option<SelectedRefinement>> {
+        Session::writer_at_release(self, released_boot_second)
     }
     fn pulse(&mut self, health: &mut ServiceHealth) -> Result<()> {
         self.source_pulse(health)
@@ -134,13 +135,14 @@ impl SourceSession for Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn take_writer_request(
+    fn writer_request_for_page(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-        selected: Option<SelectedRefinement>,
+        selected: SelectedRefinement,
+        action: SlotAction,
     ) -> Result<Option<crate::writer::Request>> {
-        Session::take_writer_request(self, document, page, selected)
+        Session::writer_request_for_page(self, document, page, selected, action)
     }
     fn reconnect(
         &mut self,
@@ -326,30 +328,26 @@ impl ResidentSourceOwner {
 
     pub(super) fn admits_release(
         &mut self,
-        gesture: ResidentGesture,
-        dispatch: &super::conversation_dispatch::Dispatch<'_>,
+        released: &ReleasedReaderInput,
+        config: Option<&crate::config::Config>,
     ) -> Result<bool> {
-        use crate::conversation::Mode;
-        let reader = dispatch.admits(Mode::Reader, false);
-        let writer = dispatch.admits(Mode::Writer, false);
-        match gesture {
-            ResidentGesture::BlankStart => Ok(reader || writer),
-            ResidentGesture::Reader if reader => Ok(true),
-            ResidentGesture::Reader => {
-                #[cfg(all(
-                    feature = "development-resident-bootstrap",
-                    feature = "development-input-diagnostics"
-                ))]
-                if writer && self.selection.has_installed_output() {
-                    self.writer_at_release = match &self.session {
-                        Some(session) => session.writer_at_release()?,
-                        None => None,
-                    };
-                    return Ok(self.writer_at_release.is_some());
-                }
-                Ok(false)
-            }
+        let reader = config.is_none_or(|settings| settings.reader_enabled());
+        let writer = config.is_none_or(|settings| settings.admits_writer(false));
+        if released.gesture == ResidentGesture::BlankStart {
+            return Ok(reader || writer);
         }
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if writer && self.selection.has_installed_output() {
+            self.writer_at_release = match &self.session {
+                Some(session) => session.writer_at_release(released.released_boot_second)?,
+                None => None,
+            };
+            return Ok(reader || self.writer_at_release.is_some());
+        }
+        Ok(reader)
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -372,10 +370,14 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(super) fn take_installed_writer(
+    pub(super) fn installed_writer_for_page(
         &self,
         capture: &ResidentSourceCapture,
-    ) -> Result<Option<super::resident_output::SelectedConversationRequest>> {
+        action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        let Some(selected) = self.writer_at_release else {
+            return Ok(None);
+        };
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
@@ -383,14 +385,7 @@ impl ResidentSourceOwner {
             .session
             .as_ref()
             .context("resident Writer session absent")?;
-        Ok(session
-            .take_writer_request(capture.document(), capture.page(), self.writer_at_release)?
-            .map(
-                |request| super::resident_output::SelectedConversationRequest::WriterRefinement {
-                    request,
-                    require_current_draft: true,
-                },
-            ))
+        session.writer_request_for_page(capture.document(), capture.page(), selected, action)
     }
     pub(super) fn begin(
         &mut self,
@@ -1342,6 +1337,7 @@ mod tests {
     fn released(at: Instant) -> ReleasedReaderInput {
         ReleasedReaderInput {
             released_at: at,
+            released_boot_second: crate::device::request_input::boot_seconds().unwrap(),
             gesture: ResidentGesture::Reader,
             input: quiet_guard(),
         }
@@ -1430,12 +1426,9 @@ mod tests {
             "product_settings": { "reader_enabled": false, "writer_enabled": true }
         }))
         .unwrap();
-        let ledger = Ledger::new(store.clone());
-        let dispatch =
-            super::super::conversation_dispatch::Dispatch::local(&config, &ledger).unwrap();
-        assert!(!workflow.wait_for_idle_batch(None, Some(&dispatch)).unwrap());
+        assert!(!workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
         assert!(events.borrow().is_empty());
-        assert!(workflow.wait_for_idle_batch(None, Some(&dispatch)).unwrap());
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
         let source = workflow.acquire_reader_evidence().unwrap();
         assert!(matches!(
             workflow
@@ -1444,7 +1437,7 @@ mod tests {
             Some(super::super::resident_output::SelectedConversationRequest::BlankStart(None))
         ));
         workflow.finish_request().unwrap();
-        drop((source, workflow, dispatch, ledger, store));
+        drop((source, workflow, store));
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -2270,6 +2263,7 @@ mod tests {
         polls.extend((0..4096).map(|_| Ok(vec![])));
         let first = ReleasedReaderInput {
             released_at: Instant::now(),
+            released_boot_second: crate::device::request_input::boot_seconds().unwrap(),
             gesture: ResidentGesture::Reader,
             input: RequestInput::scripted(polls),
         };
