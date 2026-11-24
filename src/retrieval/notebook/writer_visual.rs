@@ -94,7 +94,7 @@ pub(super) fn extract(
         "notebook response exceeds bound"
     );
     let parsed = strict_json(reply.as_bytes())
-        .and_then(|value| Ok(serde_json::from_value::<Reply>(value)?))
+        .and_then(serde_json::from_value::<Reply>)
         .map_err(|_| anyhow::anyhow!("invalid Writer notebook page evidence"))?;
     ensure!(
         pages.len() == parsed.pages.len(),
