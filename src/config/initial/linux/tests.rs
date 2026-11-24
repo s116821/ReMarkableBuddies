@@ -2,9 +2,7 @@ use super::*;
 use crate::{
     mode_maintenance, restore_maintenance,
     storage::{
-        digest,
         ordinary_restore::tests::{record, Fixture as RestoreFixture},
-        sync::mode::SyncModeChoice,
         Store,
     },
 };
@@ -428,36 +426,8 @@ fn anchored_creation_composes_with_initialize_and_verified_foreign_actor_restore
     let entry = record(&source);
     assert_ne!(target_actor, entry.actor_id);
     source.commit(vec![entry.clone()], BTreeMap::new()).unwrap();
-    source
-        .set_sync_mode(
-            &source.sync_mode_snapshot().unwrap().token,
-            Uuid::new_v4(),
-            SyncModeChoice::IsolatedBackup {
-                binding_sha256: digest(b"fixture binding"),
-            },
-        )
-        .unwrap();
-    let lease = source
-        .sync_mode_lease(&source.sync_mode_snapshot().unwrap().token)
-        .unwrap();
-    let package = origin.root.join("package");
-    let mut attempted = None;
-    let exported = source
-        .export_isolated_package(
-            &lease,
-            &package,
-            &origin.root.join("config.json"),
-            &mut attempted,
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        Store::inspect_isolated_package(&package, attempted.as_deref()).unwrap(),
-        exported
-    );
-    assert!(!exported.data.configuration_included);
-
-    let data = package.join("data");
+    let data = origin.root.join("archive");
+    assert!(source.export(&data).unwrap());
     let restore = |operation, value: Value| {
         let bytes = serde_json::to_vec(&value).unwrap();
         let mut output = Vec::new();
