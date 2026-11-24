@@ -340,7 +340,28 @@ impl<M: LLMEngine> Orchestrator<M> {
                 match self.classify_source_submission(capture, dispatch)? {
                     SourceIntent::Reader => {}
                     SourceIntent::WriterCurrentPage { request } => {
-                        return self.run_resident_current_page_writer(request, capture, dispatch);
+                        return self
+                            .run_resident_current_page_writer(request, capture, dispatch, None);
+                    }
+                    SourceIntent::WriterExportCurrentPage {
+                        request,
+                        separate_note,
+                    } => {
+                        use current_page_writer::NoteExport;
+                        let export = if separate_note {
+                            NoteExport::Separate
+                        } else {
+                            NoteExport::CurrentPage
+                        };
+                        return self.run_resident_current_page_writer(
+                            request,
+                            capture,
+                            dispatch,
+                            Some(export),
+                        );
+                    }
+                    SourceIntent::ClarifyExport { request } => {
+                        return self.clarify_resident_export(&request, capture);
                     }
                     SourceIntent::WriterCircled { request, target } => {
                         return self
@@ -663,6 +684,27 @@ impl<M: LLMEngine> Orchestrator<M> {
         produced: Option<crate::conversation::WriterSelection>,
         protect_source: bool,
     ) -> Result<()> {
+        self.present_resident_writer_result(
+            conversation,
+            capture,
+            association_before,
+            produced,
+            protect_source,
+            None,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn present_resident_writer_result(
+        &mut self,
+        conversation: crate::storage::Uuid,
+        capture: &crate::conversation::ResidentSourceCapture,
+        association_before: Option<&crate::conversation::HistoricalPageAssociation>,
+        produced: Option<crate::conversation::WriterSelection>,
+        protect_source: bool,
+        result: Option<&str>,
+    ) -> Result<()> {
         use super::resident_output::{format_exchange, ResidentOutputText};
         use crate::{conversation::Role, storage::Namespace, writer};
         use anyhow::Context;
@@ -705,7 +747,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .as_deref()
                 .context("Writer draft text unavailable")?,
         )?;
-        let text = format_exchange(request, format_args!("{title}\n\n{body}"));
+        let text = if let Some(result) = result {
+            format_exchange(request, format_args!("{result}\n\n{title}\n\n{body}"))
+        } else {
+            format_exchange(request, format_args!("{title}\n\n{body}"))
+        };
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)
         } else {

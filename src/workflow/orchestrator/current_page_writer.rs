@@ -13,6 +13,11 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub(super) enum NoteExport {
+    CurrentPage,
+    Separate,
+}
+
 pub(super) struct PreparedWriterCapture {
     pub(super) association: Option<HistoricalPageAssociation>,
     pub(super) conversation: Uuid,
@@ -27,6 +32,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         request: String,
         capture: &ResidentSourceCapture,
         dispatch: &Dispatch<'_>,
+        export: Option<NoteExport>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
         writer::validate_request(&request)?;
@@ -138,13 +144,144 @@ impl<M: LLMEngine> Orchestrator<M> {
             report.status == writer::Status::Generated,
             "current-page Writer did not generate a fresh draft"
         );
-        self.present_resident_writer_draft(
-            conversation,
+        if let Some(export) = export {
+            drop(owner);
+            let selected = produced.context("fresh Writer selection unavailable")?;
+            let (selected, result) = self.export_resident_page_draft(
+                dispatch,
+                conversation,
+                operation,
+                selected,
+                deadline,
+                export,
+            )?;
+            self.present_resident_writer_result(
+                conversation,
+                capture,
+                association.as_ref(),
+                Some(selected),
+                true,
+                Some(result),
+            )
+        } else {
+            self.present_resident_writer_draft(
+                conversation,
+                capture,
+                association.as_ref(),
+                produced,
+                true,
+            )
+        }
+    }
+
+    pub(super) fn clarify_resident_export(
+        &mut self,
+        request: &str,
+        capture: &ResidentSourceCapture,
+    ) -> Result<()> {
+        use super::super::resident_output::{format_exchange, ResidentOutputText};
+
+        let (capture_operation, _) = capture.writer_page_input()?;
+        let operation = writer::stage(capture_operation, "clarify-export");
+        let prepared = self.prepare_installed_writer_capture(
             capture,
-            association.as_ref(),
-            produced,
-            true,
+            operation,
+            writer::stage(operation, "source-capture"),
+        )?;
+        let text = format_exchange(
+            request,
+            "Should I save a note from this page to your configured destination?",
+        );
+        self.workflow.place_resident_writer_draft(
+            &self.ledger,
+            prepared.conversation,
+            ResidentOutputText::WriterSourceDraft(&text),
+            prepared.association.as_ref(),
         )
+    }
+
+    fn export_resident_page_draft(
+        &mut self,
+        dispatch: &Dispatch<'_>,
+        conversation: Uuid,
+        operation: Uuid,
+        selected: crate::conversation::WriterSelection,
+        deadline: Instant,
+        export: NoteExport,
+    ) -> Result<(crate::conversation::WriterSelection, &'static str)> {
+        use crate::{
+            note_export::dispatch::ConfiguredDestination,
+            writer_flow::{Phase, Request, Status},
+        };
+        let config = dispatch.config;
+        if !dispatch.admits(Mode::Writer, true) {
+            return Ok((selected, "Draft saved. Note export is disabled."));
+        }
+        let ledger = crate::conversation::Ledger::new(self.ledger.store().clone());
+        let saved = config.saved_revision();
+        let destination =
+            match ConfiguredDestination::selected(config, saved.as_ref(), Some(ledger.store())) {
+                Ok(destination) => destination,
+                Err(_) => {
+                    return Ok((
+                        selected,
+                        "Draft saved. The configured note destination is unavailable.",
+                    ))
+                }
+            };
+        let (draft, _) = selected.values()?;
+        let request = Request::ExportDraft {
+            conversation,
+            draft: draft.id,
+            correlation: match export {
+                NoteExport::CurrentPage => writer::stage(conversation, "current-page-note"),
+                NoteExport::Separate => writer::stage(operation, "separate-current-page-note"),
+            },
+            outer_operation: writer::stage(operation, "save-note"),
+            effect_operation: writer::stage(operation, "save-note-effect"),
+        };
+        let preference = config.personalization_snapshot()?;
+        let check = |phase| -> Result<()> {
+            self.require_same_resident_source(deadline)?;
+            if phase == Phase::BeforeAdmission {
+                ensure!(
+                    ledger.expected(Namespace::Conversation, conversation)? == selected.root,
+                    "Writer draft changed before export"
+                );
+            }
+            ensure!(
+                saved.as_ref().is_none_or(|revision| revision.current()),
+                "Note destination configuration changed"
+            );
+            Ok(())
+        };
+        let report = crate::writer_flow::run_guarded_draft_export(
+            &ledger,
+            &destination,
+            &request,
+            &preference,
+            check,
+        );
+        self.require_same_resident_source(deadline)?;
+        let visible = ledger.select_writer_for_flow(
+            conversation,
+            draft.id,
+            ledger.expected(Namespace::Conversation, conversation)?,
+        )?;
+        ensure!(
+            selected.same_draft_and_source(&visible),
+            "Writer draft changed during export"
+        );
+        let result = match report.status {
+            Status::Exported | Status::HistoricalExport => {
+                "Saved to your configured note destination."
+            }
+            Status::ReconcileRequired => {
+                "The destination may have received the note. Check the destination before retrying."
+            }
+            _ => "Draft saved. Export could not be verified.",
+        };
+        Ok((visible, result))
     }
 
     pub(super) fn prepare_installed_writer_capture(

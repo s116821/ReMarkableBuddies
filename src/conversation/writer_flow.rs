@@ -40,6 +40,12 @@ impl WriterSelection {
         self.draft.revision_id
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn same_draft_and_source(&self, current: &Self) -> bool {
+        self.draft.revision_id == current.draft.revision_id
+            && self.source.revision_id == current.source.revision_id
+    }
+
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {
         let value = Self {
             root: ExpectedHeads(BTreeSet::from([root.revision_id])),

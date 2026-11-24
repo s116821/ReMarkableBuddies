@@ -6,6 +6,14 @@ use crate::workflow::{conversation_dispatch::Dispatch, selected_backend::Refusin
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const NOTE: &str = "Make a note from this page.";
+const SAVE: &str = "Save a note from this page.";
+const AMBIGUOUS_SAVE: &str = "Can you save it?";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Save {
+    Explicit,
+    Ambiguous,
+}
 const CIRCLE_NOTE: &str = "Make a note about the circled part.";
 const REGION_TEXT: &str = "Selected equation: 24 / 6 = 4.";
 
@@ -22,6 +30,7 @@ const UNPUBLISHED: &str = "A short generated draft with no completed placement."
 struct SubmissionModel {
     writer: bool,
     circled: Option<Circled>,
+    save: Option<Save>,
     last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
@@ -100,6 +109,14 @@ impl crate::LLMEngine for SubmissionModel {
                     })
                     .to_string());
                 }
+                if let Some(save) = self.save {
+                    let intent = if save == Save::Explicit {
+                        serde_json::json!({"intent":"writer-export-current-page","request":SAVE,"separate_note":false})
+                    } else {
+                        serde_json::json!({"intent":"clarify-export","request":AMBIGUOUS_SAVE})
+                    };
+                    return Ok(intent.to_string());
+                }
                 if writer {
                     Ok(
                         serde_json::json!({"intent":"writer-current-page","request":NOTE})
@@ -144,7 +161,14 @@ impl crate::LLMEngine for SubmissionModel {
                     );
                     Ok("# Circled note\n\nThe selected equation gives four.".into())
                 } else {
-                    assert_eq!(input["request"], NOTE);
+                    assert_eq!(
+                        input["request"],
+                        if self.save == Some(Save::Explicit) {
+                            SAVE
+                        } else {
+                            NOTE
+                        }
+                    );
                     assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
                     Ok(DRAFT.into())
                 }
@@ -255,14 +279,16 @@ fn seed_history(
 
 #[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request, bound_history, circled) in [
-        (true, false, false, None),
-        (true, true, false, None),
-        (false, true, false, None),
-        (true, false, true, None),
-        (true, true, false, Some(Circled::Selected)),
-        (false, true, false, Some(Circled::Selected)),
-        (true, false, false, Some(Circled::MissingOutline)),
+    for (reader_enabled, writer_request, bound_history, circled, save) in [
+        (true, false, false, None, None),
+        (true, true, false, None, None),
+        (false, true, false, None, None),
+        (true, false, true, None, None),
+        (true, true, false, Some(Circled::Selected), None),
+        (false, true, false, Some(Circled::Selected), None),
+        (true, false, false, Some(Circled::MissingOutline), None),
+        (true, true, false, None, Some(Save::Explicit)),
+        (false, true, false, None, Some(Save::Ambiguous)),
     ] {
         let mode = match (circled, writer_request) {
             (Some(Circled::Selected), _) => "reconnect-source-handoff-writer-insert",
@@ -278,7 +304,8 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             },
             "product_settings": {
                 "reader_enabled": reader_enabled,
-                "writer_enabled": true
+                "writer_enabled": true,
+                "export_destination": "disabled"
             }
         }))?;
         let store = if circled.is_some() {
@@ -342,6 +369,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let model = SubmissionModel {
             writer: writer_request,
             circled,
+            save,
             last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
@@ -356,6 +384,33 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             assert_eq!(steps.get(), 1);
             assert!(written.borrow().is_empty());
             assert!(conversation.get().is_none());
+            drop((service, dispatch, ledger, store));
+            std::fs::remove_dir_all(base)?;
+            continue;
+        }
+        if save == Some(Save::Ambiguous) {
+            assert_eq!(steps.get(), 1);
+            assert!(position.exists());
+            assert_eq!(
+                written.borrow().as_slice(),
+                &["Q: Can you save it?\n\nA: Should I save a note from this page to your configured destination?\n".to_owned()]
+            );
+            assert!(!ledger
+                .inspect(
+                    conversation
+                        .get()
+                        .context("Placement conversation absent")?,
+                    false
+                )?
+                .iter()
+                .any(|record| matches!(
+                    record,
+                    Record::Export(_)
+                        | Record::Turn(Turn {
+                            outcome: Outcome::Generated,
+                            ..
+                        })
+                )));
             drop((service, dispatch, ledger, store));
             std::fs::remove_dir_all(base)?;
             continue;
@@ -385,9 +440,21 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 (CIRCLE_NOTE, "# Circled note\n\nAbout: selected equation\n\nThe selected equation gives four.")
             } else {
                 assert!(position.exists(), "draft must go onto the adjacent page");
-                (NOTE, DRAFT)
+                (
+                    if save == Some(Save::Explicit) {
+                        SAVE
+                    } else {
+                        NOTE
+                    },
+                    DRAFT,
+                )
             };
-            let response = saved_draft.strip_prefix("# ").unwrap();
+            let draft_body = saved_draft.strip_prefix("# ").unwrap();
+            let response = if save == Some(Save::Explicit) {
+                format!("Draft saved. Note export is disabled.\n\n{draft_body}")
+            } else {
+                draft_body.to_owned()
+            };
             assert_eq!(
                 written.borrow().as_slice(),
                 &[format!("Q: {exact_request}\n\nA: {response}\n")]
