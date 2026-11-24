@@ -44,6 +44,61 @@ pub enum HistoricalPageAssociationInspection {
 }
 
 impl Ledger {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn notebook_page_associations(
+        &self,
+        document: Uuid,
+        pages: &[Uuid],
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<Vec<HistoricalPageAssociation>> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let ids: BTreeMap<_, _> = pages
+            .iter()
+            .map(|&page| (Self::binding_id(document, page), page))
+            .collect();
+        let (unavailable_commits, heads) = self.store.snapshot_heads_matching_with_status(
+            &[Namespace::Conversation],
+            MAX_ITEMS,
+            |head| ids.contains_key(&head.record_id),
+        )?;
+        if unavailable_commits != 0 {
+            return Err(IncompleteStore {
+                unavailable_commits,
+            }
+            .into());
+        }
+        let mut seen = BTreeSet::new();
+        let mut associations = Vec::new();
+        for head in heads {
+            progress()?;
+            ensure!(
+                seen.insert(head.record_id) && head.kind != Kind::Tombstone,
+                "Notebook Buddy ownership is unresolved"
+            );
+            let Record::Binding(binding) = Self::decode(&head)? else {
+                anyhow::bail!("Notebook ownership key does not contain a binding");
+            };
+            ensure!(
+                binding.receipt.evidence_origin == "installed-native-guarded-v1",
+                "Notebook Buddy ownership lacks installed evidence"
+            );
+            let Some(&page) = ids.get(&head.record_id) else {
+                anyhow::bail!("Notebook ownership key is outside the observed order");
+            };
+            let HistoricalPageAssociationInspection::HistoricalCandidate(association) =
+                self.inspect_page_association(binding.conversation, document, page)?
+            else {
+                anyhow::bail!("Notebook Buddy binding cannot be established");
+            };
+            ensure!(
+                association.binding_revision() == head.revision_id,
+                "Notebook Buddy ownership changed"
+            );
+            associations.push(*association);
+        }
+        Ok(associations)
+    }
+
     /// Read current stored heads once; matching IDs do not establish live state.
     pub fn inspect_page_association(
         &self,

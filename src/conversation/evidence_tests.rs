@@ -342,7 +342,7 @@ fn actually_inconsistent_imported_pairs_remain_refused() {
     }
 }
 
-fn bind_historical_target(ledger: &Ledger, conversation: Uuid) -> BindingReceipt {
+fn bind_historical_target(ledger: &Ledger, conversation: Uuid, origin: &str) -> BindingReceipt {
     let source = Uuid::new_v4();
     let target = Uuid::new_v4();
     let document = Uuid::new_v4();
@@ -369,7 +369,7 @@ fn bind_historical_target(ledger: &Ledger, conversation: Uuid) -> BindingReceipt
         observed_order: vec![source, target],
         persisted_revision: "historical revision".into(),
         observed_ms: 8,
-        evidence_origin: "synthetic".into(),
+        evidence_origin: origin.into(),
     };
     ledger
         .bind(
@@ -398,7 +398,7 @@ fn historical_association_validates_evidence_without_refreshing_operation_heads(
     ledger
         .persist_request_evidence(Uuid::new_v4(), 7, &prepared)
         .unwrap();
-    let binding = bind_historical_target(&ledger, turn.conversation);
+    let binding = bind_historical_target(&ledger, turn.conversation, "synthetic");
     let before = OPERATION_SNAPSHOTS.with(|count| count.get());
     assert!(matches!(
         ledger
@@ -413,6 +413,30 @@ fn historical_association_validates_evidence_without_refreshing_operation_heads(
     assert_eq!(OPERATION_SNAPSHOTS.with(|count| count.get()), before);
 }
 
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+#[test]
+fn saved_notebook_only_excludes_established_installed_buddy_ownership() -> Result<()> {
+    for origin in ["synthetic", "installed-native-guarded-v1"] {
+        let fixture = Fixture::new();
+        let ledger = fixture.ledger();
+        let turn = seeded(&ledger, "orbit".into());
+        let binding = bind_historical_target(&ledger, turn.conversation, origin);
+        let result = ledger.notebook_page_associations(
+            binding.observed_document,
+            &binding.observed_order,
+            || Ok(()),
+        );
+        if origin == "synthetic" {
+            assert!(result.is_err());
+        } else {
+            let associations = result?;
+            assert_eq!(associations.len(), 1);
+            assert_eq!(associations[0].receipt(), &binding);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn historical_association_refuses_orphan_and_replaced_evidence_receipt() {
     for orphan in [true, false] {
@@ -424,7 +448,7 @@ fn historical_association_refuses_orphan_and_replaced_evidence_receipt() {
         ledger
             .persist_request_evidence(operation, 7, &prepared)
             .unwrap();
-        let binding = bind_historical_target(&ledger, turn.conversation);
+        let binding = bind_historical_target(&ledger, turn.conversation, "synthetic");
         if orphan {
             let mut fact = ledger
                 .request_evidence(turn.conversation, turn.id, operation)

@@ -31,6 +31,8 @@ pub(crate) use resident_source::original_pdf::assert_ordinary_pdf_reuse;
 #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
 #[doc(hidden)]
 pub use resident_source::original_pdf::development_original_pdf;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub use resident_source::original_pdf::saved_notebook;
 #[cfg(all(
     test,
     target_os = "linux",
