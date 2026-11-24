@@ -564,6 +564,7 @@ struct Scripted<'a> {
     hook: Option<Box<dyn FnMut(usize, bool) + 'a>>,
     exhaust_answer_progress: Option<Arc<Mutex<ProgressExhaustion>>>,
     currentness_refusal: Option<Arc<AtomicBool>>,
+    answer_refused: bool,
 }
 impl<'a> Scripted<'a> {
     fn new(reading: Reading, required: bool, has_fact: bool, events: Events) -> Self {
@@ -580,6 +581,7 @@ impl<'a> Scripted<'a> {
             hook: None,
             exhaust_answer_progress: None,
             currentness_refusal: None,
+            answer_refused: false,
         }
     }
     fn question(&self) -> &'static str {
@@ -671,6 +673,9 @@ impl LLMEngine for Scripted<'_> {
                     return Err(error);
                 }
             }
+        }
+        if stage == 2 && self.answer_refused {
+            return Err(crate::llm::ProviderRefused.into());
         }
         let question = self.question();
         let deny = matches!(self.reading, Reading::Deny | Reading::Disagree);
@@ -1162,7 +1167,7 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 #[test]
 #[ignore = "requires the retained normal binary; mandatory hosted composed-reader step"]
 fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Result<()> {
-    use crate::conversation::Role;
+    use crate::conversation::{AttemptReason, Role};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
@@ -1172,6 +1177,10 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         OrderBeforeVerification,
         OrderAfterAnswer,
         ConversationBeforeVerification,
+        ProviderRefusal,
+        ProviderRefusalWithTargets,
+        ProviderRefusalAfterNativeDrift,
+        ProviderRefusalAfterConversationDrift,
     }
 
     let executable = retained_command();
@@ -1201,6 +1210,10 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         Case::OrderBeforeVerification,
         Case::OrderAfterAnswer,
         Case::ConversationBeforeVerification,
+        Case::ProviderRefusal,
+        Case::ProviderRefusalWithTargets,
+        Case::ProviderRefusalAfterNativeDrift,
+        Case::ProviderRefusalAfterConversationDrift,
     ] {
         fs::write(&path, &bytes)?;
         let events = Arc::new(Mutex::new(vec![]));
@@ -1218,6 +1231,15 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             false,
             events.clone(),
         );
+        let stable_refusal = matches!(
+            case,
+            Case::ProviderRefusal | Case::ProviderRefusalWithTargets
+        );
+        script.answer_refused = stable_refusal
+            || matches!(
+                case,
+                Case::ProviderRefusalAfterNativeDrift | Case::ProviderRefusalAfterConversationDrift
+            );
         let frames = script.frames.clone();
         let path = &path;
         let (result, records) = crate::workflow::ordinary_pdf_receiver_fixture(
@@ -1225,6 +1247,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             page,
             root.clone(),
             executable.clone(),
+            case == Case::ProviderRefusalWithTargets,
             |ledger, order_change| {
                 let ledger = Ledger::new(ledger.store().clone());
                 script.hook = Some(Box::new(move |stage, pending| {
@@ -1233,10 +1256,15 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                             fs::write(path, b"changed before answer handoff").unwrap();
                         }
                         (Case::OrderBeforeVerification, 1, true)
-                        | (Case::OrderAfterAnswer, 2, false) => {
+                        | (
+                            Case::OrderAfterAnswer | Case::ProviderRefusalAfterNativeDrift,
+                            2,
+                            false,
+                        ) => {
                             fs::write(&order_change, Uuid::new_v4().to_string()).unwrap();
                         }
-                        (Case::ConversationBeforeVerification, 1, true) => {
+                        (Case::ConversationBeforeVerification, 1, true)
+                        | (Case::ProviderRefusalAfterConversationDrift, 2, false) => {
                             let user = ledger
                                 .store()
                                 .snapshot_heads_matching(
@@ -1276,6 +1304,61 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                 }));
                 script
             },
+            |ledger, records| {
+                let failures = records
+                    .iter()
+                    .filter_map(|record| match record {
+                        Record::OutcomeFact(fact)
+                            if fact.reason == AttemptReason::ProviderFailure =>
+                        {
+                            Some(fact)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if stable_refusal {
+                    let [fact] = failures.as_slice() else {
+                        anyhow::bail!("Expected exactly one provider failure");
+                    };
+                    let description = crate::conversation::feedback::describe_stored(
+                        ledger,
+                        fact.conversation,
+                        fact.id,
+                    )?;
+                    assert_eq!(description.turn, fact.turn);
+                    assert_eq!(description.code, "RMB-RESPONSE-UNAVAILABLE");
+                    assert_eq!(
+                        description.text,
+                        "The response service could not complete this request."
+                    );
+                    let user = records
+                        .iter()
+                        .find_map(|record| match record {
+                            Record::Turn(user) if user.id == fact.turn => Some(user),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(user.outcome, Outcome::Failed);
+                    assert_eq!(user.text.as_deref(), Some(OPT_OUT));
+                    let retained = ledger
+                        .request_evidence(
+                            fact.conversation,
+                            fact.turn,
+                            crate::writer::stage(user.exchange, "reader-pdf-evidence"),
+                        )?
+                        .ok_or_else(|| anyhow::anyhow!("Missing original PDF request evidence"))?;
+                    assert_eq!(retained.record.request_turn, user.id);
+                    assert!(!user.sources.is_empty());
+                    assert!(user.sources.iter().all(|id| retained
+                        .record
+                        .sources
+                        .iter()
+                        .any(|source| source.record == *id)));
+                } else {
+                    assert!(failures.is_empty(), "{case:?}");
+                }
+                Ok(())
+            },
         )?;
         let frames = frames.lock().unwrap();
         let assistants = records
@@ -1290,10 +1373,19 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             case,
             Case::OrderBeforeVerification | Case::ConversationBeforeVerification
         );
-        assert_eq!(records.iter().any(|record| matches!(
-            record, Record::Turn(turn)
-                if turn.outcome == Outcome::Interpreted && turn.text.as_deref() == Some(question)
-        )), interpreted, "{case:?}");
+        let question_outcome = if stable_refusal {
+            Outcome::Failed
+        } else {
+            Outcome::Interpreted
+        };
+        assert_eq!(
+            records.iter().any(|record| matches!(
+                record, Record::Turn(turn)
+                    if turn.outcome == question_outcome && turn.text.as_deref() == Some(question)
+            )),
+            interpreted,
+            "{case:?}"
+        );
         assert_eq!(
             records
                 .iter()
@@ -1312,11 +1404,19 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         if !matches!(case, Case::Offline | Case::Required) {
             let error = result.expect_err("Changed request reached publication");
             let cause = format!("{error:#}");
-            if matches!(case, Case::OrderBeforeVerification | Case::OrderAfterAnswer) {
+            if matches!(
+                case,
+                Case::OrderBeforeVerification
+                    | Case::OrderAfterAnswer
+                    | Case::ProviderRefusalAfterNativeDrift
+            ) {
                 assert!(
                     cause.contains("Resident PDF source or page order changed"),
                     "{cause}"
                 );
+            }
+            if stable_refusal {
+                assert!(error.is::<crate::llm::ProviderRefused>(), "{cause}");
             }
             assert!(assistants.is_empty(), "{case:?}");
             continue;

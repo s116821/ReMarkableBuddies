@@ -439,7 +439,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             prepared,
         )?;
         attempt.advance_pdf_evidence(ledger, expected, evidence.root())?;
-        result.answer = {
+        let answer = {
             let workflow = RefCell::new(&mut self.workflow);
             let progress = || {
                 pdf.check_deadline()?;
@@ -467,7 +467,28 @@ impl<M: LLMEngine> Orchestrator<M> {
                 &research,
                 &check,
                 submit,
-            )?
+            )
+        };
+        result.answer = match answer {
+            Ok(answer) => answer,
+            Err(error) if error.is::<crate::llm::ProviderRefused>() => {
+                pdf.check_file()?;
+                require_source_current(&mut self.workflow, pdf.deadline)?;
+                attempt.check_selected()?;
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                pdf.check_deadline()?;
+                attempt.user = evidence.record_provider_failure(
+                    ledger,
+                    crate::writer::stage(attempt.user.exchange, "reader-pdf-provider-failure"),
+                    attempt.user.clone(),
+                    timestamp,
+                )?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
         };
         pdf.check_file()?;
         require_source_current(&mut self.workflow, pdf.deadline)?;

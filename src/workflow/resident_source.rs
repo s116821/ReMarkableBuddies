@@ -1721,6 +1721,16 @@ pub(crate) mod tests {
             })
             .unwrap(),
         );
+        let (workflow, events, receiver) = workflow_with_store(mode, releases, delay, &store);
+        (workflow, store, base, events, receiver)
+    }
+
+    fn workflow_with_store(
+        mode: &'static str,
+        releases: Vec<ReleasedReaderInput>,
+        delay: Duration,
+        store: &Arc<Store>,
+    ) -> (Workflow, Events, UnixDatagram) {
         let events = Rc::new(RefCell::new(vec![]));
         let backend =
             super::super::selected_backend::RefusingBackend::with_resident_releases(releases);
@@ -1738,7 +1748,7 @@ pub(crate) mod tests {
             mode,
             delay,
         });
-        (workflow, store, base, events, receiver)
+        (workflow, events, receiver)
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -2119,11 +2129,31 @@ pub(crate) mod tests {
         page: ConversationId,
         root: PathBuf,
         executable: PathBuf,
+        source_targets: bool,
         model: impl FnOnce(&Ledger, PathBuf) -> M,
+        inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
     ) -> Result<(Result<()>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
-        let (mut workflow, store, base, events, _notify) =
-            workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
+                data: base.join("data"),
+                cache: base.join("cache"),
+                credentials: base.join("credentials"),
+            },
+            "model": "gpt-6.1-terra",
+            "model_credential": "fixture_model_key",
+            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
+            "research_policy": "required"
+        }))?;
+        config.validate_values()?;
+        let store = Arc::new(if source_targets {
+            Store::open_source_target_startup(&config)?
+        } else {
+            Store::open(config.paths.clone())?
+        });
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
         let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
@@ -2142,14 +2172,6 @@ pub(crate) mod tests {
             &store.paths.credentials.join("fixture_model_key"),
             b"PRIVATE_RESEARCH_FIXTURE",
         )?;
-        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-            "paths": store.paths,
-            "model": "gpt-6.1-terra",
-            "model_credential": "fixture_model_key",
-            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
-            "research_policy": "required"
-        }))?;
-        config.validate_values()?;
         let ledger = Ledger::new(store.clone());
         let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
         let mut reader = Orchestrator::new(
@@ -2177,6 +2199,7 @@ pub(crate) mod tests {
             .iter()
             .map(Ledger::decode)
             .collect::<Result<Vec<_>>>()?;
+        inspect(&ledger, &records)?;
         drop((reader, dispatch, ledger, store));
         std::fs::remove_dir_all(base)?;
         Ok((result, records))

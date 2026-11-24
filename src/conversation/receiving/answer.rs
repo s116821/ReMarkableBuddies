@@ -543,7 +543,13 @@ fn answer_with_dispatch(
         admitted
     });
     ensure!(!progress_failed, AnswerRefusal::ProgressFailed);
-    let returned = returned.map_err(|_| AnswerRefusal::EngineFailed)?;
+    let returned = returned.map_err(|error| -> anyhow::Error {
+        if error.is::<crate::llm::ProviderRefused>() {
+            crate::llm::ProviderRefused.into()
+        } else {
+            AnswerRefusal::EngineFailed.into()
+        }
+    })?;
     progress(Progress::AfterResponse).map_err(|_| AnswerRefusal::ProgressFailed)?;
     ensure!(
         returned.len() <= options.max_response_bytes,

@@ -125,6 +125,8 @@ impl PreparedRequestEvidence {
 pub(crate) struct FollowupEvidence {
     capture: Captured,
     root: Uuid,
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    request: Uuid,
 }
 
 pub(crate) struct FollowupRequestHead {
@@ -183,6 +185,44 @@ impl FollowupEvidence {
             .1
             .revision;
         Ok(ExpectedHeads(BTreeSet::from([revision])))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn record_provider_failure(
+        &self,
+        ledger: &Ledger,
+        operation: Uuid,
+        mut user: Turn,
+        timestamp: u64,
+    ) -> Result<Turn> {
+        ensure!(user.id == self.request, "Captured PDF request differs");
+        let (envelope, reference) = self
+            .capture
+            .records
+            .iter()
+            .find(|(_, reference)| {
+                reference.namespace == Namespace::Conversation && reference.record == user.id
+            })
+            .context("Captured PDF user turn absent")?;
+        ensure!(
+            matches!(Ledger::decode(envelope)?, Record::Turn(saved) if saved == user),
+            "Captured PDF user turn differs"
+        );
+        user.outcome = Outcome::Failed;
+        user.updated_ms = timestamp;
+        ledger.advance_with_capture(
+            operation,
+            self.root(),
+            ExpectedHeads(BTreeSet::from([reference.revision])),
+            user.clone(),
+            Some(AttemptReason::ProviderFailure),
+            None,
+            None,
+            Some(&self.capture),
+            None,
+            None,
+        )?;
+        Ok(user)
     }
 
     pub(crate) fn complete(
@@ -629,6 +669,8 @@ impl Ledger {
         let evidence = FollowupEvidence {
             capture: prepared.capture,
             root: written.historical.applied_root_revision,
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            request: prepared.context.request().id,
         };
         evidence.with_current(self, || Ok(()))?;
         Ok((prepared.context, evidence))

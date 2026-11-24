@@ -103,6 +103,15 @@ pub(in crate::workflow) fn once<T>(
     if let Some(error) = refused {
         return Err(error);
     }
+    if result
+        .as_ref()
+        .is_err_and(|error| error.is::<crate::llm::ProviderRefused>())
+    {
+        ensure!(
+            accepted,
+            "Reader follow-up refusal without admitted submission"
+        );
+    }
     let result = result?;
     ensure!(
         accepted,

@@ -1,4 +1,4 @@
-use super::LLMEngine;
+use super::{LLMEngine, ProviderRefused};
 use anyhow::{Context, Result};
 use log::{debug, info};
 use serde_json::json;
@@ -189,8 +189,7 @@ impl OpenAI {
                             .await
                             .map_err(provider_error)?
                             .error_for_status()
-                            .map_err(|error| error.without_url())
-                            .context("Model response status")?;
+                            .map_err(response_status_error)?;
                         // Preserve the previous bounded response behavior, including unknown lengths.
                         const MAX_RESPONSE: usize = 10 * 1024 * 1024;
                         anyhow::ensure!(
@@ -299,6 +298,16 @@ fn provider_error(error: reqwest::Error) -> anyhow::Error {
     }
 }
 
+fn response_status_error(error: reqwest::Error) -> anyhow::Error {
+    if error.status().is_some_and(|status| {
+        status.is_client_error() && status != reqwest::StatusCode::REQUEST_TIMEOUT
+    }) {
+        ProviderRefused.into()
+    } else {
+        anyhow::Error::from(error.without_url()).context("Model response status")
+    }
+}
+
 fn parse_response(body_text: &str) -> Result<String> {
     let json: JsonValue = serde_json::from_str(body_text).context("Decode model response JSON")?;
     info!(
@@ -309,8 +318,15 @@ fn parse_response(body_text: &str) -> Result<String> {
     );
     debug!("Provider response decoded");
 
-    // Extract the response text
-    let response_text = json["choices"][0]["message"]["content"]
+    let message = &json["choices"][0]["message"];
+    if message["content"].is_null()
+        && message["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(ProviderRefused.into());
+    }
+    let response_text = message["content"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No response content found"))?
         .to_string();
@@ -320,7 +336,22 @@ fn parse_response(body_text: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{parse_response, ProviderRefused};
+
+    #[test]
+    fn definite_refusal_is_typed_and_hides_provider_text() {
+        let error = parse_response(
+            r#"{"choices":[{"message":{"content":null,"refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}}]}"#,
+        )
+        .unwrap_err();
+        assert!(error.is::<ProviderRefused>());
+        assert_eq!(
+            format!("{error:#}"),
+            "response service refused this request"
+        );
+        let missing = parse_response(r#"{"choices":[{"message":{"content":null}}]}"#).unwrap_err();
+        assert!(!missing.is::<ProviderRefused>());
+    }
 
     #[test]
     fn response_errors_do_not_panic_or_echo_response_content() {
