@@ -130,7 +130,8 @@ impl OrderedNotebookImages<'_> {
             "notebook images differ from acquisition receipt"
         );
         ensure!(
-            !model_profile.trim().is_empty()
+            !self.document.is_nil()
+                && !model_profile.trim().is_empty()
                 && model_profile.len() <= 128
                 && !model_profile.chars().any(char::is_control),
             "invalid notebook identity"

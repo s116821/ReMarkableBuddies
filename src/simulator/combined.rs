@@ -707,6 +707,22 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     let ready = scope(&ledger, conversation, &source)?;
     let mut model = Model::default();
 
+    let invalid_document = OrderedNotebookImages {
+        document: Uuid::nil(),
+        ..images
+    };
+    let error = invalid_document
+        .normalize(
+            source.page,
+            &invalid_document.image_digest()?,
+            "fixture",
+            &mut model,
+            &mut |_| Ok(()),
+        )
+        .unwrap_err();
+    assert_eq!(error.to_string(), "invalid notebook identity");
+    assert!(model.seen.is_empty());
+
     let edited_png = fixture_png(19)?;
     let substituted = [originals[0], originals[1], (last, edited_png.as_slice())];
     for (wrong, expected) in [
