@@ -37,6 +37,8 @@ struct ReaderTarget {
     document: Uuid,
     page: Uuid,
     normalized: [f64; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<crate::analysis::ReaderSourceSubject>,
 }
 
 pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> {
@@ -299,6 +301,7 @@ pub(crate) fn resolve_with(
                                 document: capture.before.document,
                                 page: capture.before.page,
                                 normalized,
+                                subject: capture.reader_subject.clone(),
                             })
                         }),
                 });

@@ -1780,7 +1780,7 @@ pub(crate) mod tests {
         images: Vec<String>,
         payload_delay: Duration,
         kill_pid: Option<u32>,
-        no_selection: bool,
+        selection_subject: Option<&'static str>,
     }
     impl crate::LLMEngine for Provider {
         fn add_text_content(&mut self, _: &str) {}
@@ -1798,11 +1798,14 @@ pub(crate) mod tests {
             let index = self.calls.get();
             self.calls.set(index + 1);
             self.batches.borrow_mut().push(self.images.clone());
-            if self.no_selection {
+            let Some(subject) = self.selection_subject else {
                 return Ok("NONE".into());
-            }
-            Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
-                else { "TRANSCRIPTION: why?" }.into())
+            };
+            Ok(if index.is_multiple_of(2) {
+                format!("QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: {subject}\n---\nANSWER: Because the model fixture says so.")
+            } else {
+                "TRANSCRIPTION: why?".into()
+            })
         }
     }
     #[test]
@@ -1820,7 +1823,7 @@ pub(crate) mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         reader.run_iteration().unwrap();
@@ -1890,6 +1893,20 @@ pub(crate) mod tests {
     #[cfg(feature = "installed-resident-output")]
     #[test]
     fn installed_reader_reopens_literal_history_with_the_original_overview_target() {
+        assert_installed_reader_subject_history("24 / 6", Some("24 / 6"));
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn installed_reader_keeps_an_uncertain_subject_out_of_history() {
+        assert_installed_reader_subject_history("NONE", None);
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn assert_installed_reader_subject_history(
+        proposed_subject: &'static str,
+        retained_subject: Option<&str>,
+    ) {
         use crate::conversation::{receiving::answer::follow_up, ContextBudget, Role};
 
         #[derive(Default)]
@@ -1925,13 +1942,14 @@ pub(crate) mod tests {
         workflow.resident_source.as_mut().unwrap().selection =
             InstalledReaderSelection::fixture_with_installed_output();
         let batches = Rc::new(RefCell::new(vec![]));
+        let calls = Rc::new(Cell::new(0));
         let provider = Provider {
-            calls: Rc::new(Cell::new(0)),
+            calls: calls.clone(),
             batches: batches.clone(),
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some(proposed_subject),
         };
         let paths = store.paths.clone();
         let mut reader = Orchestrator::new(workflow, provider, Ledger::new(store.clone()));
@@ -1948,7 +1966,18 @@ pub(crate) mod tests {
         let target = capture.reader_target.unwrap();
         assert!((target[0] - 385.0 / 768.0).abs() < 1e-12);
         assert!((target[1] - 230.0 / 1024.0).abs() < 1e-12);
-        assert_eq!(capture.schema, 2);
+        assert_eq!(
+            capture.schema,
+            if retained_subject.is_some() { 3 } else { 2 }
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            capture
+                .reader_subject
+                .as_ref()
+                .map(crate::analysis::ReaderSourceSubject::as_str),
+            retained_subject
+        );
         drop(reader);
         drop(store);
         let ledger = Ledger::new(Arc::new(Store::open(paths).unwrap()));
@@ -2005,15 +2034,16 @@ pub(crate) mod tests {
         assert_eq!(images[0]["dimensions"], serde_json::json!([768, 1024]));
         assert_eq!(images[0]["source"], serde_json::json!(capture.id));
         assert_eq!(images[0]["sha256"], capture.images[0].media.sha256);
-        assert_eq!(
-            images[0]["reader_target"],
-            serde_json::json!({
-                "turn": question.id,
-                "document": capture.before.document,
-                "page": capture.before.page,
-                "normalized": target,
-            })
-        );
+        let mut expected_target = serde_json::json!({
+            "turn": question.id,
+            "document": capture.before.document,
+            "page": capture.before.page,
+            "normalized": target,
+        });
+        if let Some(subject) = retained_subject {
+            expected_target["subject"] = serde_json::json!(subject);
+        }
+        assert_eq!(images[0]["reader_target"], expected_target);
         assert!(images[1..]
             .iter()
             .all(|image| image.get("reader_target").is_none()));
@@ -2139,7 +2169,7 @@ pub(crate) mod tests {
                 images: vec![],
                 payload_delay: Duration::ZERO,
                 kill_pid: None,
-                no_selection: false,
+                selection_subject: Some("24 / 6"),
             };
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -2368,7 +2398,7 @@ pub(crate) mod tests {
                 images: vec![],
                 payload_delay: Duration::ZERO,
                 kill_pid: None,
-                no_selection: true,
+                selection_subject: None,
             };
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -2463,7 +2493,7 @@ pub(crate) mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: true,
+            selection_subject: None,
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
 
@@ -2701,7 +2731,7 @@ pub(crate) mod tests {
             images: vec![],
             payload_delay: Duration::from_millis(1500),
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         let error = reader.run_iteration().unwrap_err();
@@ -2791,7 +2821,7 @@ pub(crate) mod tests {
                         images: vec![],
                         payload_delay: Duration::ZERO,
                         kill_pid: Some(pid),
-                        no_selection: false,
+                        selection_subject: Some("24 / 6"),
                     };
                     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
                     reader.set_trigger_enabled(false); // The real release was already consumed above.
@@ -2834,7 +2864,7 @@ pub(crate) mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         assert!(reader.run_iteration().is_err());

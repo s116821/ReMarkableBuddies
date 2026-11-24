@@ -3,7 +3,9 @@ use log::{debug, error, info};
 
 use super::reader_attempt::Attempt;
 use super::{indicator::Failure, AnswerPageType, ReturnOutcome, Workflow};
-use crate::analysis::{BoundingBox, SelectionCenter};
+use crate::analysis::{
+    BoundingBox, ReaderSelection, ReaderSourceSubject, ReaderSubject, SelectionCenter,
+};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -57,12 +59,22 @@ pub const ANALYSIS_PROMPT: &str = "Read the handwritten question on this tablet 
 
 const MARKED_QUESTION_PROMPT: &str = "For this handwritten source request, add exactly one header field HANDWRITTEN_QUESTION_MARK: present, absent, or unclear. Use present only when a visible handwritten question mark belongs to the same fragment in QUESTION, anywhere within that fragment. Keep its written text, punctuation, and shorthand, and give one tight QUESTION_BOX for the fragment in the overview. Ignore printed question marks and marks in other writing. If you can read a marked fragment and localize it but cannot answer, retain QUESTION and QUESTION_BOX with the mark field and write ANSWER: NONE after the separator. For all other cases follow the original answer instructions.";
 
-/// Result from LLM analysis containing question, answer, question bounds and selected-content center
+const SOURCE_SUBJECT_FIELD: &str = "SELECTION_SUBJECT:";
+
+const SOURCE_SUBJECT_PROMPT: &str = "For this request, include one additional header line \
+    before the --- separator: SELECTION_SUBJECT: [short description of the marked source]. \
+    Name the selected content using only what is visibly supported by the images. \
+    Describe the selected subject, not the handwritten question or the answer. \
+    Use a single short phrase in plain ASCII, at most 120 characters. \
+    If you cannot name the selected subject reliably, write SELECTION_SUBJECT: NONE. Keep the original \
+    whole-response NONE rules for an absent or ambiguous question or selection.";
+
+/// Reader proposal before independent question verification.
 struct AnalysisResult {
     question: String,
     answer: String,
     _question_box: Option<BoundingBox>,
-    selection_center: SelectionCenter,
+    selection: ReaderSelection,
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
     target: Option<crate::conversation::target::Candidate>,
     about: Option<String>,
@@ -643,9 +655,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                let installed_center = (self.workflow.uses_installed_reader_history()
+                let installed_selection = (self.workflow.uses_installed_reader_history()
                     && attempt.resident_output())
-                .then_some(result.selection_center);
+                .then_some(&result.selection);
                 let mut fresh =
                     if let Some(marked) = marked.filter(|marked| marked.text == result.question) {
                         self.workflow.check_request_progress()?;
@@ -654,14 +666,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                             &result.question,
                             marked.region,
                             result.target.as_ref(),
-                            installed_center,
+                            installed_selection,
                         )?
                     } else {
                         attempt.interpret_source_target(
                             &self.ledger,
                             &result.question,
                             result.target.as_ref(),
-                            installed_center,
+                            installed_selection,
                         )?;
                         None
                     };
@@ -770,7 +782,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn compose_result(result: &AnalysisResult) -> String {
-        let body = Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+        let body = Workflow::compose_qa(&result.question, &result.answer, result.selection.center);
         Workflow::with_source_description(body, result.about.as_deref())
     }
 
@@ -816,12 +828,12 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        let stored_answer =
-            if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
-                result.answer.clone()
-            } else {
-                Self::compose_result(result)
-            };
+        let installed = self.workflow.uses_installed_reader_history() && attempt.resident_output();
+        let stored_answer = if installed {
+            result.answer.clone()
+        } else {
+            Self::compose_result(result)
+        };
         attempt.generated_with_memory(&self.ledger, stored_answer, memory)?;
         if attempt.is_selected() {
             if attempt.selected_resident() {
@@ -840,11 +852,23 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
+            use super::resident_output::ReaderAbout;
             let text = super::resident_output::ResidentOutputText::Reader {
                 question: &result.question,
                 answer: &result.answer,
-                center: result.selection_center,
-                about: result.about.as_deref(),
+                center: result.selection.center,
+                about: result
+                    .about
+                    .as_deref()
+                    .map(ReaderAbout::PreparedLine)
+                    .or_else(|| {
+                        result
+                            .selection
+                            .subject
+                            .as_ref()
+                            .filter(|_| installed)
+                            .map(ReaderAbout::Subject)
+                    }),
             };
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
@@ -1001,17 +1025,20 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
+        let prompt = if self.workflow.uses_installed_reader_history()
+            && attempt.resident_output()
+            && !attempt.source_target_enabled()
+        {
+            std::borrow::Cow::Owned(format!("{ANALYSIS_PROMPT}\n\n{SOURCE_SUBJECT_PROMPT}"))
+        } else {
+            std::borrow::Cow::Borrowed(ANALYSIS_PROMPT)
+        };
         let payload = context
             .map(|context| {
                 let targets = std::iter::once(screenshot_base64.to_owned())
                     .chain(details.iter().cloned())
                     .collect::<Vec<_>>();
-                crate::handwriting::runtime::reader_payload(
-                    ANALYSIS_PROMPT,
-                    false,
-                    &targets,
-                    context,
-                )
+                crate::handwriting::runtime::reader_payload(&prompt, false, &targets, context)
             })
             .transpose()?;
         let owned = ModelContent(&mut self.llm);
@@ -1019,7 +1046,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         if let Some(parts) = payload {
             crate::handwriting::runtime::send_parts(owned.0, &parts);
         } else {
-            owned.0.add_text_content(ANALYSIS_PROMPT);
+            owned.0.add_text_content(&prompt);
             owned.0.add_image_content(screenshot_base64);
             for detail in details {
                 owned.0.add_image_content(detail);
@@ -1069,10 +1096,17 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn analysis_separator(response: &str) -> Option<usize> {
-        response.match_indices("---").find_map(|(i, _)| {
-            let before = response[..i].rsplit('\n').next().unwrap_or("");
-            let after = response[i + 3..].split('\n').next().unwrap_or("");
-            (before.trim().is_empty() && after.trim().is_empty()).then_some(i)
+        response.match_indices("---").find_map(|(start, marker)| {
+            let line = response[..start].rsplit('\n').next()?.trim();
+            let rest = &response[start + marker.len()..];
+            let standalone = line.is_empty() && rest.split('\n').next()?.trim().is_empty();
+            // Older responses can attach the boundary to a coordinate header.
+            // A literal marker in the question, target JSON or subject stays in that field.
+            let compact = (line.is_empty()
+                || line.starts_with("QUESTION_BOX:")
+                || line.starts_with("SELECTION_CENTER:"))
+                && rest.trim_start().starts_with("ANSWER:");
+            (standalone || compact).then_some(start)
         })
     }
 
@@ -1162,6 +1196,23 @@ impl<M: LLMEngine> Orchestrator<M> {
             SCREENSHOT_VIRTUAL_HEIGHT,
         )?;
 
+        let mut subjects = header
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(SOURCE_SUBJECT_FIELD));
+        let subject = subjects
+            .next()
+            .map(str::trim)
+            .filter(|text| subjects.next().is_none() && !text.eq_ignore_ascii_case(&question_text))
+            .and_then(|text| {
+                if text.eq_ignore_ascii_case("NONE") {
+                    Some(ReaderSubject::Uncertain)
+                } else {
+                    ReaderSourceSubject::try_from(text.to_owned())
+                        .ok()
+                        .map(ReaderSubject::Recognized)
+                }
+            });
+
         debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
         debug!("Selected-content center: {}", selection_center);
@@ -1170,7 +1221,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             question: question_text,
             answer: answer_text.to_string(),
             _question_box: question_box,
-            selection_center,
+            selection: ReaderSelection {
+                center: selection_center,
+                subject,
+            },
             _screenshot_data: screenshot_png_data,
             target: {
                 let mut fields = header
@@ -1590,7 +1644,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::Orchestrator;
+    use super::{Orchestrator, ReaderSubject};
     use crate::OpenAI;
 
     #[test]
@@ -1698,7 +1752,73 @@ mod tests {
         assert_eq!(result.question, "G unc.?");
         assert!(result.answer.ends_with("---\nExtra answer line."));
         assert!(result._question_box.is_some());
-        assert_eq!(result.selection_center.to_string(), "(0.5, 0.5)");
+        assert_eq!(result.selection.center.to_string(), "(0.5, 0.5)");
+    }
+
+    #[test]
+    fn source_subject_stays_separate_from_question_and_answer() {
+        let first = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let parse = |field| {
+            let response = format!("{first}\n{field}\n---\nANSWER: The result is 4.");
+            Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap()
+        };
+        let result = parse("SELECTION_SUBJECT: 24 / 6");
+        assert_eq!(result.question, "why?");
+        assert_eq!(result.answer, "The result is 4.");
+        assert_eq!(
+            result.selection.recognized_subject().unwrap().as_str(),
+            "24 / 6"
+        );
+        let uncertain = parse("SELECTION_SUBJECT: NONE");
+        assert!(matches!(
+            uncertain.selection.subject.as_ref(),
+            Some(ReaderSubject::Uncertain)
+        ));
+        assert!(uncertain.selection.recognized_subject().is_none());
+        assert_eq!(uncertain.question, "why?");
+        assert_eq!(uncertain.answer, "The result is 4.");
+        for invalid in [
+            "",
+            "SELECTION_SUBJECT: Why?",
+            "SELECTION_SUBJECT: 24 / 6\nSELECTION_SUBJECT: NONE",
+            "SELECTION_SUBJECT: 24\u{2028}/ 6",
+        ] {
+            let result = parse(invalid);
+            assert!(result.selection.subject.is_none(), "{invalid:?}");
+            assert_eq!(result.question, "why?");
+            assert_eq!(result.answer, "The result is 4.");
+        }
+        assert!(parse(&format!("SELECTION_SUBJECT: {}", "x".repeat(161)))
+            .selection
+            .subject
+            .is_none());
+    }
+
+    #[test]
+    fn reader_keeps_literal_markers_in_the_subject_and_answer() {
+        let header = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let answer = "Keep --- and\n---\nANSWER: literal text.";
+        for (field, subject) in [
+            ("", None),
+            ("\nSELECTION_SUBJECT: A---B\n", Some("A---B")),
+            (
+                "\r\nSELECTION_SUBJECT: A---ANSWER: B\r\n",
+                Some("A---ANSWER: B"),
+            ),
+        ] {
+            let response = format!("{header}{field}---\nANSWER: {answer}");
+            let result =
+                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            assert_eq!(result.question, "why?");
+            assert_eq!(result.answer, answer);
+            assert_eq!(
+                result
+                    .selection
+                    .recognized_subject()
+                    .map(|subject| subject.as_str()),
+                subject
+            );
+        }
     }
 
     #[test]

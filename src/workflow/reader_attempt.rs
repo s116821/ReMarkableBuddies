@@ -689,7 +689,7 @@ impl Attempt {
         ledger: &Ledger,
         text: &str,
         candidate: Option<&crate::conversation::target::Candidate>,
-        installed_center: Option<crate::analysis::SelectionCenter>,
+        installed_selection: Option<&crate::analysis::ReaderSelection>,
     ) -> Result<()> {
         let unresolved = unresolved_target();
         let candidate = candidate.unwrap_or(&unresolved);
@@ -698,7 +698,7 @@ impl Attempt {
             return Ok(());
         }
         let Some(frame) = self.target_frame.as_mut() else {
-            return self.interpret_with_selection(ledger, text, installed_center);
+            return self.interpret_with_selection(ledger, text, installed_selection);
         };
         let mut user = self.user.clone();
         user.text = Some(text.into());
@@ -710,7 +710,7 @@ impl Attempt {
             user.clone(),
             frame,
             candidate,
-            installed_center,
+            installed_selection.map(|selection| selection.center),
         )?;
         self.user = user;
         Ok(())
@@ -722,7 +722,7 @@ impl Attempt {
         text: &str,
         region: [i32; 4],
         candidate: Option<&crate::conversation::target::Candidate>,
-        installed_center: Option<crate::analysis::SelectionCenter>,
+        installed_selection: Option<&crate::analysis::ReaderSelection>,
     ) -> Result<Option<marked_question::FreshMarkedQuestion>> {
         anyhow::ensure!(!self.is_selected(), "marked question is ordinary only");
         // Only the modeled SDK batch currently supplies the exact capture
@@ -730,7 +730,7 @@ impl Attempt {
         // association until the installed capture owner supplies these facts.
         let Some(captured) = self.marked_capture.as_ref() else {
             log::debug!("Marked question has no admitted full-frame source association");
-            self.interpret_source_target(ledger, text, candidate, installed_center)?;
+            self.interpret_source_target(ledger, text, candidate, installed_selection)?;
             return Ok(None);
         };
         let (envelope, _) = captured
@@ -748,7 +748,7 @@ impl Attempt {
                 || !overview.full_frame_of(&capture.facts.native_parent)
         }) {
             log::debug!("Marked question overview does not match the full-page coordinate frame");
-            self.interpret_source_target(ledger, text, candidate, installed_center)?;
+            self.interpret_source_target(ledger, text, candidate, installed_selection)?;
             return Ok(None);
         }
         let source = crate::conversation::marked_question::modeled_source(&capture.facts);
@@ -829,7 +829,7 @@ impl Attempt {
         &mut self,
         ledger: &Ledger,
         text: &str,
-        target: Option<crate::analysis::SelectionCenter>,
+        target: Option<&crate::analysis::ReaderSelection>,
     ) -> Result<()> {
         if let Some(selected) = &mut self.selected {
             anyhow::ensure!(

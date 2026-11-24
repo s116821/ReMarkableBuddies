@@ -380,7 +380,22 @@ impl Ledger {
         installed_center: Option<crate::analysis::SelectionCenter>,
     ) -> Result<WriteResult> {
         let capture_id = frame.source.record.record;
-        let resident_target = installed_center.map(|center| (capture_id, center.normalized()));
+        let selection = installed_center.map(|center| {
+            let subject = if matches!(candidate.understanding, Understanding::Interpreted)
+                && turn
+                    .text
+                    .as_ref()
+                    .is_some_and(|question| !candidate.subject.eq_ignore_ascii_case(question))
+            {
+                crate::analysis::ReaderSourceSubject::try_from(candidate.subject.clone())
+                    .ok()
+                    .map(crate::analysis::ReaderSubject::Recognized)
+            } else {
+                None
+            };
+            crate::analysis::ReaderSelection { center, subject }
+        });
+        let resident_target = selection.as_ref().map(|selection| (capture_id, selection));
         let mut published = Vec::new();
         let (result, _) = self.advance_with_capture(
             operation,
@@ -735,6 +750,38 @@ pub(crate) mod tests {
     }
     #[test]
     fn installed_reader_saves_its_center_and_source_target_together() {
+        check_installed_source_target(
+            Candidate {
+                subject: "circled expression".into(),
+                geometry: None,
+                understanding: Understanding::Uncertain {
+                    reason: "outline ambiguous".into(),
+                },
+            },
+            None,
+        );
+    }
+
+    #[test]
+    fn installed_overview_keeps_the_recognized_subject_from_its_geometry_record() {
+        check_installed_source_target(
+            Candidate {
+                subject: "24 / 6".into(),
+                geometry: Some(geometry::Geometry {
+                    components: vec![vec![
+                        [0, 0],
+                        [1_000_000, 0],
+                        [1_000_000, 1_000_000],
+                        [0, 1_000_000],
+                    ]],
+                }),
+                understanding: Understanding::Interpreted,
+            },
+            Some("24 / 6"),
+        );
+    }
+
+    fn check_installed_source_target(candidate: Candidate, expected_subject: Option<&str>) {
         let (_fixture, ledger, _, _) = fixture();
         let conversation = Uuid::new_v4();
         ledger.create(conversation, Uuid::new_v4(), 1).unwrap();
@@ -763,13 +810,6 @@ pub(crate) mod tests {
             .expected(Namespace::Conversation, request.id)
             .unwrap();
         let operation = Uuid::new_v4();
-        let candidate = Candidate {
-            subject: "circled expression".into(),
-            geometry: None,
-            understanding: Understanding::Uncertain {
-                reason: "outline ambiguous".into(),
-            },
-        };
         let center =
             crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
         let write = |frame: &mut SourceFrame| {
@@ -822,6 +862,7 @@ pub(crate) mod tests {
             panic!("expected one saved source target");
         };
         assert_eq!(&target.target.source, frame.source());
+        assert_eq!(target.target.candidate, candidate);
         ledger
             .stored_target_frame(conversation, &target.reference)
             .unwrap();
@@ -835,6 +876,12 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(centers.len(), 1);
         assert_eq!(centers[0]["source"], id.to_string());
+        assert_eq!(
+            centers[0]["reader_target"]
+                .get("subject")
+                .and_then(|value| value.as_str()),
+            expected_subject
+        );
         assert_eq!(
             centers[0]["reader_target"]["normalized"],
             serde_json::json!([0.5, 0.25])

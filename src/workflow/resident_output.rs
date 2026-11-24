@@ -51,13 +51,19 @@ pub enum SelectedConversationRequest {
     },
 }
 
+pub enum ReaderAbout<'a> {
+    /// The complete About line from the validated source-target record.
+    PreparedLine(&'a str),
+    Subject(&'a crate::analysis::ReaderSubject),
+}
+
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
     Reader {
         question: &'a str,
         answer: &'a str,
         center: crate::analysis::SelectionCenter,
-        about: Option<&'a str>,
+        about: Option<ReaderAbout<'a>>,
     },
 }
 
@@ -169,6 +175,10 @@ pub trait ResidentRenderer {
                 center,
                 about,
             } => {
+                let about = match about {
+                    Some(ReaderAbout::PreparedLine(line)) => Some(line),
+                    _ => None,
+                };
                 let body = super::Workflow::compose_qa(question, answer, center);
                 self.render(
                     &super::Workflow::with_source_description(body, about),
