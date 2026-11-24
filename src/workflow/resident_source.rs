@@ -441,10 +441,11 @@ impl ResidentSourceOwner {
                 _ => WriterAtRelease::Unobserved,
             };
             return Ok(reader
-                || config.is_some_and(|settings| {
-                    super::conversation_dispatch::RuntimeRoute::for_config(settings)
-                        == super::conversation_dispatch::RuntimeRoute::OrdinaryLocal
-                })
+                || (cfg!(feature = "installed-resident-output")
+                    && config.is_some_and(|settings| {
+                        super::conversation_dispatch::RuntimeRoute::for_config(settings)
+                            == super::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+                    }))
                 || matches!(
                     self.writer_at_release,
                     WriterAtRelease::Refinement(_) | WriterAtRelease::Generation(_)
@@ -2766,6 +2767,8 @@ pub(crate) mod tests {
     }
     #[cfg(feature = "installed-resident-output")]
     mod installed_writer_memory;
+    #[cfg(feature = "installed-resident-output")]
+    mod shared_source_submission;
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
@@ -2817,7 +2820,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
-    fn writer_only_idle_ignores_an_unqueued_corner_then_accepts_blank_start() {
+    fn writer_only_can_capture_an_unqueued_corner_then_accepts_blank_start() {
         let releases = vec![
             released(Instant::now()),
             ReleasedReaderInput {
@@ -2825,7 +2828,7 @@ pub(crate) mod tests {
                 ..released(Instant::now())
             },
         ];
-        let (mut workflow, store, base, events, _notify) =
+        let (mut workflow, store, base, _events, _notify) =
             workflow("reconnect-source-handoff", releases, Duration::ZERO);
         workflow.resident_source.as_mut().unwrap().selection =
             InstalledReaderSelection::fixture_with_installed_output();
@@ -2833,8 +2836,14 @@ pub(crate) mod tests {
             "product_settings": { "reader_enabled": false, "writer_enabled": true }
         }))
         .unwrap();
-        assert!(!workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
-        assert!(events.borrow().is_empty());
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(workflow
+            .selected_resident_conversation(&source, true)
+            .unwrap()
+            .is_none());
+        workflow.finish_request().unwrap();
+
         assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
         let source = workflow.acquire_reader_evidence().unwrap();
         assert!(matches!(
@@ -3117,7 +3126,10 @@ pub(crate) mod tests {
     impl ResidentOutputBackend for RecognitionProbe {
         fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
             #[cfg(feature = "installed-resident-output")]
-            if matches!(text, ResidentOutputText::Plain(_)) {
+            if matches!(
+                text,
+                ResidentOutputText::Plain(_) | ResidentOutputText::WriterSourceDraft(_)
+            ) {
                 return Ok(
                     crate::workflow::resident_output::development::fits_test_keyboard(
                         text, new_page,
@@ -3153,7 +3165,12 @@ pub(crate) mod tests {
                 previous.is_none() || (self.successor.is_some() && previous == Some(conversation))
             );
             #[cfg(feature = "installed-resident-output")]
-            if self.writer_preview.is_some() {
+            if self.writer_preview.is_some()
+                && self
+                    .successor
+                    .as_ref()
+                    .is_none_or(|probe| probe.position.exists())
+            {
                 return Ok(PageUse::RelevantBuddy);
             }
             Ok(if self.confirmed_source {

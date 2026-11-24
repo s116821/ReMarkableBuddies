@@ -1,0 +1,204 @@
+use super::*;
+use crate::conversation::{Mode, Role};
+use crate::workflow::{conversation_dispatch::Dispatch, selected_backend::RefusingBackend};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+const NOTE: &str = "Make a note from this page.";
+const QUESTION: &str = "What is this?";
+const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
+const DRAFT: &str = "Page note\n\nThe page records an equation and its result.\n";
+
+struct SubmissionModel {
+    writer: bool,
+    steps: Rc<Cell<usize>>,
+    source: Rc<RefCell<Option<String>>>,
+    images: Vec<String>,
+    text: Vec<String>,
+}
+
+impl crate::LLMEngine for SubmissionModel {
+    fn guarded_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(2))
+    }
+
+    fn execute_with_handoff(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut crate::llm::ModelHandoff<'_>,
+    ) -> Result<String> {
+        progress()?;
+        let mut result = None;
+        handoff(&mut || {
+            result = Some(self.execute());
+            Ok(())
+        })?;
+        result.context("Shared submission never reached the model")?
+    }
+
+    fn add_text_content(&mut self, text: &str) {
+        self.text.push(text.to_owned());
+    }
+
+    fn add_image_content(&mut self, image: &str) {
+        self.images.push(image.to_owned());
+    }
+
+    fn clear_content(&mut self) {
+        self.images.clear();
+        self.text.clear();
+    }
+
+    fn execute(&mut self) -> Result<String> {
+        let step = self.steps.get();
+        self.steps.set(step + 1);
+        match (step, self.writer) {
+            (0, writer) => {
+                let [image] = self.images.as_slice() else {
+                    panic!("expected exactly one original page at intent intake");
+                };
+                assert!(self.text[0].contains("circled or highlighted"));
+                assert!(STANDARD.decode(image)?.starts_with(b"\x89PNG"));
+                *self.source.borrow_mut() = Some(image.clone());
+                if writer {
+                    Ok(
+                        serde_json::json!({"intent":"writer-current-page","request":NOTE})
+                            .to_string(),
+                    )
+                } else {
+                    Ok(r#"{"intent":"reader"}"#.into())
+                }
+            }
+            (1, true) => {
+                assert_eq!(
+                    self.images.as_slice(),
+                    &[self.source.borrow().clone().unwrap()]
+                );
+                Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":PAGE_TEXT}]}).to_string())
+            }
+            (2, true) => {
+                assert!(self.images.is_empty());
+                let input = serde_json::from_str::<serde_json::Value>(self.text.last().unwrap())?;
+                assert_eq!(input["request"], NOTE);
+                assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
+                Ok("# Page note\n\nThe page records an equation and its result.".into())
+            }
+            (1, false) => {
+                assert!(!self.images.is_empty());
+                Ok(format!("QUESTION: {QUESTION}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: 24 / 6\n---\nANSWER: Four."))
+            }
+            (2, false) => Ok(format!("TRANSCRIPTION: {QUESTION}")),
+            _ => panic!("unexpected extra submission or export"),
+        }
+    }
+}
+
+#[test]
+fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
+    for (reader_enabled, writer_request) in [(true, false), (true, true), (false, true)] {
+        let mode = if writer_request {
+            "reconnect-source-handoff-text-refusal"
+        } else {
+            "reconnect-source-handoff"
+        };
+        let (mut workflow, store, base, events, _notify) = workflow(mode, vec![], Duration::ZERO);
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": store.paths.clone(),
+            "product_settings": {
+                "reader_enabled": reader_enabled,
+                "writer_enabled": true
+            }
+        }))?;
+        let native = Fixture::new();
+        let document = ConversationId::new_v4();
+        let page = ConversationId::new_v4();
+        native.declare_source(document, page);
+        let position = native.successor_position();
+        let runtime = native
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .unwrap();
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            writer_slot: None,
+            writer_slot_fault: false,
+            refinement_slot: None,
+        }));
+        let conversation = Rc::new(Cell::new(None));
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let output = RecognitionProbe {
+            conversation: conversation.clone(),
+            confirmed_source: writer_request,
+            successor: writer_request.then(|| SuccessorProbe {
+                position: position.clone(),
+                interrupt_restore: false,
+            }),
+            writer_preview: writer_request.then(|| written.clone()),
+            ..RecognitionProbe::default()
+        };
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(output)),
+        );
+        let ledger = Ledger::new(store.clone());
+        let dispatch =
+            Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+        let steps = Rc::new(Cell::new(0));
+        let source = Rc::new(RefCell::new(None));
+        let model = SubmissionModel {
+            writer: writer_request,
+            steps: steps.clone(),
+            source: source.clone(),
+            images: vec![],
+            text: vec![],
+        };
+
+        assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
+        let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))?;
+        assert_eq!(steps.get(), 3);
+        assert!(!events.borrow().contains(&"current-target-writer-received"));
+        assert!(!events.borrow().contains(&"insert"));
+        let records = ledger.inspect(
+            conversation
+                .get()
+                .context("Placement conversation absent")?,
+            false,
+        )?;
+
+        if writer_request {
+            assert!(position.exists(), "draft must go onto the adjacent page");
+            assert_eq!(written.borrow().as_slice(), &[DRAFT]);
+            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
+                if turn.role == Role::User && turn.mode == Mode::Writer && turn.text.as_deref() == Some(NOTE))));
+            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
+                if turn.role == Role::Assistant && turn.mode == Mode::Writer && turn.outcome == Outcome::Generated)));
+            let evidence = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::ResidentCapture(capture) => Some(capture.id),
+                    _ => None,
+                })
+                .context("Writer source evidence absent")?;
+            let captured = ledger.stored_resident_images(evidence)?;
+            assert_eq!(captured.evidence.before.document, document);
+            assert_eq!(captured.evidence.before.page, page);
+            assert_eq!(
+                source.borrow().as_deref(),
+                Some(STANDARD.encode(captured.original_png).as_str())
+            );
+        } else {
+            assert!(!position.exists());
+            assert!(written.borrow().is_empty());
+            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
+                if turn.role == Role::Assistant && turn.mode == Mode::Reader && turn.text.as_deref() == Some("Four."))));
+        }
+        drop((service, dispatch, ledger, store));
+        std::fs::remove_dir_all(base)?;
+    }
+    Ok(())
+}
