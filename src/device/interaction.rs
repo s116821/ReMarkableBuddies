@@ -381,18 +381,29 @@ mod tests {
         assert_eq!(reducer.frame(&[], ms(2200)), vec![Interaction::Reader]);
         assert!(reducer.frame(&[], ms(2300)).is_empty());
 
-        // A second finger arriving after movement cannot turn that same hold
-        // into either Reader or a stationary two-finger action.
+        // Drift first reported with the second finger still cancels both actions.
         reducer.frame(&[start], ms(3000));
-        reducer.frame(&[settled], ms(3100));
         let second = Contact {
             slot: 1,
             tracking: 2,
             ..settled
         };
-        reducer.frame(&[settled, second], ms(3150));
+        assert_eq!(
+            reducer.frame(&[settled, second], ms(3150)),
+            vec![Interaction::Invalidated]
+        );
         assert!(reducer.frame(&[settled, second], ms(5400)).is_empty());
         assert!(reducer.frame(&[], ms(5500)).is_empty());
+
+        // Keeping the same slot does not let a replacement finger finish the hold.
+        reducer.frame(&[start], ms(6000));
+        reducer.frame(&[settled], ms(6300));
+        let replacement = Contact {
+            tracking: 3,
+            ..settled
+        };
+        reducer.frame(&[replacement], ms(6500));
+        assert!(reducer.frame(&[], ms(8500)).is_empty());
     }
 
     #[test]
