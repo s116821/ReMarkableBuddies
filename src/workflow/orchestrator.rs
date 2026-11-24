@@ -53,11 +53,13 @@ pub const ANALYSIS_PROMPT: &str = "Read the handwritten question on this tablet 
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
+const SOURCE_SUBJECT_FIELD: &str = "SELECTION_SUBJECT:";
+
 const SOURCE_SUBJECT_PROMPT: &str = "For this request, include one additional header line \
     before the --- separator: SELECTION_SUBJECT: [short description of the marked source]. \
     Name the selected content using only what is visibly supported by the images. \
     Describe the selected subject, not the handwritten question or the answer. \
-    Use a single short phrase in plain ASCII, at most 120 characters, without the separator. \
+    Use a single short phrase in plain ASCII, at most 120 characters. \
     If you cannot name the selected subject reliably, write SELECTION_SUBJECT: NONE. Keep the original \
     whole-response NONE rules for an absent or ambiguous question or selection.";
 
@@ -846,7 +848,14 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let (header, body) = response.split_once("---")?;
+        let (header, body) = response
+            .match_indices("---")
+            .map(|(offset, marker)| (&response[..offset], &response[offset + marker.len()..]))
+            .find(|(header, _)| {
+                // The optional subject is literal through the end of its own line.
+                let line = header.rsplit_once('\n').map_or(*header, |(_, line)| line);
+                !line.trim_start().starts_with(SOURCE_SUBJECT_FIELD)
+            })?;
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
         // Extract question text
@@ -880,7 +889,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         let mut subjects = header
             .lines()
-            .filter_map(|line| line.trim().strip_prefix("SELECTION_SUBJECT:"));
+            .filter_map(|line| line.trim().strip_prefix(SOURCE_SUBJECT_FIELD));
         let subject = subjects
             .next()
             .map(str::trim)
@@ -1378,6 +1387,33 @@ mod tests {
             .selection
             .subject
             .is_none());
+    }
+
+    #[test]
+    fn reader_keeps_literal_markers_in_the_subject_and_answer() {
+        let header = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let answer = "Keep --- and\n---\nANSWER: literal text.";
+        for (field, subject) in [
+            ("", None),
+            ("\nSELECTION_SUBJECT: A---B\n", Some("A---B")),
+            (
+                "\r\nSELECTION_SUBJECT: A---ANSWER: B\r\n",
+                Some("A---ANSWER: B"),
+            ),
+        ] {
+            let response = format!("{header}{field}---\nANSWER: {answer}");
+            let result =
+                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            assert_eq!(result.question, "why?");
+            assert_eq!(result.answer, answer);
+            assert_eq!(
+                result
+                    .selection
+                    .recognized_subject()
+                    .map(|subject| subject.as_str()),
+                subject
+            );
+        }
     }
 
     #[test]
