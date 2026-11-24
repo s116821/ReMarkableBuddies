@@ -27,9 +27,16 @@ enum ActivationPhase {
     Protected,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Input busy during read-only resident startup preparation")]
+#[derive(Debug)]
 struct StartupInputBusy;
+
+impl std::fmt::Display for StartupInputBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Input busy during read-only resident startup preparation")
+    }
+}
+
+impl std::error::Error for StartupInputBusy {}
 
 fn activation_input_progress(
     input: &mut RequestInput,
