@@ -13,6 +13,8 @@ use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WI
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod current_page_writer;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod ordinary_pdf;
 #[cfg(target_os = "linux")]
 mod researched;
@@ -309,6 +311,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                     })?;
                     self.run_resident_current_target_writer(request, &capture, dispatch)
                 }
+                #[cfg(feature = "installed-resident-output")]
+                SelectedConversationRequest::WriterCurrentPage { request } => {
+                    let dispatch = local.ok_or_else(|| {
+                        anyhow::anyhow!("current-page Writer requires ordinary local dispatch")
+                    })?;
+                    self.run_resident_current_page_writer(request, &capture, dispatch)
+                }
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
                 }
@@ -565,6 +574,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             association_before.as_ref(),
             produced,
+            false,
         )
     }
 
@@ -615,7 +625,13 @@ impl<M: LLMEngine> Orchestrator<M> {
             report.status == writer::Status::Generated,
             "current-target Writer did not generate a fresh draft"
         );
-        self.present_resident_writer_draft(conversation, capture, Some(&association), produced)
+        self.present_resident_writer_draft(
+            conversation,
+            capture,
+            Some(&association),
+            produced,
+            false,
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -625,8 +641,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         capture: &crate::conversation::ResidentSourceCapture,
         association_before: Option<&crate::conversation::HistoricalPageAssociation>,
         produced: Option<crate::conversation::WriterSelection>,
+        protect_source: bool,
     ) -> Result<()> {
-        use super::resident_output::ResidentOutputOutcome;
+        use super::resident_output::{ResidentOutputOutcome, ResidentOutputText};
         use crate::{storage::Namespace, writer};
 
         let selected =
@@ -654,10 +671,15 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let text = format!("{title}\n\n{body}\n");
         self.workflow.validate_resident_new_page_text(&text)?;
+        let output = if protect_source {
+            ResidentOutputText::WriterSourceDraft(&text)
+        } else {
+            ResidentOutputText::Plain(&text)
+        };
         match self.workflow.render_resident_answer(
             &self.ledger,
             conversation,
-            super::resident_output::ResidentOutputText::Plain(&text),
+            output,
             association.as_ref(),
             &mut || Ok(()),
         )? {

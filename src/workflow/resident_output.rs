@@ -46,6 +46,10 @@ pub enum SelectedConversationRequest {
     /// Ordinary installed receivers cannot consume fresh regional generation.
     UnsupportedRegionalWriter,
     WriterCurrentTarget(crate::writer::target::CurrentRequest),
+    #[cfg(feature = "installed-resident-output")]
+    WriterCurrentPage {
+        request: String,
+    },
     WriterRefinement {
         request: crate::writer::Request,
         require_current_draft: bool,
@@ -83,6 +87,7 @@ pub enum ReaderAbout<'a> {
 
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
+    WriterSourceDraft(&'a str),
     Reader {
         question: &'a str,
         answer: &'a str,
@@ -192,7 +197,9 @@ pub trait ResidentRenderer {
         lease: &mut DevelopmentTargetLease<'_>,
     ) -> Result<()> {
         match text {
-            ResidentOutputText::Plain(text) => self.render(text, lease),
+            ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
+                self.render(text, lease)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,

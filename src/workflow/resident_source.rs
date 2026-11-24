@@ -1080,7 +1080,7 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn captured_page_matches(
+    pub(super) fn captured_page_matches(
         &mut self,
         health: &mut ServiceHealth,
         deadline: Instant,
@@ -1194,6 +1194,7 @@ impl ResidentSourceOwner {
         conversation: crate::storage::Uuid,
         expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
         blank_start_source: bool,
+        protect_source: bool,
         end: Instant,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::PageUse> {
@@ -1209,6 +1210,12 @@ impl ResidentSourceOwner {
             end,
             &mut || admitted_progress(end, || self.progress(health)),
         )?;
+        if protect_source {
+            ensure!(
+                role == super::resident_output::PageUse::ConfirmedNonBuddy,
+                "Writer source page cannot be used for draft placement"
+            );
+        }
         if role == super::resident_output::PageUse::LegacyBuddy {
             admitted_progress(end, || self.progress(health))?;
             before_effect()?;
@@ -1336,6 +1343,10 @@ impl ResidentSourceOwner {
             conversation,
             &original,
             blank_start_source,
+            matches!(
+                text,
+                super::resident_output::ResidentOutputText::WriterSourceDraft(_)
+            ),
             end,
             before_effect,
         )?;
@@ -1370,6 +1381,7 @@ impl ResidentSourceOwner {
                     ledger,
                     conversation,
                     &expected,
+                    false,
                     false,
                     end,
                     before_effect,
