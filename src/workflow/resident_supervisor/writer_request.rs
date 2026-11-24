@@ -341,16 +341,24 @@ fn caller(activation: uuid::Uuid) -> Result<Lease> {
 }
 pub(crate) fn peek(activation: uuid::Uuid) -> Result<Option<RegionalPin>> {
     let lease = caller(activation)?;
-    let Some(pending) = read(&lease, &name(&lease))? else {
+    peek_locked(&lease)
+}
+
+fn peek_locked(lease: &Lease) -> Result<Option<RegionalPin>> {
+    let name = name(lease);
+    let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
-    ensure!(
-        !matches!(
-            pending.submission,
-            Submission::GenerateCurrentTargetOnTablet { .. }
-        ),
-        "current-target Writer requires the ordinary receiver"
-    );
+    if matches!(
+        pending.submission,
+        Submission::GenerateCurrentTargetOnTablet { .. }
+    ) {
+        if boot_seconds()? >= pending.expires {
+            discard_locked(lease, &name)?;
+        }
+        lease.current()?;
+        anyhow::bail!("current-target Writer requires the ordinary receiver");
+    }
     if !matches!(
         pending.submission,
         Submission::GenerateRegionOnTablet { .. }
@@ -364,7 +372,7 @@ pub(crate) fn peek(activation: uuid::Uuid) -> Result<Option<RegionalPin>> {
         anyhow::bail!("regional Writer intent changed")
     };
     Ok(Some(RegionalPin {
-        activation,
+        activation: lease.record().activation(),
         digest,
         request,
         #[cfg(test)]
@@ -561,9 +569,6 @@ pub(crate) struct FixtureSlot {
 #[cfg(test)]
 impl FixtureSlot {
     pub(crate) fn new(request: RegionalRequest) -> Self {
-        let fixture = super::tests::Fixture::new();
-        let path = fixture.lease_dir();
-        let lease = Lease::publish_inner(&path, fixture.record()).unwrap();
         let submission = Submission::GenerateRegionOnTablet {
             document: request.document,
             page: request.page,
@@ -571,6 +576,24 @@ impl FixtureSlot {
             request: request.request.clone(),
             guidance: request.guidance.clone(),
         };
+        Self::with_submission(request, submission)
+    }
+
+    pub(crate) fn current_target(request: RegionalRequest) -> Self {
+        let submission = Submission::GenerateCurrentTargetOnTablet {
+            document: request.document,
+            page: request.page,
+            operation: request.operation,
+            request: request.request.clone(),
+            guidance: request.guidance.clone(),
+        };
+        Self::with_submission(request, submission)
+    }
+
+    fn with_submission(request: RegionalRequest, submission: Submission) -> Self {
+        let fixture = super::tests::Fixture::new();
+        let path = fixture.lease_dir();
+        let lease = Lease::publish_inner(&path, fixture.record()).unwrap();
         files::atomic_json(
             &path.join(name(&lease)),
             &Pending {
@@ -592,6 +615,16 @@ impl FixtureSlot {
             pin,
         }
     }
+    pub(crate) fn take_on_page(
+        &self,
+        document: Uuid,
+        page: Uuid,
+    ) -> Result<Option<InstalledRequest>> {
+        let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap())?;
+        lock(&lease)?;
+        take_locked(&lease, document, page)
+    }
+
     pub(crate) fn pending(&self) -> bool {
         let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap()).unwrap();
         read(&lease, &name(&lease)).unwrap().is_some()
@@ -693,9 +726,7 @@ mod tests {
         document: Uuid,
         page: Uuid,
     ) -> Result<Option<InstalledRequest>> {
-        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
-        lock(&lease)?;
-        take_locked(&lease, document, page)
+        slot.take_on_page(document, page)
     }
     fn expire(slot: &FixtureSlot) {
         let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
@@ -708,33 +739,13 @@ mod tests {
     fn ordinary_current_target_requires_matching_live_page_and_consumes_once() {
         let request = request();
         for expired in [false, true] {
-            let slot = FixtureSlot::new(request.clone());
-            let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
-            let path = lease.path.join(name(&lease));
-            let submission = Submission::GenerateCurrentTargetOnTablet {
-                document: request.document,
-                page: request.page,
-                operation: request.operation,
-                request: request.request.clone(),
-                guidance: request.guidance.clone(),
-            };
-            files::atomic_json(
-                &path,
-                &Pending {
-                    submission,
-                    expires: if expired {
-                        0
-                    } else {
-                        boot_seconds().unwrap() + LIFETIME_SECS
-                    },
-                    digest: String::new(),
-                },
-            )
-            .unwrap();
-            drop(lease);
+            let slot = FixtureSlot::current_target(request.clone());
             if expired {
+                expire(&slot);
                 assert!(ordinary(&slot, request.document, request.page).is_err());
             } else {
+                let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+                let path = lease.path.join(name(&lease));
                 let exact = fs::read(&path).unwrap();
                 assert!(ordinary(&slot, request.document, Uuid::new_v4()).is_err());
                 assert_eq!(fs::read(&path).unwrap(), exact);
@@ -747,6 +758,32 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn selected_peek_preserves_live_wrong_mode_and_retires_expired_before_next_release() {
+        let slot = FixtureSlot::current_target(request());
+        let peek = || {
+            let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
+            lock(&lease)?;
+            peek_locked(&lease)
+        };
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
+        let path = lease.path.join(name(&lease));
+        let original = fs::read(&path).unwrap();
+        assert!(peek().is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        expire(&slot);
+        assert!(
+            peek().is_err(),
+            "the release observing expiry must still refuse"
+        );
+        assert!(!path.exists());
+        assert!(
+            peek().unwrap().is_none(),
+            "the next release can select Reader"
+        );
     }
 
     #[test]
