@@ -1,5 +1,15 @@
 # ReMarkableBuddies
 
+ReMarkableBuddies (Buddy) is one reMarkable tablet app with two workflows.
+Reader answers handwritten questions about circled or highlighted content.
+Writer generates and refines note drafts from source text in a conversation.
+[Writer draft commands](docs/reference/writer-drafts.md)
+
+The Vellum package is named `remarkable-buddies`. The executable and systemd
+service keep their original names, `reader-buddy` and `reader-buddy.service`.
+ReMarkableBuddies Manager runs in a browser or as an Electron desktop app and
+has its own releases. [Manager repository](https://github.com/s116821/ReMarkableBuddiesManager)
+
 See [application documentation](docs/README.md) for development, technical, release
 and fixture guides.
 
@@ -8,16 +18,8 @@ all OpenSpec specs, active changes, archives, config and workflow skills.
 Start with its [contributor guide](https://github.com/s116821/RemarkableBuddiesDocs/blob/main/CONTRIBUTING.md)
 and [central specs](https://github.com/s116821/RemarkableBuddiesDocs/tree/main/openspec/specs).
 Legacy `openspec/...` references in component guides resolve there after migration.
-The [Angular browser/Electron companion](https://github.com/s116821/RemarkableBuddiesManager)
-has independent releases; this repository remains the unified Reader/Writer Rust app.
 
-
-This repository currently contains Reader Buddy. The Rust package, `reader-buddy`
-executable, service, and release archive names retain their existing names.
-
-An AI-powered reading assistant for the reMarkable tablet that watches for outlined or highlighted content and handwritten questions, then provides answers directly on your device using ChatGPT.
-
-## Features
+## Reader features
 
 - **Selected Content Detection**: Recognizes deliberate highlights or closed outlines (circles, rectangles, or other closed shapes)
 - **Question Extraction**: Uses vision AI to read your handwritten question near the selected content
@@ -25,7 +27,7 @@ An AI-powered reading assistant for the reMarkable tablet that watches for outli
 - **On-Device Rendering**: Displays question and answer directly on your reMarkable tablet
 - **Answer Page Detection**: Recognizes blank pages or existing answer pages for seamless Q&A flow
 
-## How It Works
+## Using Reader on the tablet
 
 1. **Prepare Answer Page**: With the manual workflow, create a blank page immediately to the **right** of your question page before triggering.
 2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
