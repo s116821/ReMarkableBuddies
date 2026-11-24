@@ -363,7 +363,7 @@ impl MarkedAnswerOutput {
             heads(self.pinned.revisions.root),
             heads(self.pinned.revisions.draft),
             turn,
-            Some(reason),
+            Some(super::AdvanceReason::Ordinary(reason)),
             None,
             None,
             Some(&self.current),

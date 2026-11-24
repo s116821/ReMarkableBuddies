@@ -243,7 +243,9 @@ impl FollowupEvidence {
             self.root(),
             ExpectedHeads(BTreeSet::from([reference.revision])),
             user.clone(),
-            Some(AttemptReason::ProviderFailure),
+            Some(super::AdvanceReason::Ordinary(
+                AttemptReason::ProviderFailure,
+            )),
             None,
             None,
             Some(&self.capture),
