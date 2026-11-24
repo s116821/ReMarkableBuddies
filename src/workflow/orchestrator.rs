@@ -1100,9 +1100,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             let line = response[..start].rsplit('\n').next()?.trim();
             let rest = &response[start + marker.len()..];
             let standalone = line.is_empty() && rest.split('\n').next()?.trim().is_empty();
-            // Older responses can attach the boundary to a coordinate header.
-            // A literal marker in the question, target JSON or subject stays in that field.
+            // Older responses can attach the answer boundary to the final question or coordinate field.
+            // The JSON and subject fields can themselves contain literal "---ANSWER:" text.
             let compact = (line.is_empty()
+                || line.starts_with("QUESTION:")
                 || line.starts_with("QUESTION_BOX:")
                 || line.starts_with("SELECTION_CENTER:"))
                 && rest.trim_start().starts_with("ANSWER:");
@@ -1207,9 +1208,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 if text.eq_ignore_ascii_case("NONE") {
                     Some(ReaderSubject::Uncertain)
                 } else {
-                    ReaderSourceSubject::try_from(text.to_owned())
-                        .ok()
-                        .map(ReaderSubject::Recognized)
+                    ReaderSourceSubject::from_proposal(text).map(ReaderSubject::Recognized)
                 }
             });
 
@@ -1819,6 +1818,14 @@ mod tests {
                 subject
             );
         }
+    }
+
+    #[test]
+    fn compact_answer_can_follow_the_question_as_the_last_header() {
+        let response = "QUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nQUESTION: How much?---ANSWER: Four.";
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).unwrap();
+        assert_eq!(result.question, "How much?");
+        assert_eq!(result.answer, "Four.");
     }
 
     #[test]

@@ -764,21 +764,24 @@ pub(crate) mod tests {
 
     #[test]
     fn installed_overview_keeps_the_recognized_subject_from_its_geometry_record() {
-        check_installed_source_target(
-            Candidate {
-                subject: "24 / 6".into(),
-                geometry: Some(geometry::Geometry {
-                    components: vec![vec![
-                        [0, 0],
-                        [1_000_000, 0],
-                        [1_000_000, 1_000_000],
-                        [0, 1_000_000],
-                    ]],
-                }),
-                understanding: Understanding::Interpreted,
-            },
-            Some("24 / 6"),
-        );
+        let longest_subject = "é".repeat(256);
+        for subject in ["24 / 6", longest_subject.as_str()] {
+            check_installed_source_target(
+                Candidate {
+                    subject: subject.to_owned(),
+                    geometry: Some(geometry::Geometry {
+                        components: vec![vec![
+                            [0, 0],
+                            [1_000_000, 0],
+                            [1_000_000, 1_000_000],
+                            [0, 1_000_000],
+                        ]],
+                    }),
+                    understanding: Understanding::Interpreted,
+                },
+                Some(subject),
+            );
+        }
     }
 
     fn check_installed_source_target(candidate: Candidate, expected_subject: Option<&str>) {

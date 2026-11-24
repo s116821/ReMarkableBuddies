@@ -47,20 +47,29 @@ impl ReaderSourceSubject {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn valid_stored_text(text: &str) -> bool {
+        !text.trim().is_empty() && text.len() <= 512 && !text.chars().any(char::is_control)
+    }
+
+    /// The optional proposal field has a tighter budget than an interpreted geometry target.
+    pub(crate) fn from_proposal(text: &str) -> Option<Self> {
+        if text.len() > 160
+            || text != text.trim()
+            || text.eq_ignore_ascii_case("NONE")
+            || text.chars().any(|ch| matches!(ch, '\u{2028}' | '\u{2029}'))
+        {
+            return None;
+        }
+        Self::try_from(text.to_owned()).ok()
+    }
 }
 
 impl TryFrom<String> for ReaderSourceSubject {
     type Error = &'static str;
 
     fn try_from(text: String) -> Result<Self, Self::Error> {
-        if text.is_empty()
-            || text.len() > 160
-            || text != text.trim()
-            || text.eq_ignore_ascii_case("NONE")
-            || text
-                .chars()
-                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
-        {
+        if !Self::valid_stored_text(&text) {
             return Err("invalid Reader source subject");
         }
         Ok(Self(text))

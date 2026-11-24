@@ -95,9 +95,7 @@ pub(crate) fn parse_candidate(raw: &str) -> Option<Candidate> {
 impl Candidate {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            !self.subject.trim().is_empty()
-                && self.subject.len() <= 512
-                && !self.subject.chars().any(char::is_control),
+            crate::analysis::ReaderSourceSubject::valid_stored_text(&self.subject),
             "invalid target subject"
         );
         if let Some(geometry) = &self.geometry {
