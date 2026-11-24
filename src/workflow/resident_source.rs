@@ -976,7 +976,7 @@ impl ResidentSourceOwner {
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: super::resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::ResidentOutputOutcome> {
@@ -1240,7 +1240,7 @@ impl ResidentSourceOwner {
             end,
             steps: 0,
         };
-        renderer.render(text, &mut lease)?;
+        renderer.render_output(text, &mut lease)?;
         lease.current()?;
         let rendered_target = lease.target.clone();
         let rendered_runtime = lease.runtime.clone();
@@ -1984,7 +1984,9 @@ pub(crate) mod tests {
                     &mut backend,
                     &ledger,
                     next,
-                    "answer for the new conversation",
+                    super::super::resident_output::ResidentOutputText::Plain(
+                        "answer for the new conversation",
+                    ),
                     None,
                     &mut || panic!("unexpected effect callback"),
                 )

@@ -378,7 +378,7 @@ impl Workflow {
         &mut self,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<resident_output::ResidentOutputOutcome> {
@@ -1234,6 +1234,13 @@ impl Workflow {
         center: crate::analysis::SelectionCenter,
     ) -> String {
         format!("<Start of Q-A block for Q @ {center}>\nQ: {question}\n\nA: {answer}\n<End of Q-A block for Q @ {center}>\n")
+    }
+
+    fn with_source_description(body: String, about: Option<&str>) -> String {
+        match about {
+            Some(description) => format!("{description}\n{body}"),
+            None => body,
+        }
     }
 
     /// Save the header pattern for future fast detection
