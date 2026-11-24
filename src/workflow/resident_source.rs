@@ -1405,6 +1405,9 @@ impl ResidentSourceOwner {
                 if association.is_some() {
                     return Ok(Outcome::Unresolved);
                 }
+                if !backend.supports_page_text(text, true)? {
+                    return Ok(Outcome::Unavailable);
+                }
                 ensure!(original.order().len() <= 16, "native insertion order bound");
                 let observed = self.output_observe(health, end)?;
                 exact(&observed, &original)?;
@@ -1619,7 +1622,8 @@ pub(crate) mod tests {
     use crate::workflow::{
         resident_client,
         resident_output::{
-            PageUse, ResidentOutputBackend, ResidentOutputOutcome, ResidentRenderer,
+            PageUse, ResidentOutputBackend, ResidentOutputOutcome, ResidentOutputText,
+            ResidentRenderer,
         },
     };
     use crate::{
@@ -2901,8 +2905,9 @@ pub(crate) mod tests {
     }
     #[derive(Default)]
     struct RecognitionProbe {
-        conversation: Option<ConversationId>,
+        conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
+        refuse_new_reader_text: bool,
         #[cfg(feature = "installed-resident-output")]
         writer_preview: Option<Rc<RefCell<Vec<String>>>>,
     }
@@ -3083,6 +3088,19 @@ pub(crate) mod tests {
     }
 
     impl ResidentOutputBackend for RecognitionProbe {
+        fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
+            #[cfg(feature = "installed-resident-output")]
+            if matches!(text, ResidentOutputText::Plain(_)) {
+                return Ok(
+                    crate::workflow::resident_output::development::fits_test_keyboard(
+                        text, new_page,
+                    ),
+                );
+            }
+            assert!(new_page && matches!(text, ResidentOutputText::Reader { .. }));
+            Ok(!self.refuse_new_reader_text)
+        }
+
         fn admit(
             &mut self,
             _: &RuntimeIdentity,
@@ -3103,7 +3121,7 @@ pub(crate) mod tests {
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
-            assert!(self.conversation.replace(conversation).is_none());
+            assert!(self.conversation.replace(Some(conversation)).is_none());
             #[cfg(feature = "installed-resident-output")]
             if self.writer_preview.is_some() {
                 return Ok(PageUse::RelevantBuddy);
@@ -3155,6 +3173,75 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_places_an_exact_fit_on_a_relevant_page_and_reports_refusal_before_insertion() {
+        use crate::workflow::selected_backend::RefusingBackend;
+
+        let draft = format!("Note\n\n{}\n", "a".repeat(505));
+        assert_eq!(draft.len(), 512);
+        for role in [
+            PageUse::RelevantBuddy,
+            PageUse::ConfirmedNonBuddy,
+            PageUse::Unresolved,
+        ] {
+            let (mut workflow, store, base, events, _notify) = workflow(
+                "reconnect-source-handoff-current-rejected",
+                vec![],
+                Duration::ZERO,
+            );
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.begin(released(Instant::now()), health).unwrap();
+            owner.acquire(health).unwrap();
+            owner.deliver(health).unwrap();
+            let runtime = owner.session.as_ref().unwrap().identity();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-profile"),
+                &runtime,
+            )
+            .unwrap();
+            let ledger = Ledger::new(store.clone());
+            let conversation = ConversationId::new_v4();
+            ledger
+                .create(conversation, ConversationId::new_v4(), 1)
+                .unwrap();
+            let written = Rc::new(RefCell::new(Vec::new()));
+            let probe = RecognitionProbe {
+                confirmed_source: role == PageUse::ConfirmedNonBuddy,
+                writer_preview: (role == PageUse::RelevantBuddy).then(|| written.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                RefusingBackend::with_resident_releases(vec![]).with_test_output(Box::new(probe)),
+            );
+
+            let result = workflow.place_resident_writer_draft(&ledger, conversation, &draft, None);
+            match role {
+                PageUse::RelevantBuddy => {
+                    result.unwrap();
+                    assert_eq!(written.borrow().as_slice(), std::slice::from_ref(&draft));
+                }
+                PageUse::ConfirmedNonBuddy => {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "Writer draft saved. Page output is unavailable."
+                    );
+                }
+                _ => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("placement is unresolved")),
+            }
+            assert!(!events.borrow().contains(&"insert"));
+            assert!(resident_client::attempts(&store).unwrap().is_empty());
+            drop(workflow);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
     #[test]
     fn reader_records_the_original_insertion_reply_on_the_generated_answer() {
         use crate::conversation::{AttemptReason, Role};
@@ -3164,15 +3251,21 @@ pub(crate) mod tests {
         for (mode, reply, outcome, reason) in [
             (
                 "reconnect-source-handoff-current-rejected",
-                Reply::Rejected(Rejection::ExecutorBeforeMutation),
+                Some(Reply::Rejected(Rejection::ExecutorBeforeMutation)),
                 Outcome::Failed,
                 AttemptReason::NoSuccessor,
             ),
             (
                 "reconnect-source-handoff-current-indeterminate",
-                Reply::Indeterminate,
+                Some(Reply::Indeterminate),
                 Outcome::ReconcileRequired,
                 AttemptReason::DeviceUncertain,
+            ),
+            (
+                "reconnect-source-handoff-current-rejected",
+                None,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
             ),
         ] {
             let (mut workflow, store, base, events, _notify) =
@@ -3202,8 +3295,10 @@ pub(crate) mod tests {
             }));
             let source = RecognitionProbe {
                 confirmed_source: true,
+                refuse_new_reader_text: reply.is_none(),
                 ..RecognitionProbe::default()
             };
+            let conversation = source.conversation.clone();
             workflow.device = Box::new(
                 RefusingBackend::with_resident_releases(vec![released(Instant::now())])
                     .with_test_output(Box::new(source)),
@@ -3220,7 +3315,7 @@ pub(crate) mod tests {
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
             let result = reader.run_iteration();
-            if reply == Reply::Indeterminate {
+            if reply == Some(Reply::Indeterminate) {
                 assert!(result.unwrap_err().to_string().contains("Indeterminate"));
             } else {
                 result.unwrap();
@@ -3228,12 +3323,23 @@ pub(crate) mod tests {
             assert_eq!(calls.get(), 2);
             assert_eq!(
                 events.borrow().iter().filter(|e| **e == "insert").count(),
-                1
+                usize::from(reply.is_some())
             );
             let attempts = resident_client::attempts(&store).unwrap();
-            assert_eq!(attempts.len(), 1);
-            assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
-            let records = ledger.inspect(attempts[0].conversation, false).unwrap();
+            let conversation = conversation.get().unwrap();
+            if let Some(reply) = reply {
+                assert_eq!(attempts.len(), 1);
+                assert_eq!(attempts[0].conversation, conversation);
+                assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
+            } else {
+                assert!(attempts.is_empty());
+                assert!(!store
+                    .paths
+                    .data
+                    .join("native-insertion-attempts-v1.json")
+                    .exists());
+            }
+            let records = ledger.inspect(conversation, false).unwrap();
             let answer = records
                 .iter()
                 .find_map(|record| match record {
@@ -3340,11 +3446,11 @@ pub(crate) mod tests {
             // observing the unchanged source on the same owned peer.
             if let Some(bytes) = original_journal {
                 assert_eq!(&*events.borrow(), &["reconnect", "observe"]);
-                assert_eq!(backend.conversation, None);
+                assert_eq!(backend.conversation.get(), None);
                 assert_eq!(std::fs::read(journal).unwrap(), bytes);
             } else {
                 assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
-                assert_eq!(backend.conversation, Some(next));
+                assert_eq!(backend.conversation.get(), Some(next));
                 assert!(!journal.exists());
             }
             assert_eq!(conversation_state(), original_state);

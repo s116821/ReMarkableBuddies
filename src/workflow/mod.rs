@@ -394,11 +394,45 @@ impl Workflow {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn validate_resident_new_page_text(&mut self, text: &str) -> Result<()> {
-        self.device
+    pub(super) fn place_resident_writer_draft(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: &str,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+    ) -> Result<()> {
+        use resident_output::{ResidentOutputOutcome, ResidentOutputText};
+
+        let backend = self
+            .device
             .resident_output_backend()
-            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?
-            .validate_new_page_text(text)
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        let text = ResidentOutputText::Plain(text);
+        anyhow::ensure!(
+            backend.supports_page_text(text, false)?,
+            "Writer draft cannot be typed on the tablet"
+        );
+        match self.render_resident_answer(
+            ledger,
+            conversation,
+            text,
+            association,
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Writer draft submitted to the resident page");
+            }
+            ResidentOutputOutcome::Unavailable => {
+                anyhow::bail!("Writer draft saved. Page output is unavailable.");
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("Writer draft generated, but page insertion was refused");
+            }
+            ResidentOutputOutcome::Unresolved | ResidentOutputOutcome::ReusedWithoutWrite => {
+                anyhow::bail!("Writer draft generated but native placement is unresolved");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
