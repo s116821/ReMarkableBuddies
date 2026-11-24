@@ -300,7 +300,7 @@ fn original_pdf_large_reads_use_cadence_and_still_propagate_cancellation() {
     let mut bytes = SOURCE_BYTES;
     let error = observed
         .pin
-        .pdf
+        .original
         .read(None, &mut reads, &mut bytes, &mut progress)
         .unwrap_err();
     assert!(error.to_string().contains("scripted cadence cancellation"));

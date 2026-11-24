@@ -1,17 +1,14 @@
 use super::*;
-use crate::conversation::Role;
+use crate::{conversation::Role, epub_fixture};
 use anyhow::Context;
 
-#[path = "../../../../../../tests/fixtures/epub.rs"]
-mod publication;
-
 fn book(experiment: &str) -> Vec<u8> {
-    use publication::{package, xhtml, CONTAINER};
+    use epub_fixture::{package, xhtml, CONTAINER};
     let spine = package(
         r#"<item id="e" href="experiment.xhtml" media-type="application/xhtml+xml"/><item id="i" href="intro.xhtml" media-type="application/xhtml+xml"/>"#,
         r#"<itemref idref="i"/><itemref idref="e"/>"#,
     );
-    publication::book(
+    epub_fixture::book(
         CONTAINER,
         &spine,
         &[
