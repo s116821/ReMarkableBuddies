@@ -5,6 +5,8 @@ use crate::storage::{Uuid, MAX_ITEMS};
 use anyhow::{ensure, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const CONVERSATION_TITLE: &str = "ReMarkableBuddies";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresentationIdentity {
     /// Already validated historical binding supplied by the domain owner.
@@ -152,7 +154,7 @@ pub fn plan<'a>(
         conversation,
         document,
         page,
-        title: "ReMarkableBuddies",
+        title: CONVERSATION_TITLE,
         draft,
         header: region(0.0, header_end),
         input: region(header_end, input_end),

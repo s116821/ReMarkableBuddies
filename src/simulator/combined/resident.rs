@@ -63,6 +63,8 @@ pub(super) fn seed(
         original_png: media(&png),
         original_dimensions: [w, h],
         provider_procedure: "reader-nearest-overview-overlapping-strips-v1".into(),
+        reader_target: None,
+        reader_subject: None,
         images: images
             .iter()
             .enumerate()
