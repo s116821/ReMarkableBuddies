@@ -491,6 +491,7 @@ mod tests {
                 operation: envelope.operation_id,
                 outcome: Outcome::ReconcileRequired,
                 attempt: None,
+                capacities: None,
             }))
             .unwrap();
             let pin = pending::pin(&envelope).unwrap();

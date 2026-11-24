@@ -264,10 +264,13 @@ pub struct ExportAssociation {
     /// Schema-two export attempt; absent in unchanged schema-one history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<super::ExportAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacities: Option<super::CapacitiesAttempt>,
 }
 impl ExportAssociation {
     pub fn title_marker(&self) -> String {
-        format!("[RMB:{}]", self.id)
+        let correlation = self.capacities.as_ref().map_or(self.id, |a| a.correlation);
+        format!("[RMB:{correlation}]")
     }
     pub const METADATA_KEY: &'static str = "remarkable_buddies_export_id";
 }

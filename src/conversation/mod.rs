@@ -154,7 +154,11 @@ impl Ledger {
                 }
                 Record::Receipt(receipt) if receipt.admitted_intent.is_some() => INTENT_SCHEMA,
                 Record::OutcomeFact(fact) if fact.settlement.is_some() => INTENT_SCHEMA,
-                Record::Export(export) if export.attempt.is_some() => EXPORT_SCHEMA,
+                Record::Export(export)
+                    if export.attempt.is_some() || export.capacities.is_some() =>
+                {
+                    EXPORT_SCHEMA
+                }
                 Record::Binding(binding) if !binding.receipt.acquisition.is_inserted() => {
                     EXISTING_BINDING_SCHEMA
                 }
@@ -251,10 +255,14 @@ impl Ledger {
                     && envelope.domain_schema_version == TEXT_SOURCE_SCHEMA,
                 "text source schema/shape mismatch"
             );
-        } else if matches!(&record, Record::Export(_)) {
+        } else if let Record::Export(export) = &record {
+            let schema = if export.attempt.is_some() || export.capacities.is_some() {
+                EXPORT_SCHEMA
+            } else {
+                SCHEMA
+            };
             ensure!(
-                (envelope.domain_schema_version == EXPORT_SCHEMA)
-                    == matches!(&record, Record::Export(e) if e.attempt.is_some()),
+                envelope.domain_schema_version == schema,
                 "export schema/shape mismatch"
             );
         } else if envelope.domain_schema_version == INTENT_SCHEMA {
@@ -2009,14 +2017,18 @@ impl Ledger {
                 bail!("invalid export record");
             };
             association.validate_successor(&old)?;
-        } else if association.attempt.is_some() {
+        } else if association.attempt.is_some() || association.capacities.is_some() {
             ensure!(
                 association.outcome == Outcome::Prepared
                     && association.native_note.is_none()
-                    && association
-                        .attempt
+                    && (association.capacities.as_ref().is_some_and(|a| a
+                        .managed
                         .as_ref()
-                        .is_some_and(|a| a.action == ExportAction::Create),
+                        .is_none_or(|m| m.action == ExportAction::Create))
+                        || association
+                            .attempt
+                            .as_ref()
+                            .is_some_and(|a| a.action == ExportAction::Create)),
                 "new export requires fresh prepared create"
             );
         }
@@ -2536,6 +2548,10 @@ impl Ledger {
         let Record::Export(association) = Self::decode(&e)? else {
             bail!("invalid export association");
         };
+        ensure!(
+            association.capacities.is_none(),
+            "Capacities reconciliation requires an exact candidate ID"
+        );
         self.live_root(association.conversation, None)?;
         let mut notes = BTreeSet::new();
         for found in matches {

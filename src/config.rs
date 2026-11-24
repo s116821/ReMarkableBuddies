@@ -1,5 +1,6 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
 pub mod basic;
+pub mod capacities;
 pub mod credential_reference;
 mod initial;
 pub mod inspection;
@@ -96,6 +97,8 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub product_settings: Option<Option<product::ProductConfiguration>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacities_export: Option<capacities::ExportConnection>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub trigger_corner: Option<String>,
@@ -124,6 +127,7 @@ impl Default for Config {
             source_snapshot: None,
             config_schema_version: 1,
             product_settings: None,
+            capacities_export: None,
             model: None,
             base_url: None,
             trigger_corner: None,
@@ -148,17 +152,39 @@ impl Config {
     }
 
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
+        Self::load_document(path)
+    }
+
+    pub(crate) fn load_with_saved_revision(
+        path: Option<PathBuf>,
+    ) -> Result<(Self, Option<SavedRevision>)> {
+        let config = Self::load(path)?;
+        let saved = config.saved_revision();
+        Ok((config, saved))
+    }
+
+    pub(crate) fn saved_revision(&self) -> Option<SavedRevision> {
+        let (path, sha256) = self.source_snapshot.as_ref()?.fingerprint();
+        Some(SavedRevision {
+            path: path.into(),
+            sha256: sha256?.into(),
+        })
+    }
+
+    fn load_document(path: Option<PathBuf>) -> Result<Self> {
         let explicit = path.is_some();
         let path =
             path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into());
-        let (mut config, observed): (Self, Option<Vec<u8>>) = if path.exists() {
+        let (mut config, bytes) = if path.exists() {
             let bytes = files::read(&path, MAX_RECORD as u64)?;
-            (serde_json::from_slice(&bytes)?, Some(bytes))
+            let config = serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
+            (config, Some(bytes))
         } else {
             ensure!(!explicit, "selected configuration is missing");
             (Self::default(), None)
         };
-        config.source_snapshot = Some(SourceSnapshot::observed(path, observed.as_deref()));
+        config.source_snapshot = Some(SourceSnapshot::observed(path, bytes.as_deref()));
         Self::validate(&config)?;
         Ok(config)
     }
@@ -180,6 +206,9 @@ impl Config {
             "unsupported product settings version"
         );
         self.sync.validate()?;
+        if let Some(connection) = &self.capacities_export {
+            connection.validate()?;
+        }
         self.memory.validate()?;
         self.handwriting.validate()?;
         ensure!(
@@ -251,6 +280,21 @@ impl Config {
     /// Pure saved declaration/default capture; no file or runtime lookup.
     pub fn research_policy_snapshot(&self) -> Result<research_settings::ResearchPolicySnapshot> {
         research_settings::ResearchPolicySnapshot::capture(self)
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SavedRevision {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl SavedRevision {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn current(&self) -> bool {
+        files::read(&self.path, MAX_RECORD as u64)
+            .is_ok_and(|bytes| crate::storage::digest(&bytes) == self.sha256)
     }
 }
 
