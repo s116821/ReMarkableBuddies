@@ -458,10 +458,28 @@ impl Ledger {
         &self,
         operation: Uuid,
         expected_root: ExpectedHeads,
-        mut turn: Turn,
+        turn: Turn,
         evidence_id: Uuid,
         capture: &ResidentSourceCapture,
     ) -> Result<PreparedResidentCapture> {
+        self.prepare_resident_historical_with_receipt(
+            operation,
+            expected_root,
+            turn,
+            evidence_id,
+            capture,
+        )
+        .map(|(prepared, _)| prepared)
+    }
+
+    pub(crate) fn prepare_resident_historical_with_receipt(
+        &self,
+        operation: Uuid,
+        expected_root: ExpectedHeads,
+        mut turn: Turn,
+        evidence_id: Uuid,
+        capture: &ResidentSourceCapture,
+    ) -> Result<(PreparedResidentCapture, WriteResult)> {
         ensure!(
             turn.role == Role::User
                 && turn.outcome == Outcome::Prepared
@@ -477,8 +495,8 @@ impl Ledger {
         } = capture.prepare_history(turn.conversation, turn.id, evidence_id)?;
         turn.sources = vec![evidence.id];
         let fingerprint = Self::fingerprint(&("prepare-resident", &turn, &evidence))?;
-        if self.replay(operation, &fingerprint)?.is_some() {
-            return self.stored_resident_images(evidence_id);
+        if let Some(receipt) = self.replay(operation, &fingerprint)? {
+            return Ok((self.stored_resident_images(evidence_id)?, receipt));
         }
         let (root_head, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
         if let Some(binding_id) = root.binding {
@@ -528,8 +546,8 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, root, records, None)?;
-        self.stored_resident_images(evidence_id)
+        let receipt = self.publish(operation, fingerprint, root, records, None)?;
+        Ok((self.stored_resident_images(evidence_id)?, receipt))
     }
     /// Historical byte retrieval only. Parser consistency cannot prove current ownership.
     pub fn stored_resident_images(&self, id: Uuid) -> Result<PreparedResidentCapture> {

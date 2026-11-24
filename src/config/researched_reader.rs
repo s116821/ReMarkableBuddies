@@ -19,6 +19,17 @@ pub(crate) struct OrdinarySearch<'a> {
     pub(crate) fixture_endpoint: &'a str,
 }
 
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+impl<'a> OrdinarySearch<'a> {
+    pub(crate) fn for_installed_pdf(model: &'a str) -> Self {
+        Self {
+            model,
+            #[cfg(test)]
+            fixture_endpoint: "http://127.0.0.1:1/v1/responses",
+        }
+    }
+}
+
 impl OrdinarySearch<'_> {
     pub(crate) fn resolve(&self, config: &Config) -> Result<Resolved> {
         ensure!(
@@ -157,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn local_pdf_opt_in_requires_an_object_and_selected_document() {
+    fn local_pdf_opt_in_requires_an_object_and_allows_ordinary_reader() {
         use crate::reader_runtime::ResearchedPdf;
         for raw in [
             "[]",
@@ -175,7 +186,7 @@ mod tests {
             "absent opt-in must preserve delivered ordinary typed bytes"
         );
         config.reader.researched_pdf = Some(serde_json::from_str("{}").unwrap());
-        assert!(config.validate_values().is_err());
+        assert!(config.validate_values().is_ok());
         let raw = serde_json::json!({"reader":{"researched_pdf":[null]}});
         assert!(serde_json::from_value::<Config>(raw).is_err());
     }

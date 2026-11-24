@@ -695,6 +695,7 @@ impl Ledger {
         expected: ExpectedHeads,
         turn: Turn,
         captured: Option<&mut crate::storage::captured::Captured>,
+        about_user: Option<Uuid>,
     ) -> Result<WriteResult> {
         ensure!(
             self.expected(Namespace::Conversation, Self::receipt_id(operation))?
@@ -703,14 +704,18 @@ impl Ledger {
             "Reader follow-up append is historical"
         );
         let sources: Vec<ImageUse> = vec![];
-        let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
+        let fingerprint = if let Some(user) = about_user {
+            Self::fingerprint(&("append-target-answer-v1", &turn, user))?
+        } else {
+            Self::fingerprint(&("append", &turn, &sources))?
+        };
         self.append_with_capture(
             operation,
             expected,
             turn,
             sources,
             fingerprint,
-            None,
+            about_user,
             captured,
             true,
         )
@@ -1329,6 +1334,30 @@ impl Ledger {
             Some((capture, target)),
         )
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn interpret_captured_pdf(
+        &self,
+        root: ExpectedHeads,
+        user: ExpectedHeads,
+        turn: Turn,
+        capture: Uuid,
+        selection: &crate::analysis::ReaderSelection,
+        prepared: &crate::storage::captured::Captured,
+    ) -> Result<WriteResult> {
+        self.advance_with_capture(
+            Uuid::new_v4(),
+            root,
+            user,
+            turn,
+            None,
+            None,
+            Some((capture, selection)),
+            Some(prepared),
+            None,
+            None,
+        )
+        .map(|(result, _)| result)
+    }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
     pub fn record_attempt_outcome(
         &self,
@@ -1636,7 +1665,7 @@ impl Ledger {
                 root,
                 records,
                 binding,
-                None,
+                captured,
                 published,
                 None,
             )?;

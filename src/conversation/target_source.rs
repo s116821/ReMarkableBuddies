@@ -166,6 +166,18 @@ impl SourceFrame {
             ledger.expected(Namespace::Conversation, TargetState::id(self.conversation))?;
         self.check(ledger)
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn advance_captured_root(
+        &mut self,
+        ledger: &Ledger,
+        previous: &ExpectedHeads,
+        next: ExpectedHeads,
+    ) -> Result<()> {
+        ensure!(&self.root == previous, "target capture root changed");
+        self.root = next;
+        self.check(ledger)
+    }
+
     pub(crate) fn expected_root(&self) -> ExpectedHeads {
         self.root.clone()
     }
@@ -379,6 +391,28 @@ impl Ledger {
         candidate: &Candidate,
         installed_center: Option<crate::analysis::SelectionCenter>,
     ) -> Result<WriteResult> {
+        self.advance_with_captured_source_target(
+            operation,
+            expected_turn,
+            turn,
+            frame,
+            candidate,
+            installed_center,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance_with_captured_source_target(
+        &self,
+        operation: Uuid,
+        expected_turn: ExpectedHeads,
+        turn: Turn,
+        frame: &mut SourceFrame,
+        candidate: &Candidate,
+        installed_center: Option<crate::analysis::SelectionCenter>,
+        captured: Option<&crate::storage::captured::Captured>,
+    ) -> Result<WriteResult> {
         let capture_id = frame.source.record.record;
         let selection = installed_center.map(|center| {
             let subject = if matches!(candidate.understanding, Understanding::Interpreted)
@@ -405,7 +439,7 @@ impl Ledger {
             None,
             Some((frame, candidate)),
             resident_target,
-            None,
+            captured,
             None,
             resident_target.map(|_| &mut published),
         )?;

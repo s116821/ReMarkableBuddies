@@ -36,6 +36,8 @@ pub use resident_source::original_pdf::development_original_pdf;
     feature = "development-input-diagnostics"
 ))]
 pub(crate) use resident_source::tests::fresh_receiver_fixture;
+#[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) use resident_source::tests::ordinary_pdf_receiver_fixture;
 
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;

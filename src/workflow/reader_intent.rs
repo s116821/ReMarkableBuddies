@@ -151,6 +151,15 @@ fn fingerprint(domain: &str, exact: &str) -> Result<String, Refusal> {
 /// bytes are then preserved, never normalized or rewritten by intent agreement.
 /// REQUEST_WEB_JSON must be one complete JSON value on its own header line.
 pub(crate) fn parse_analysis_header(header: &str) -> Result<AnalysisReading, Refusal> {
+    parse_header(header, false)
+}
+
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub(super) fn parse_ordinary_pdf_header(header: &str) -> Result<AnalysisReading, Refusal> {
+    parse_header(header, true)
+}
+
+fn parse_header(header: &str, ordinary_pdf: bool) -> Result<AnalysisReading, Refusal> {
     if header.len() > MAX_HEADER_BYTES {
         return Err(Refusal::TooLarge);
     }
@@ -172,6 +181,7 @@ pub(crate) fn parse_analysis_header(header: &str) -> Result<AnalysisReading, Ref
                 intent = Some(value.strip_prefix(' ').unwrap_or(value));
             }
             "QUESTION_BOX" | "SELECTION_CENTER" | "TARGET_JSON" if auxiliary.insert(name) => {}
+            "SELECTION_SUBJECT" if ordinary_pdf && auxiliary.insert(name) => {}
             _ => return Err(Refusal::Malformed),
         }
     }

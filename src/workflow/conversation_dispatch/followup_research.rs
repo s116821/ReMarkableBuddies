@@ -29,9 +29,13 @@ pub(crate) struct FollowupResearch<'a> {
     operation: Uuid,
     visit: &'a SourceObservation,
     question_sha256: String,
-    directive: ResearchDirective,
-    search: Option<OrdinarySearch<'a>>,
-    deadline: Instant,
+    pub(super) answer: ResearchRequest<'a>,
+}
+
+pub(in crate::workflow) struct ResearchRequest<'a> {
+    pub(in crate::workflow) directive: ResearchDirective,
+    pub(in crate::workflow) search: Option<OrdinarySearch<'a>>,
+    pub(in crate::workflow) deadline: Instant,
 }
 
 impl<'a> FollowupResearch<'a> {
@@ -47,9 +51,11 @@ impl<'a> FollowupResearch<'a> {
             operation: scope.operation,
             visit: &scope.source,
             question_sha256: digest(question.as_bytes()),
-            directive,
-            search,
-            deadline,
+            answer: ResearchRequest {
+                directive,
+                search,
+                deadline,
+            },
         }
     }
 
@@ -61,7 +67,7 @@ impl<'a> FollowupResearch<'a> {
             "Reader research intent does not match the current question"
         );
         ensure!(
-            Instant::now() < self.deadline,
+            Instant::now() < self.answer.deadline,
             "Reader follow-up deadline expired"
         );
         Ok(())
@@ -75,7 +81,7 @@ fn budget() -> CombinedBudget {
     }
 }
 
-fn once<T>(
+pub(in crate::workflow) fn once<T>(
     submit: &impl Fn(&mut dyn FnMut() -> Result<()>) -> Result<()>,
     stage: impl FnOnce(&mut ModelHandoff<'_>) -> Result<T>,
 ) -> Result<T> {
@@ -106,7 +112,7 @@ fn once<T>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn answer(
+pub(in crate::workflow) fn answer(
     ledger: &Ledger,
     engine: &mut dyn LLMEngine,
     context: FrozenRequestContext,
@@ -114,7 +120,7 @@ pub(super) fn answer(
     memory: Option<&LocalMemory>,
     timestamp: u64,
     policy: ResearchPolicy,
-    research: &FollowupResearch<'_>,
+    research: &ResearchRequest<'_>,
     check: &impl Fn() -> Result<()>,
     submit: impl Fn(&mut dyn FnMut() -> Result<()>) -> Result<()>,
 ) -> Result<String> {
@@ -160,12 +166,15 @@ pub(super) fn answer(
                 .context("Reader follow-up research unavailable")?;
             let models = search.resolve(config)?;
             let (model, endpoint, credential) = models.required_search()?;
+            let endpoint = search.endpoint(endpoint);
+            #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
+            let endpoint = crate::workflow::orchestrator::researched_fixture::endpoint(endpoint)?;
             check()?;
             once(&submit, |handoff| {
                 let mut progress = |_| check();
                 let provider = OpenAIWebResearch::new(
                     model.into(),
-                    search.endpoint(endpoint).into(),
+                    endpoint.into(),
                     credential.into(),
                     TransportOptions::default(),
                     &mut progress,

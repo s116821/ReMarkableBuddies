@@ -329,6 +329,76 @@ impl OriginalPdfPin {
     }
 }
 
+/// Holds the named assets' identities across CaptureSource without reading
+/// either file. The PDF can be absent when the current page is a note.
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) struct OrdinaryPdfSource {
+    directory: Directory,
+    table: Asset,
+    pdf: Result<Asset>,
+}
+
+#[cfg(feature = "installed-resident-output")]
+impl OrdinaryPdfSource {
+    pub(super) fn pin(facts: &ReaderFacts) -> Result<Self> {
+        Self::pin_at(Path::new(INSTALLED_ROOT), (0, Some(0)), false, facts)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pin_fixture(root: &Path, facts: &ReaderFacts) -> Result<Self> {
+        Self::pin_at(root, (unsafe { libc::geteuid() }, None), true, facts)
+    }
+
+    fn pin_at(
+        root: &Path,
+        owner: (u32, Option<u32>),
+        allow_fixture_temp: bool,
+        facts: &ReaderFacts,
+    ) -> Result<Self> {
+        let document = facts.page().document;
+        let mut work = METADATA_SAMPLE_WORK;
+        let directory = Directory::open(root, owner, allow_fixture_temp, &mut work)?;
+        let table = Asset::open(
+            &directory,
+            format!("{document}.content"),
+            TABLE_BYTES,
+            &mut work,
+        )?;
+        let pdf = Asset::open(&directory, format!("{document}.pdf"), PDF_BYTES, &mut work);
+        Ok(Self {
+            directory,
+            table,
+            pdf,
+        })
+    }
+
+    pub(super) fn read(
+        self,
+        facts: &ReaderFacts,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Option<ObservedOriginalPdf>> {
+        let mut progress = SourceProgress::new(deadline, progress);
+        progress.boundary()?;
+        let mut work = METADATA_SAMPLE_WORK;
+        let current = self.directory.current(&mut work)?;
+        self.table.current(&current, &mut work)?;
+        ObservedOriginalPdf::read_mapped(
+            self.directory,
+            self.table,
+            |_, work| {
+                let pdf = self.pdf?;
+                pdf.current(&current, work)?;
+                Ok(pdf)
+            },
+            facts,
+            progress,
+            work,
+            crate::device::native_page::ordinary_pdf_mapping,
+        )
+    }
+}
+
 pub struct ObservedOriginalPdf {
     observed: ReaderFacts,
     pin: OriginalPdfPin,
@@ -371,6 +441,30 @@ impl ObservedOriginalPdf {
         acquisition_deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Self> {
+        Self::observe_mapped(
+            root,
+            owner,
+            allow_fixture_temp,
+            observed,
+            admitted_document,
+            acquisition_deadline,
+            progress,
+            |raw, facts| original_pdf_mapping(raw, facts).map(Some),
+        )?
+        .context("Original PDF mapping unavailable")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_mapped(
+        root: &Path,
+        owner: (u32, Option<u32>),
+        allow_fixture_temp: bool,
+        observed: &ReaderFacts,
+        admitted_document: Uuid,
+        acquisition_deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<(u32, u32)>>,
+    ) -> Result<Option<Self>> {
         ensure!(
             !admitted_document.is_nil()
                 && observed.page().document.as_bytes() == admitted_document.as_bytes(),
@@ -387,29 +481,60 @@ impl ObservedOriginalPdf {
             TABLE_BYTES,
             &mut work,
         )?;
-        let pdf = Asset::open(
-            &directory,
-            format!("{admitted_document}.pdf"),
-            PDF_BYTES,
-            &mut work,
+        Self::read_mapped(
+            directory,
+            table,
+            |directory, work| {
+                Asset::open(
+                    directory,
+                    format!("{admitted_document}.pdf"),
+                    PDF_BYTES,
+                    work,
+                )
+            },
+            observed,
+            progress,
+            work,
+            mapping,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_mapped(
+        directory: Directory,
+        table: Asset,
+        pdf: impl FnOnce(&Directory, &mut usize) -> Result<Asset>,
+        observed: &ReaderFacts,
+        mut progress: SourceProgress<'_>,
+        mut work: usize,
+        mapping: impl FnOnce(&[u8], &ReaderFacts) -> Result<Option<(u32, u32)>>,
+    ) -> Result<Option<Self>> {
+        let acquisition_deadline = progress.deadline;
+        let mut reads_left = SOURCE_READS;
+        let mut source_bytes_left = SOURCE_BYTES;
+        let mut raw_table = Vec::with_capacity(table.stamp.size.try_into()?);
+        let table_digest = table.read(
+            Some(&mut raw_table),
+            &mut reads_left,
+            &mut source_bytes_left,
+            &mut progress,
         )?;
+        let Some((pages, redirect)) = mapping(&raw_table, observed)? else {
+            let mut work = METADATA_SAMPLE_WORK;
+            let current = directory.current(&mut work)?;
+            table.current(&current, &mut work)?;
+            progress.boundary()?;
+            return Ok(None);
+        };
+        let pdf = pdf(&directory, &mut work)?;
         let mut pin = OriginalPdfPin {
             directory,
             table,
             pdf,
             samples_left: METADATA_SAMPLES - 1,
-            original_page: 0,
+            original_page: redirect + 1,
             expires: acquisition_deadline,
         };
-        let mut reads_left = SOURCE_READS;
-        let mut source_bytes_left = SOURCE_BYTES;
-        let mut table = Vec::with_capacity(pin.table.stamp.size.try_into()?);
-        let table_digest = pin.table.read(
-            Some(&mut table),
-            &mut reads_left,
-            &mut source_bytes_left,
-            &mut progress,
-        )?;
         let mut bytes = Vec::with_capacity(pin.pdf.stamp.size.try_into()?);
         let pdf_digest = pin.pdf.read(
             Some(&mut bytes),
@@ -418,10 +543,8 @@ impl ObservedOriginalPdf {
             &mut progress,
         )?;
         pin.check(acquisition_deadline)?;
-        let (pages, redirect) = original_pdf_mapping(&table, observed)?;
-        pin.original_page = redirect + 1;
         progress.boundary()?;
-        Ok(Self {
+        Ok(Some(Self {
             observed: observed.clone(),
             pin,
             table_digest,
@@ -431,7 +554,7 @@ impl ObservedOriginalPdf {
             reads_left,
             source_bytes_left,
             acquisition_deadline,
-        })
+        }))
     }
 
     /// Consume the exact captured facts returned by the already checked
@@ -465,6 +588,18 @@ impl ObservedOriginalPdf {
             request_deadline,
             progress,
         )
+    }
+
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    pub(super) fn complete_ordinary_fixture(
+        self,
+        verified: &ReaderFacts,
+        executable: &Path,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<CapturedOriginalPdf> {
+        self.recheck_verified(verified, progress)?
+            .start_index(executable, deadline, progress)
     }
 
     #[cfg(test)]

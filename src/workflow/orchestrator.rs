@@ -10,6 +10,8 @@ use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod ordinary_pdf;
 #[cfg(target_os = "linux")]
 mod researched;
 #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
@@ -268,6 +270,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         );
 
         // Step 2: Capture screenshot (of current/question page)
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let (acquired, observed_pdf) = ordinary_pdf::acquire(&mut self.workflow, local)?;
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let acquired = self.workflow.acquire_reader_evidence()?;
         #[cfg(target_os = "linux")]
         if let Some(request) = self.workflow.selected_resident_conversation(&acquired)? {
@@ -294,7 +299,19 @@ impl<M: LLMEngine> Orchestrator<M> {
                 } => self.run_resident_writer_refinement(&request, &capture, require_current_draft),
             };
         }
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let observed_pdf = ordinary_pdf::classify(&mut self.workflow, observed_pdf?)?;
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let result = match observed_pdf {
+            Some(pdf) => self.run_ordinary_pdf(
+                &mut attempt,
+                pdf,
+                local.ok_or_else(|| anyhow::anyhow!("Ordinary PDF dispatch absent"))?,
+            ),
+            None => self.run_prepared(&mut attempt),
+        };
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let result = self.run_prepared(&mut attempt);
         match &result {
             Err(error) if attempt.user.outcome == Outcome::Prepared => {
@@ -597,7 +614,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             .blocked_unbound_insertion()
     }
 
-    fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+    fn prepare_model_images(&mut self, attempt: &mut Attempt) -> Result<Vec<Vec<u8>>> {
         anyhow::ensure!(
             self.handwriting_operation.is_none(),
             "handwriting context already captured for this operation"
@@ -618,14 +635,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 );
             }
         }
-        let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
-        let screenshot_png_data = images
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("prepared overview absent"))?
-            .clone();
-        let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
-        let screenshot_base64 = &encoded[0];
+        anyhow::ensure!(!images.is_empty(), "prepared overview absent");
         #[cfg(any(target_os = "linux", test))]
         if attempt.selected_resident() {
             let targets = images
@@ -650,7 +661,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         if let Some(capture) = &handwriting {
             log::debug!("Handwriting selection {}", capture.diagnostic());
         }
-        let confirmed_context = handwriting.as_ref().and_then(|c| c.context.clone());
         self.handwriting_operation = handwriting;
         anyhow::ensure!(
             self.handwriting_operation
@@ -660,6 +670,19 @@ impl<M: LLMEngine> Orchestrator<M> {
         );
 
         self.workflow.check_request_progress()?;
+        Ok(images)
+    }
+
+    fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        let personalization = self.personalization.clone();
+        let images = self.prepare_model_images(attempt)?;
+        let screenshot_png_data = images[0].clone();
+        let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
+        let screenshot_base64 = &encoded[0];
+        let confirmed_context = self
+            .handwriting_operation
+            .as_ref()
+            .and_then(|c| c.context.clone());
 
         // Step 3: Propose a question and answer, then independently verify
         // the question before navigating or writing:
@@ -920,6 +943,18 @@ impl<M: LLMEngine> Orchestrator<M> {
             Self::compose_result(result)
         };
         attempt.generated_with_memory(&self.ledger, stored_answer, memory)?;
+        self.place_answer(attempt, result, allow_native, &mut |_| Ok(()))
+    }
+
+    fn place_answer(
+        &mut self,
+        attempt: &mut Attempt,
+        result: &AnalysisResult,
+        allow_native: bool,
+        before_output: &mut dyn FnMut(&Ledger) -> Result<()>,
+    ) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = before_output;
         if attempt.is_selected() {
             if attempt.selected_resident() {
                 return Ok(());
@@ -938,6 +973,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
             use super::resident_output::ReaderAbout;
+            let installed = self.workflow.uses_installed_reader_history();
             let text = super::resident_output::ResidentOutputText::Reader {
                 question: &result.question,
                 answer: &result.answer,
@@ -965,6 +1001,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 association.as_ref(),
                 &mut || {
                     if !output_started {
+                        before_output(&self.ledger)?;
                         attempt.outcome(
                             &self.ledger,
                             true,

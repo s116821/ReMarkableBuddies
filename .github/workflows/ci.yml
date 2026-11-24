@@ -156,6 +156,7 @@ jobs:
               'researched_pdf_currentness_loss_stops_later_work',
               'researched_pdf_withheld_search_expires_original_deadline',
               'researched_pdf_original_read_allowance_cannot_be_renewed',
+              'ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift',
           ]
           names = ['storage::sync::selected::tests::researched_reader::' + name for name in names]
           listing = subprocess.run([str(library), '--ignored', '--list', '--format', 'terse'],

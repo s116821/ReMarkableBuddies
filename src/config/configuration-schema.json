@@ -237,19 +237,9 @@
     "reader": {
       "type": "object",
       "additionalProperties": false,
-      "allOf": [{
-        "if": {
-          "required": ["researched_pdf"],
-          "properties": { "researched_pdf": { "type": "object" } }
-        },
-        "then": {
-          "required": ["selection"],
-          "properties": { "selection": { "$ref": "#/$defs/readerSelection" } }
-        }
-      }],
       "properties": {
         "researched_pdf": {
-          "description": "Local opt-in for selected original-PDF researched Reader requests. Requires selection. An absent search model does not authorize web research.",
+          "description": "Local opt-in for original-PDF researched Reader requests. A selection chooses the registered shared document. Ordinary local Reader uses the guarded current original page. An absent search model does not authorize web research.",
           "anyOf": [
             {
               "type": "object",

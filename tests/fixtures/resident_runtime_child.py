@@ -187,7 +187,14 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                observed = source_facts
+                order_change = root.parent / "ordinary-pdf-order-change"
+                if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
+                    # Keep the active page and original assets fixed. Only the SDK
+                    # observation shows that the native order has changed.
+                    extra = uuid.UUID(order_change.read_text()).bytes
+                    observed = source_document + source_page + struct.pack(">H", 2) + extra + source_page
+                send(request[:202] + b"\x03" + digest + b"\x00" + observed)
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
@@ -201,13 +208,15 @@ while True:
                     assert peer.recv(1) == b""
                     break
                 width, height = 192, 128
-                pixels = b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32))
+                ordinary_pdf = mode == "reconnect-source-handoff-ordinary-pdf"
+                pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
+                          b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
                 def chunk(tag, data):
                     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
                 rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
                 png = (b"\x89PNG\r\n\x1a\n"
                        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                       + chunk(b"IDAT", zlib.compress(rows))
+                       + chunk(b"IDAT", zlib.compress(rows, 0 if ordinary_pdf else -1))
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
                 image_hash = hashlib.sha256(png).digest()
