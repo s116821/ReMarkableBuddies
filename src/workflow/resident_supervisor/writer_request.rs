@@ -76,6 +76,8 @@ impl LegacyAdoption {
 struct Pending {
     submission: Submission,
     expires: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_by: Option<u64>,
 }
 
 /// Identity observed when a Writer-only corner gesture is released.
@@ -92,13 +94,24 @@ pub(crate) enum SlotAction {
 }
 
 impl Pending {
+    fn publish(mut self, path: &Path, clock: impl FnOnce() -> Result<u64>) -> Result<()> {
+        // Deposit the complete request at its final path under the submission
+        // lock. Only then can the clock witness that this request existed.
+        files::atomic_json(path, &self)?;
+        if matches!(self.submission, Submission::RefineOnTablet { .. }) {
+            let published = clock()?;
+            ensure!(
+                published < self.expires,
+                "Writer request expired during publication"
+            );
+            self.published_by = Some(published);
+            files::atomic_json(path, &self)?;
+        }
+        Ok(())
+    }
+
     fn refinement(&self, activation: Uuid, now: u64) -> Result<Option<SelectedRefinement>> {
-        // Legacy and current slots record their queue time in whole boot seconds.
-        // A fresh three-second hold orders the request and release unambiguously.
-        if self
-            .expires
-            .checked_sub(LIFETIME_SECS)
-            .is_none_or(|queued| queued >= now)
+        if self.published_by.is_none_or(|published| published >= now)
             || now >= self.expires
             || !matches!(
                 &self.submission,
@@ -167,13 +180,20 @@ fn read(lease: &Lease, name: &str) -> Result<Option<Pending>> {
     Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-pub(crate) fn submit(submission: Submission) -> Result<()> {
+pub(crate) fn submit(
+    submission: Submission,
+    config_path: Option<std::path::PathBuf>,
+) -> Result<()> {
     if let Submission::RefineOnTablet {
         document,
         page,
         refinement,
     } = &submission
     {
+        ensure!(
+            crate::config::Config::load(config_path)?.admits_writer(false),
+            "Writer is disabled"
+        );
         ensure!(!document.is_nil() && !page.is_nil(), "empty Writer source");
         ensure!(
             matches!(refinement, Request::Refine { .. }),
@@ -209,13 +229,12 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
         read(&lease, &name)?.is_none_or(|request| request.expires <= now),
         "a local request is already awaiting its page"
     );
-    files::atomic_json(
-        &lease.path.join(name),
-        &Pending {
-            submission,
-            expires: now + LIFETIME_SECS,
-        },
-    )?;
+    Pending {
+        submission,
+        expires: now + LIFETIME_SECS,
+        published_by: None,
+    }
+    .publish(&lease.path.join(name), boot_seconds)?;
     lease.current()
 }
 
@@ -350,15 +369,8 @@ pub(super) fn discard(lease: &Lease) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn writer_only_corner_consumes_only_its_live_request_and_named_page() {
-        let fixture = super::super::tests::Fixture::new();
-        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
-        lock(&lease).unwrap();
-        let document = Uuid::new_v4();
-        let page = Uuid::new_v4();
-        let operation = Uuid::new_v4();
-        let mut slot = Pending {
+    fn refinement_slot(document: Uuid, page: Uuid, operation: Uuid, expires: u64) -> Pending {
+        Pending {
             submission: Submission::RefineOnTablet {
                 document,
                 page,
@@ -369,8 +381,66 @@ mod tests {
                     request: "Shorten the note".into(),
                 },
             },
-            expires: 120,
-        };
+            expires,
+            published_by: None,
+        }
+    }
+
+    #[test]
+    fn release_during_atomic_publication_cannot_select_the_later_refinement() {
+        let fixture = super::super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
+        lock(&lease).unwrap();
+        let activation = lease.record().activation();
+        let slot_name = name(&lease);
+        let path = lease.path.join(&slot_name);
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let make_slot = || refinement_slot(document, page, operation, 119 + LIFETIME_SECS);
+        let release = 120;
+
+        files::fail_next_atomic(path.clone(), files::AtomicFailure::BeforeRename);
+        assert!(make_slot()
+            .publish(&path, || panic!("clock before publication"))
+            .is_err());
+        assert!(read(&lease, &slot_name).unwrap().is_none());
+
+        make_slot()
+            .publish(&path, || {
+                let deposited = read(&lease, &slot_name)?
+                    .expect("the complete request is already at its final path");
+                assert_eq!(deposited.submission.identities().1, operation);
+                assert!(deposited.refinement(activation, release)?.is_none());
+                Ok(release + 1)
+            })
+            .unwrap();
+        let slot = read(&lease, &slot_name).unwrap().unwrap();
+        assert!(slot.refinement(activation, release).unwrap().is_none());
+        assert!(slot.refinement(activation, release + 1).unwrap().is_none());
+        let selected = slot.refinement(activation, release + 2).unwrap().unwrap();
+        assert!(request_locked(
+            &lease,
+            document,
+            page,
+            selected,
+            SlotAction::Claim,
+            release + 2
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn writer_only_corner_consumes_only_its_live_request_and_named_page() {
+        let fixture = super::super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
+        lock(&lease).unwrap();
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let mut slot = refinement_slot(document, page, operation, 120);
+        slot.published_by = Some(0);
         let path = lease.path.join(name(&lease));
         files::atomic_json(&path, &slot).unwrap();
         let activation = lease.record().activation();
@@ -398,6 +468,7 @@ mod tests {
         );
         assert!(path.is_file());
         slot.expires = 240;
+        slot.published_by = Some(120);
         files::atomic_json(&path, &slot).unwrap();
         assert!(slot.refinement(activation, 119).unwrap().is_none());
         assert!(slot.refinement(activation, 120).unwrap().is_none());

@@ -619,7 +619,9 @@ impl Workflow {
                     log::warn!(
                         "Could not select a pending Writer request for this gesture: {error:#}"
                     );
-                    return Ok(false);
+                    if config.is_some_and(|settings| !settings.reader_enabled()) {
+                        return Ok(false);
+                    }
                 }
             }
             return match owner.begin(released, health) {

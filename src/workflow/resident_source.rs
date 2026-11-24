@@ -341,6 +341,8 @@ impl ResidentSourceOwner {
             feature = "development-input-diagnostics"
         ))]
         if writer && self.selection.has_installed_output() {
+            // A failed read cannot carry over a previously observed request.
+            self.writer_at_release = None;
             self.writer_at_release = match &self.session {
                 Some(session) => session.writer_at_release(released.released_boot_second)?,
                 None => None,
@@ -1164,6 +1166,8 @@ mod tests {
         _fixture: Fixture,
         events: Events,
         delivery_fault: bool,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot_fault: bool,
     }
     struct OwnedAdmission<'a> {
         health: &'a mut ServiceHealth,
@@ -1189,6 +1193,14 @@ mod tests {
         }
     }
     impl SourceSession for OwnedSession {
+        #[cfg(feature = "installed-resident-output")]
+        fn writer_at_release(&self, _: u64) -> Result<Option<SelectedRefinement>> {
+            if self.writer_slot_fault {
+                self.events.borrow_mut().push("writer slot unavailable");
+                anyhow::bail!("Writer slot replaced while reading");
+            }
+            Ok(None)
+        }
         fn companion_pid(&self) -> Option<u32> {
             self.runtime.fixture_companion_pid()
         }
@@ -1326,6 +1338,8 @@ mod tests {
                 _fixture: fixture,
                 events: self.events.clone(),
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
             }))
         }
     }
@@ -1408,6 +1422,50 @@ mod tests {
             })
         }
     }
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_slot_read_failure_preserves_each_enabled_corner_action() {
+        let releases = vec![released(Instant::now()), released(Instant::now())];
+        let mode = "reconnect-source-handoff";
+        let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
+        let fixture = Fixture::new();
+        let runtime = fixture
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .unwrap();
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: fixture,
+            events: events.clone(),
+            delivery_fault: false,
+            writer_slot_fault: true,
+        }));
+        for reader_enabled in [false, true] {
+            let config = serde_json::from_value(serde_json::json!({
+                "product_settings": {"reader_enabled": reader_enabled, "writer_enabled": true}
+            }))
+            .unwrap();
+            assert_eq!(
+                workflow.wait_for_idle_batch(None, Some(&config)).unwrap(),
+                reader_enabled
+            );
+        }
+        assert_eq!(
+            &*events.borrow(),
+            &["writer slot unavailable", "writer slot unavailable"]
+        );
+        assert!(workflow
+            .resident_source
+            .as_ref()
+            .unwrap()
+            .writer_at_release
+            .is_none());
+        workflow.finish_request().unwrap();
+        drop((workflow, store));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[cfg(feature = "installed-resident-output")]
     #[test]
     fn writer_only_idle_ignores_an_unqueued_corner_then_accepts_blank_start() {
@@ -1786,6 +1844,8 @@ mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
             }));
             let source = RecognitionProbe {
                 confirmed_source: true,
@@ -2022,6 +2082,8 @@ mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
             }));
             owner.reconnect = true;
             let calls = Rc::new(Cell::new(0));
