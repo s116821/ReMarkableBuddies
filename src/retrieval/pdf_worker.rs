@@ -962,7 +962,12 @@ impl PendingIndex {
                         }
                 })
                 && serde_json::to_vec(&output.result)?.len() <= max_bytes,
-            "Document worker returned invalid passage provenance"
+            "{} worker returned invalid passage provenance",
+            if self.sections.is_some() {
+                "EPUB"
+            } else {
+                "PDF"
+            }
         );
         self.worker.finish(deadline, &mut || progress.poll())?;
         check(deadline, &mut || progress.force())?;
