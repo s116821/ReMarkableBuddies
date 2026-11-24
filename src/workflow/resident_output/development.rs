@@ -24,7 +24,10 @@ use std::{
 };
 pub(crate) const PROFILE: &str = "91ba3d8c200f8bfa3898ef7410595bf4ddff62f25fba3106c7f4ed442938eb5b";
 pub(crate) const ADAPTER: &str = "fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b3a6ba1e0ee63b843fc";
-const HEADER: &str = "=== Reader Buddy Answers ===\n\n";
+const LEGACY_TITLE: &str = "=== Reader Buddy Answers ===";
+const LEGACY_INSTALLED_BINDING: &str = "installed-full-admission-fresh-observe-guarded-v1";
+const ADOPTED_BINDING: &str = "installed-explicit-legacy-adoption-v1";
+const UNIFIED_BINDING_PROCEDURE: &str = "installed-full-admission-fresh-observe-unified-display-v1";
 pub(crate) const REPEAT_PROFILE: &str =
     "40b1ddfc7a85d856e8c0091f136196f57dbdef99df29886bcca0947911d68070";
 pub(crate) const REPEAT_ADAPTER: &str =
@@ -142,6 +145,14 @@ impl OutputPin {
         match self {
             Self::Fixture(_) => "development-native-guarded-v1",
             Self::Installed(_) => "installed-native-guarded-v1",
+        }
+    }
+
+    fn new_page_display(&self) -> DisplayFormat {
+        if cfg!(feature = "installed-resident-output") && matches!(self, Self::Installed(_)) {
+            DisplayFormat::Unified
+        } else {
+            DisplayFormat::Legacy
         }
     }
 }
@@ -394,7 +405,7 @@ impl NativeOutputBackend {
             return Ok(false);
         }
         let text = crate::device::native_text::read(&raw)?.text();
-        Ok(text.lines().next() == Some(HEADER.trim_end()))
+        Ok(text.lines().next() == Some(LEGACY_TITLE))
     }
 
     fn recognizes_ordinary_page(
@@ -533,19 +544,22 @@ impl NativeOutputBackend {
         facts: &ReaderFacts,
         new: bool,
         legacy: Option<&LegacyAdoption>,
-    ) -> Result<()> {
+    ) -> Result<DisplayFormat> {
         let original = self
             .original
             .as_ref()
             .context("development original absent")?;
-        if let HistoricalPageAssociationInspection::HistoricalCandidate(_) = ledger
+        let installed_display = self.pin.new_page_display();
+        if let HistoricalPageAssociationInspection::HistoricalCandidate(binding) = ledger
             .inspect_page_association(
                 conversation,
                 stored(facts.page().document),
                 stored(facts.page().page),
             )?
         {
-            return Ok(());
+            let receipt = binding.receipt();
+            return Ok(installed_display
+                .for_binding(receipt.acquisition, &receipt.source.evidence_procedure));
         }
         let operation = legacy.map_or_else(Uuid::new_v4, |approval| approval.operation);
         let runtime = self.runtime.as_ref().unwrap();
@@ -562,7 +576,7 @@ impl NativeOutputBackend {
                     conversation,
                     &expected_order,
                 ))?),
-                "installed-explicit-legacy-adoption-v1",
+                ADOPTED_BINDING,
             ),
             OutputPin::Installed(pin) => (
                 crate::storage::digest(&serde_json::to_vec(&(
@@ -574,7 +588,11 @@ impl NativeOutputBackend {
                     facts.page().page.to_string(),
                     &expected_order,
                 ))?),
-                "installed-full-admission-fresh-observe-guarded-v1",
+                if new && installed_display == DisplayFormat::Unified {
+                    UNIFIED_BINDING_PROCEDURE
+                } else {
+                    LEGACY_INSTALLED_BINDING
+                },
             ),
         };
         let receipt = BindingReceipt {
@@ -611,6 +629,7 @@ impl NativeOutputBackend {
                 BindingAcquisition::ExistingAdjacent
             },
         };
+        let display = installed_display.for_binding(receipt.acquisition, evidence_procedure);
         ledger.bind(
             operation,
             ledger.expected(Namespace::Conversation, conversation)?,
@@ -620,7 +639,7 @@ impl NativeOutputBackend {
             )?,
             receipt,
         )?;
-        Ok(())
+        Ok(display)
     }
 }
 impl NativeOutputBackend {
@@ -648,7 +667,13 @@ impl ResidentOutputBackend for NativeOutputBackend {
 
     fn validate_new_page_text(&self, text: &str) -> Result<()> {
         self.pin.current()?;
-        validate_text(&self.keyboard.borrow(), &format!("{HEADER}{text}"))
+        validate_text(
+            &self.keyboard.borrow(),
+            &self
+                .pin
+                .new_page_display()
+                .format(true, ResidentOutputText::Plain(text)),
+        )
     }
 
     fn admit(
@@ -1117,11 +1142,12 @@ impl ResidentOutputBackend for NativeOutputBackend {
         progress()?;
         self.pin.current()?;
         ensure!(Instant::now() < end, "renderer expired");
-        self.bind(ledger, conversation, target, new, None)?;
+        let display = self.bind(ledger, conversation, target, new, None)?;
         Ok(Box::new(Renderer {
             keyboard: self.keyboard.clone(),
             pin: self.pin.clone(),
             new,
+            display,
         }))
     }
 }
@@ -1129,6 +1155,49 @@ struct Renderer {
     keyboard: Rc<RefCell<Keyboard>>,
     pin: Rc<OutputPin>,
     new: bool,
+    display: DisplayFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayFormat {
+    Legacy,
+    Unified,
+}
+
+impl DisplayFormat {
+    fn for_binding(self, acquisition: BindingAcquisition, procedure: &str) -> Self {
+        if self == Self::Unified
+            && acquisition == BindingAcquisition::Inserted
+            && procedure == UNIFIED_BINDING_PROCEDURE
+        {
+            Self::Unified
+        } else {
+            Self::Legacy
+        }
+    }
+
+    fn format(self, new: bool, text: ResidentOutputText<'_>) -> String {
+        let content = match text {
+            ResidentOutputText::Plain(text) => text.to_owned(),
+            ResidentOutputText::Reader {
+                question,
+                answer,
+                center,
+            } => match self {
+                Self::Legacy => crate::workflow::Workflow::compose_qa(question, answer, center),
+                Self::Unified => format!("Q: {question}\n\nA: {answer}\n"),
+            },
+        };
+        if new {
+            let title = match self {
+                Self::Legacy => LEGACY_TITLE,
+                Self::Unified => crate::conversation_layout::CONVERSATION_TITLE,
+            };
+            format!("{title}\n\n{content}")
+        } else {
+            content
+        }
+    }
 }
 fn validate_text(keyboard: &Keyboard, text: &str) -> Result<()> {
     ensure!(
@@ -1140,11 +1209,15 @@ fn validate_text(keyboard: &Keyboard, text: &str) -> Result<()> {
 
 impl ResidentRenderer for Renderer {
     fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
-        let text = if self.new {
-            format!("{HEADER}{text}")
-        } else {
-            text.into()
-        };
+        self.render_output(ResidentOutputText::Plain(text), lease)
+    }
+
+    fn render_output(
+        &mut self,
+        text: ResidentOutputText<'_>,
+        lease: &mut DevelopmentTargetLease<'_>,
+    ) -> Result<()> {
+        let text = self.display.format(self.new, text);
         validate_text(&self.keyboard.borrow(), &text)?;
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
             pulse()?;
@@ -1172,5 +1245,60 @@ impl ResidentRenderer for Renderer {
             release?;
             pulse()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_display_uses_the_shared_title_and_exact_role_text() {
+        let center =
+            crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
+        let question = "What does <Start of Q-A block> mean?";
+        let answer = "Keep this literal.\n(0.1, 0.2) is part of the answer.";
+        let reader = || ResidentOutputText::Reader {
+            question,
+            answer,
+            center,
+        };
+        let unified = DisplayFormat::Unified
+            .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE);
+        let older = DisplayFormat::Unified
+            .for_binding(BindingAcquisition::Inserted, LEGACY_INSTALLED_BINDING);
+        assert_eq!(
+            DisplayFormat::Unified
+                .for_binding(BindingAcquisition::ExistingAdjacent, ADOPTED_BINDING),
+            DisplayFormat::Legacy
+        );
+        assert_eq!(
+            DisplayFormat::Legacy
+                .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE),
+            DisplayFormat::Legacy
+        );
+        assert_eq!(
+            unified.format(true, reader()),
+            "ReMarkableBuddies\n\nQ: What does <Start of Q-A block> mean?\n\nA: Keep this literal.\n(0.1, 0.2) is part of the answer.\n"
+        );
+        assert_eq!(
+            unified.format(false, reader()),
+            format!("Q: {question}\n\nA: {answer}\n")
+        );
+        assert_eq!(
+            older.format(true, reader()),
+            format!(
+                "=== Reader Buddy Answers ===\n\n{}",
+                crate::workflow::Workflow::compose_qa(question, answer, center)
+            )
+        );
+        assert_eq!(
+            unified.format(true, ResidentOutputText::Plain("")),
+            "ReMarkableBuddies\n\n"
+        );
+        assert_eq!(
+            unified.format(false, ResidentOutputText::Plain("Draft\n\nBody\n")),
+            "Draft\n\nBody\n"
+        );
     }
 }
