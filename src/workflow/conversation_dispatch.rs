@@ -46,6 +46,8 @@ pub struct Dispatch<'a> {
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
+    #[cfg(target_os = "linux")]
+    regional_writer_model: Option<String>,
     input_events: std::collections::BTreeSet<Uuid>,
 }
 
@@ -81,6 +83,8 @@ impl<'a> Dispatch<'a> {
             store: ledger.store().clone(),
             _local: local,
             memory,
+            #[cfg(target_os = "linux")]
+            regional_writer_model: None,
             input_events: Default::default(),
         })
     }
@@ -95,6 +99,22 @@ impl<'a> Dispatch<'a> {
             self.store.clone(),
             self._local.clone(),
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn with_regional_writer_model(mut self, resolved_model: String) -> Self {
+        self.regional_writer_model = Some(resolved_model);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn regional_writer_settings(&self) -> Result<(&Config, &str)> {
+        ensure!(self.admits(Mode::Writer, false), "Writer disabled");
+        let model = self
+            .regional_writer_model
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("regional Writer model profile unavailable"))?;
+        Ok((self.config, model))
     }
 
     pub fn local_memory(&self) -> Option<Arc<crate::memory::LocalMemory>> {

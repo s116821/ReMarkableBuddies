@@ -772,7 +772,12 @@ fn main() -> Result<()> {
         .map_err(|report| report.into_ordinary_startup_error())?;
     let ledger = remarkable_reader_buddy::conversation::Ledger::new(store.clone());
     let (dispatch, _ordinary_runtime_lifetime) = match route {
-        RuntimeRoute::OrdinaryLocal => (Some(Dispatch::local(&config, &ledger)?), None),
+        RuntimeRoute::OrdinaryLocal => {
+            let dispatch = Dispatch::local(&config, &ledger)?;
+            #[cfg(target_os = "linux")]
+            let dispatch = dispatch.with_regional_writer_model(effective.model.clone());
+            (Some(dispatch), None)
+        }
         RuntimeRoute::ExistingReader => (
             None,
             Some(remarkable_reader_buddy::mode_maintenance::admit_ordinary(

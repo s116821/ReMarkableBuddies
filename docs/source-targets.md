@@ -48,6 +48,20 @@ The export revision also binds the target revision, image recipe, normalization
 and draft. A different target has a different scope even when its image bytes
 match. The existing export backend and correlation rules continue to apply.
 
+## Continue the current target in the installed conversation
+
+The ordinary installed Writer slot accepts a `generate-current-target-on-tablet`
+request. It names the observed document and page, a new operation, the literal
+note request and optional explicit guidance. The receiver resolves the local
+conversation binding and its current interpreted target internally. It uses the
+retained image on the binding's original source page and sends the saved draft
+through the existing guarded Writer placement path.
+
+The existing Reader release consumes a matching queued request. An absent request
+keeps its Reader meaning. An expired, foreign or unresolved Writer intent refuses
+the attempt. This is the receiver contract for a composer or preset producer. The
+existing typed on-tablet composer does not yet publish this request.
+
 ## Explicit target changes
 
 Use `--conversation-operation target-change --conversation-input -` for a deliberate

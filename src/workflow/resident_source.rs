@@ -378,6 +378,11 @@ impl ResidentSourceOwner {
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
+        use super::{
+            resident_output::SelectedConversationRequest,
+            resident_supervisor::writer_request::InstalledRequest,
+        };
+
         let session = self
             .session
             .as_ref()
@@ -385,14 +390,23 @@ impl ResidentSourceOwner {
         Ok(session
             .take_writer_request(capture.document(), capture.page())?
             .map(|request| match request {
-                super::resident_supervisor::writer_request::InstalledRequest::Refine(request) => {
-                    super::resident_output::SelectedConversationRequest::WriterRefinement {
+                InstalledRequest::Refine(request) => {
+                    SelectedConversationRequest::WriterRefinement {
                         request,
                         require_current_draft: true,
                     }
                 }
-                super::resident_supervisor::writer_request::InstalledRequest::GenerateRegion(_) => {
-                    super::resident_output::SelectedConversationRequest::UnsupportedRegionalWriter
+                InstalledRequest::GenerateRegion(_) => {
+                    SelectedConversationRequest::UnsupportedRegionalWriter
+                }
+                InstalledRequest::GenerateCurrentTarget(request) => {
+                    SelectedConversationRequest::WriterCurrentTarget(
+                        crate::writer::target::CurrentRequest {
+                            operation: request.operation,
+                            request: request.request,
+                            guidance: request.guidance,
+                        },
+                    )
                 }
             }))
     }
@@ -1377,6 +1391,36 @@ pub(crate) mod tests {
         }
     }
     impl SourceSession for OwnedSession {
+        #[cfg(feature = "installed-resident-output")]
+        fn take_writer_request(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+        ) -> Result<Option<super::super::resident_supervisor::writer_request::InstalledRequest>>
+        {
+            use super::super::resident_supervisor::writer_request::{
+                InstalledRequest, RegionalRequest,
+            };
+            let mut events = self.events.borrow_mut();
+            let Some(index) = events
+                .iter()
+                .position(|event| *event == "current-target-writer-queued")
+            else {
+                return Ok(None);
+            };
+            events.remove(index);
+            events.push("current-target-writer-received");
+            Ok(Some(InstalledRequest::GenerateCurrentTarget(
+                RegionalRequest {
+                    document,
+                    page,
+                    operation: ConversationId::new_v4(),
+                    request: "Make a note about the current selected source".into(),
+                    guidance: None,
+                },
+            )))
+        }
+
         fn companion_pid(&self) -> Option<u32> {
             self.runtime.fixture_companion_pid()
         }
@@ -1565,6 +1609,50 @@ pub(crate) mod tests {
             delay,
         });
         (workflow, store, base, events, receiver)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn ordinary_installed_current_target_reaches_writer_and_refuses_an_unbound_page() {
+        let (mut workflow, store, base, events, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.resident_source.as_mut().unwrap().selection =
+            InstalledReaderSelection::fixture_with_installed_output();
+        events.borrow_mut().push("current-target-writer-queued");
+        let config = crate::config::Config {
+            paths: store.paths.clone(),
+            ..Default::default()
+        };
+        let ledger = Ledger::new(store.clone());
+        let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .unwrap()
+            .with_regional_writer_model("fixture".into());
+        let calls = Rc::new(Cell::new(0));
+        let provider = Provider {
+            calls: calls.clone(),
+            batches: Rc::new(RefCell::new(vec![])),
+            images: vec![],
+            payload_delay: Duration::ZERO,
+            kill_pid: None,
+            selection_subject: Some("24 / 6"),
+        };
+        let mut reader = Orchestrator::new(workflow, provider, ledger);
+        let error = reader
+            .run_iteration_with_trigger(true, Some(&dispatch))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a bound conversation"),
+            "{error:#}"
+        );
+        assert!(events.borrow().contains(&"current-target-writer-received"));
+        assert_eq!(calls.get(), 0);
+        drop(reader);
+        drop(dispatch);
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

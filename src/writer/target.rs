@@ -72,6 +72,39 @@ impl Request {
         Ok(())
     }
 }
+
+/// Explicit note request carried by the ordinary installed conversation receiver.
+pub struct CurrentRequest {
+    pub(crate) operation: Uuid,
+    pub(crate) request: String,
+    pub(crate) guidance: Option<String>,
+}
+
+impl CurrentRequest {
+    pub(crate) fn resolve(
+        self,
+        ledger: &Ledger,
+        conversation: Uuid,
+        document: Uuid,
+        source_page: Uuid,
+    ) -> Result<Request> {
+        let expected_root = ledger.expected(Namespace::Conversation, conversation)?;
+        let target = ledger
+            .current_resident_writer_target(conversation, document, source_page)?
+            .context("conversation has no interpreted target on the bound source page")?;
+        let resolved = Request::GenerateTarget {
+            conversation,
+            operation: self.operation,
+            expected_root,
+            target,
+            request: self.request,
+            guidance: self.guidance,
+        };
+        resolved.validate()?;
+        Ok(resolved)
+    }
+}
+
 fn report(request: &Request, status: Status, failure: Option<Failure>) -> Report {
     let (conversation, operation) = request.identities();
     Report {

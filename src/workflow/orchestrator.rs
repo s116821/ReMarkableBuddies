@@ -206,10 +206,14 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
         let _run = crate::measurement::Run::new();
-        self.run_iteration_with_trigger(self.trigger_enabled)
+        self.run_iteration_with_trigger(self.trigger_enabled, None)
     }
 
-    fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
+    pub(super) fn run_iteration_with_trigger(
+        &mut self,
+        wait_for_trigger: bool,
+        local: Option<&super::conversation_dispatch::Dispatch<'_>>,
+    ) -> Result<()> {
         anyhow::ensure!(
             self.handwriting_operation.is_none(),
             "prior handwriting operation unsettled"
@@ -217,7 +221,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let result = (|| -> Result<()> {
             let _timing = crate::measurement::Span::new("reader.iteration");
             self.workflow.begin_iteration()?;
-            let result = self.run_iteration_inner(wait_for_trigger);
+            let result = self.run_iteration_inner(wait_for_trigger, local);
             // A failed input guard or service health cannot be cleared by cleanup.
             if self.workflow.runtime_failed() {
                 return result.and(Err(anyhow::anyhow!(
@@ -238,7 +242,13 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
 
-    fn run_iteration_inner(&mut self, wait_for_trigger: bool) -> Result<()> {
+    fn run_iteration_inner(
+        &mut self,
+        wait_for_trigger: bool,
+        local: Option<&super::conversation_dispatch::Dispatch<'_>>,
+    ) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = local;
         info!("=== Starting Reader Buddy Iteration ===");
 
         // Step 1: Wait for trigger
@@ -268,6 +278,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             return match request {
                 SelectedConversationRequest::UnsupportedRegionalWriter => {
                     anyhow::bail!("fresh regional Writer requires the selected receiver")
+                }
+                SelectedConversationRequest::WriterCurrentTarget(request) => {
+                    let dispatch = local.ok_or_else(|| {
+                        anyhow::anyhow!("current-target Writer requires ordinary local dispatch")
+                    })?;
+                    self.run_resident_current_target_writer(request, &capture, dispatch)
                 }
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
@@ -383,7 +399,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         capture: &crate::conversation::ResidentSourceCapture,
         require_current_draft: bool,
     ) -> Result<()> {
-        use super::resident_output::ResidentOutputOutcome;
         use crate::{storage::Namespace, writer};
 
         let writer::Request::Refine {
@@ -461,6 +476,74 @@ impl<M: LLMEngine> Orchestrator<M> {
             report.status == writer::Status::Generated,
             "Writer refinement did not generate a fresh draft"
         );
+        self.present_resident_writer_draft(
+            *conversation,
+            capture,
+            association_before.as_ref(),
+            produced,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_resident_current_target_writer(
+        &mut self,
+        request: crate::writer::target::CurrentRequest,
+        capture: &crate::conversation::ResidentSourceCapture,
+        dispatch: &super::conversation_dispatch::Dispatch<'_>,
+    ) -> Result<()> {
+        use crate::writer;
+
+        dispatch.require_ledger(&self.ledger)?;
+        let (config, model_profile) = dispatch.regional_writer_settings()?;
+        let association = self
+            .ledger
+            .resident_answer_association(capture)?
+            .ok_or_else(|| {
+                anyhow::anyhow!("current-target Writer requires a bound conversation")
+            })?;
+        let receipt = association.receipt();
+        let conversation = receipt.conversation;
+        let request = request.resolve(
+            &self.ledger,
+            conversation,
+            receipt.source.document,
+            receipt.source.page,
+        )?;
+        let owner = writer::Owner::acquire(self.ledger.store())
+            .ok_or_else(|| anyhow::anyhow!("Writer is already active"))?;
+        self.workflow.deliver_reader_acquisition()?;
+        let mut produced = None;
+        let report = writer::target::run_owned(
+            &self.ledger,
+            &mut self.llm,
+            &request,
+            &mut || self.workflow.check_request_progress().is_err(),
+            writer::target::TargetRun {
+                config,
+                model_profile,
+                owner: &owner,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+            },
+            &mut produced,
+        );
+        anyhow::ensure!(
+            report.status == writer::Status::Generated,
+            "current-target Writer did not generate a fresh draft"
+        );
+        self.present_resident_writer_draft(conversation, capture, Some(&association), produced)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn present_resident_writer_draft(
+        &mut self,
+        conversation: crate::storage::Uuid,
+        capture: &crate::conversation::ResidentSourceCapture,
+        association_before: Option<&crate::conversation::HistoricalPageAssociation>,
+        produced: Option<crate::conversation::WriterSelection>,
+    ) -> Result<()> {
+        use super::resident_output::ResidentOutputOutcome;
+        use crate::{storage::Namespace, writer};
+
         let selected =
             produced.ok_or_else(|| anyhow::anyhow!("fresh Writer selection unavailable"))?;
         let (draft, source) = selected.values()?;
@@ -468,15 +551,15 @@ impl<M: LLMEngine> Orchestrator<M> {
             source.document.document == capture.document()
                 && self
                     .ledger
-                    .expected(Namespace::Conversation, *conversation)?
+                    .expected(Namespace::Conversation, conversation)?
                     == selected.root,
             "Writer draft changed before page placement"
         );
         let association = self.ledger.resident_answer_association(capture)?;
         anyhow::ensure!(
             association.as_ref().map(|a| a.binding_revision())
-                == association_before.as_ref().map(|a| a.binding_revision()),
-            "Writer page association changed during refinement"
+                == association_before.map(|a| a.binding_revision()),
+            "Writer page association changed during generation"
         );
         let (title, body) = writer::parse_draft(
             draft
@@ -488,13 +571,13 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.workflow.validate_resident_new_page_text(&text)?;
         match self.workflow.render_resident_answer(
             &self.ledger,
-            *conversation,
+            conversation,
             super::resident_output::ResidentOutputText::Plain(&text),
             association.as_ref(),
             &mut || Ok(()),
         )? {
             ResidentOutputOutcome::SubmittedUnverified => {
-                info!("Writer refinement submitted to the resident page");
+                info!("Writer draft submitted to the resident page");
             }
             ResidentOutputOutcome::InsertionRefused => {
                 anyhow::bail!("Writer draft generated, but page insertion was refused");
@@ -1633,7 +1716,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     self.workflow.wait_for_reader()?;
                 }
             }
-            match self.run_iteration_with_trigger(false) {
+            match self.run_iteration_with_trigger(false, dispatch.as_ref()) {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
