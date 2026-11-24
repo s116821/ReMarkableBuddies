@@ -1339,7 +1339,7 @@ mod tests {
             if self.no_selection {
                 return Ok("NONE".into());
             }
-            Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
+            Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: 24 / 6\n---\nANSWER: Because the model fixture says so." }
                 else { "TRANSCRIPTION: why?" }.into())
         }
     }
@@ -1463,8 +1463,9 @@ mod tests {
         workflow.resident_source.as_mut().unwrap().selection =
             InstalledReaderSelection::fixture_with_installed_output();
         let batches = Rc::new(RefCell::new(vec![]));
+        let calls = Rc::new(Cell::new(0));
         let provider = Provider {
-            calls: Rc::new(Cell::new(0)),
+            calls: calls.clone(),
             batches: batches.clone(),
             images: vec![],
             payload_delay: Duration::ZERO,
@@ -1486,7 +1487,15 @@ mod tests {
         let target = capture.reader_target.unwrap();
         assert!((target[0] - 385.0 / 768.0).abs() < 1e-12);
         assert!((target[1] - 230.0 / 1024.0).abs() < 1e-12);
-        assert_eq!(capture.schema, 2);
+        assert_eq!(capture.schema, 3);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            capture
+                .reader_subject
+                .as_ref()
+                .map(crate::analysis::ReaderSourceSubject::as_str),
+            Some("24 / 6")
+        );
         drop(reader);
         drop(store);
         let ledger = Ledger::new(Arc::new(Store::open(paths).unwrap()));
@@ -1550,6 +1559,7 @@ mod tests {
                 "document": capture.before.document,
                 "page": capture.before.page,
                 "normalized": target,
+                "subject": "24 / 6",
             })
         );
         assert!(images[1..]

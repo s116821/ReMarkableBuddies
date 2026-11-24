@@ -38,6 +38,40 @@ impl SelectionCenter {
     }
 }
 
+/// A short description of the selected source, separate from the user's question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ReaderSourceSubject(String);
+
+impl ReaderSourceSubject {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReaderSourceSubject {
+    type Error = &'static str;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        if text.is_empty()
+            || text.len() > 160
+            || text != text.trim()
+            || text.eq_ignore_ascii_case("NONE")
+            || text
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        {
+            return Err("invalid Reader source subject");
+        }
+        Ok(Self(text))
+    }
+}
+
+pub(crate) struct ReaderSelection {
+    pub(crate) center: SelectionCenter,
+    pub(crate) subject: Option<ReaderSourceSubject>,
+}
+
 impl std::fmt::Display for SelectionCenter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let axis = |value: f64| {
