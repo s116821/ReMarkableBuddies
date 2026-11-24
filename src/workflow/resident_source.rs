@@ -441,6 +441,10 @@ impl ResidentSourceOwner {
                 _ => WriterAtRelease::Unobserved,
             };
             return Ok(reader
+                || config.is_some_and(|settings| {
+                    super::conversation_dispatch::RuntimeRoute::for_config(settings)
+                        == super::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+                })
                 || matches!(
                     self.writer_at_release,
                     WriterAtRelease::Refinement(_) | WriterAtRelease::Generation(_)
@@ -960,6 +964,12 @@ impl ResidentSourceOwner {
         }
     }
     pub(super) fn deliver(&mut self, health: &mut ServiceHealth) -> Result<()> {
+        self.check_source_delivery(health)?;
+        self.deadline = None;
+        Ok(())
+    }
+
+    pub(super) fn check_source_delivery(&mut self, health: &mut ServiceHealth) -> Result<Instant> {
         self.acquisition_current(health)?;
         let deadline = self.deadline.unwrap();
         let result = self
@@ -977,8 +987,7 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         self.acquisition_current(health)?;
-        self.deadline = None;
-        Ok(())
+        Ok(deadline)
     }
     pub(super) fn finish(&mut self, health: &mut ServiceHealth) -> Result<()> {
         let result = self.progress(health);

@@ -18,6 +18,8 @@ mod current_page_writer;
 mod ordinary_pdf;
 #[cfg(target_os = "linux")]
 mod researched;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod source_submission;
 #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
 pub(crate) use researched::fixture as researched_fixture;
 
@@ -311,13 +313,6 @@ impl<M: LLMEngine> Orchestrator<M> {
                     })?;
                     self.run_resident_current_target_writer(request, &capture, dispatch)
                 }
-                #[cfg(feature = "installed-resident-output")]
-                SelectedConversationRequest::WriterCurrentPage { request } => {
-                    let dispatch = local.ok_or_else(|| {
-                        anyhow::anyhow!("current-page Writer requires ordinary local dispatch")
-                    })?;
-                    self.run_resident_current_page_writer(request, &capture, dispatch)
-                }
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
                 }
@@ -332,8 +327,26 @@ impl<M: LLMEngine> Orchestrator<M> {
                 ),
             };
         }
-        // A queued refinement can expire or belong to another open page.
-        // Finish the acquired request before admitting a new gesture.
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if let (Some(dispatch), super::AcquiredEvidence::ResidentHistorical(capture)) =
+            (local, &acquired)
+        {
+            if self.workflow.uses_installed_reader_history()
+                && dispatch.shared_source_writer_enabled()
+            {
+                use source_submission::SourceIntent;
+                match self.classify_source_submission(capture, dispatch)? {
+                    SourceIntent::Reader => {}
+                    SourceIntent::WriterCurrentPage { request } => {
+                        return self.run_resident_current_page_writer(request, capture, dispatch);
+                    }
+                    SourceIntent::Unresolved => {
+                        self.workflow.report_failure(Failure::Selection)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         if config.is_some_and(|settings| !settings.reader_enabled()) {
             return Ok(());
         }

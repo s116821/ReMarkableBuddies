@@ -54,7 +54,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         self.workflow.deliver_reader_acquisition()?;
         let deadline = Instant::now() + Duration::from_secs(300);
-        self.require_current_writer_source(deadline)?;
+        self.require_same_resident_source(deadline)?;
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -164,7 +164,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         );
         drop(page_image);
 
-        self.require_current_writer_source(deadline)?;
+        self.require_same_resident_source(deadline)?;
         let request = writer::Request::Generate {
             conversation,
             operation,
@@ -204,7 +204,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         )
     }
 
-    fn require_current_writer_source(&mut self, deadline: Instant) -> Result<()> {
+    pub(super) fn require_same_resident_source(&mut self, deadline: Instant) -> Result<()> {
         let resident = self
             .workflow
             .resident_source
@@ -217,7 +217,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             .context("installed Writer service health unavailable")?;
         ensure!(
             resident.captured_page_matches(health, deadline)?,
-            "Writer source page or page order changed"
+            "Source page or page order changed"
         );
         Ok(())
     }

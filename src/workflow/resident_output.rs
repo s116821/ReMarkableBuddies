@@ -46,10 +46,6 @@ pub enum SelectedConversationRequest {
     /// Ordinary installed receivers cannot consume fresh regional generation.
     UnsupportedRegionalWriter,
     WriterCurrentTarget(crate::writer::target::CurrentRequest),
-    #[cfg(feature = "installed-resident-output")]
-    WriterCurrentPage {
-        request: String,
-    },
     WriterRefinement {
         request: crate::writer::Request,
         require_current_draft: bool,

@@ -110,6 +110,11 @@ impl ResidentSourceCapture {
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn original_source_png(&self) -> &[u8] {
+        self.capture.png()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn writer_page_input(&self) -> Result<(Uuid, u32)> {
         let facts = &self.correspondence.expected;
         let position = facts
