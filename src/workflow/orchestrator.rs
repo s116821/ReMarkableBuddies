@@ -288,6 +288,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             ResidentOutputOutcome::ReusedWithoutWrite => {
                 info!("Blank conversation reopened on existing bound page")
             }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("blank conversation page insertion was refused");
+            }
             ResidentOutputOutcome::Unavailable | ResidentOutputOutcome::Unresolved => {
                 anyhow::bail!("blank conversation page placement unresolved");
             }
@@ -405,17 +408,21 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let text = format!("{title}\n\n{body}\n");
         self.workflow.validate_resident_new_page_text(&text)?;
-        anyhow::ensure!(
-            self.workflow.render_resident_answer(
-                &self.ledger,
-                *conversation,
-                super::resident_output::ResidentOutputText::Plain(&text),
-                association.as_ref(),
-                &mut || Ok(())
-            )? == ResidentOutputOutcome::SubmittedUnverified,
-            "Writer draft generated but native placement is unresolved"
-        );
-        info!("Writer refinement submitted to the resident page");
+        match self.workflow.render_resident_answer(
+            &self.ledger,
+            *conversation,
+            super::resident_output::ResidentOutputText::Plain(&text),
+            association.as_ref(),
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Writer refinement submitted to the resident page");
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("Writer draft generated, but page insertion was refused");
+            }
+            _ => anyhow::bail!("Writer draft generated but native placement is unresolved"),
+        }
         Ok(())
     }
 
@@ -631,6 +638,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                     Outcome::Failed,
                     AttemptReason::NativeOutputUnavailable,
                 ),
+                Ok(super::resident_output::ResidentOutputOutcome::InsertionRefused) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NoSuccessor,
+                    ),
                 Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt.outcome(
                     &self.ledger,
                     true,
