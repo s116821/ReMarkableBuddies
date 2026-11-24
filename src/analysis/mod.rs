@@ -17,6 +17,10 @@ pub struct SelectionCenter {
 }
 
 impl SelectionCenter {
+    pub fn normalized(self) -> [f64; 2] {
+        [self.x, self.y]
+    }
+
     pub fn from_pixels(x: f64, y: f64, width: u32, height: u32) -> Option<Self> {
         if width == 0
             || height == 0
@@ -31,6 +35,55 @@ impl SelectionCenter {
             x: if x == 0.0 { 0.0 } else { x / f64::from(width) },
             y: if y == 0.0 { 0.0 } else { y / f64::from(height) },
         })
+    }
+}
+
+/// A short description of the selected source, separate from the user's question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct ReaderSourceSubject(String);
+
+impl ReaderSourceSubject {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReaderSourceSubject {
+    type Error = &'static str;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        if text.is_empty()
+            || text.len() > 160
+            || text != text.trim()
+            || text.eq_ignore_ascii_case("NONE")
+            || text
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}'))
+        {
+            return Err("invalid Reader source subject");
+        }
+        Ok(Self(text))
+    }
+}
+
+/// How the proposal described a fresh circled or highlighted selection.
+pub enum ReaderSubject {
+    Recognized(ReaderSourceSubject),
+    Uncertain,
+}
+
+pub(crate) struct ReaderSelection {
+    pub(crate) center: SelectionCenter,
+    pub(crate) subject: Option<ReaderSubject>,
+}
+
+impl ReaderSelection {
+    pub(crate) fn recognized_subject(&self) -> Option<&ReaderSourceSubject> {
+        match &self.subject {
+            Some(ReaderSubject::Recognized(subject)) => Some(subject),
+            _ => None,
+        }
     }
 }
 

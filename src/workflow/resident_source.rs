@@ -293,14 +293,17 @@ impl ResidentSourceOwner {
         self.gesture == Some(ResidentGesture::BlankStart)
     }
 
-    /// An unbound single-page notebook has no installed output route other
-    /// than insertion. Legacy adoption requires an adjacent page. The SDK's
-    /// retained loss is authoritative even when this is a different notebook.
     #[cfg(feature = "installed-resident-output")]
-    pub(super) fn blocked_reader_insertion(&self) -> Option<OperationId> {
-        if self.selection.has_installed_output()
-            && self.captured_source.as_ref()?.order().len() == 1
-        {
+    pub(super) fn installed_output_selected(&self) -> bool {
+        self.selection.has_installed_output()
+    }
+
+    /// An unbound final page has no successor to reuse or adopt. The original
+    /// operation can block insertion even when it belongs to another notebook.
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn blocked_unbound_insertion(&self) -> Option<OperationId> {
+        let source = self.captured_source.as_ref()?;
+        if self.installed_output_selected() && source.order().last() == Some(&source.page().page) {
             return self.session.as_ref()?.runtime().unresolved_operation();
         }
         None
@@ -727,7 +730,7 @@ impl ResidentSourceOwner {
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: super::resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::ResidentOutputOutcome> {
@@ -901,6 +904,10 @@ impl ResidentSourceOwner {
                             "insertion result does not match original source/allocated target/order");
                         log::info!("Resident insertion observed on {target}");
                     }
+                    Ok(Reply::Rejected(reason)) => {
+                        log::info!("Resident page insertion refused: {reason:?}");
+                        return Ok(Outcome::InsertionRefused);
+                    }
                     Ok(other) => {
                         anyhow::bail!("resident insertion unresolved; no retry: {other:?}")
                     }
@@ -991,7 +998,7 @@ impl ResidentSourceOwner {
             end,
             steps: 0,
         };
-        renderer.render(text, &mut lease)?;
+        renderer.render_output(text, &mut lease)?;
         lease.current()?;
         let rendered_target = lease.target.clone();
         let rendered_runtime = lease.runtime.clone();
@@ -1191,6 +1198,29 @@ mod tests {
             );
             super::super::resident_request::finish(&mut self.runtime, result)
         }
+        fn insert(
+            &mut self,
+            health: &mut ServiceHealth,
+            input: &mut RequestInput,
+            conversation: ConversationId,
+            operation: OperationId,
+            insertion: InsertAfter,
+            deadline: Instant,
+        ) -> std::result::Result<Reply, RequestFailure> {
+            self.events.borrow_mut().push("insert");
+            let result = self.runtime.insert_admitted(
+                conversation,
+                operation,
+                insertion,
+                deadline,
+                &mut OwnedAdmission {
+                    health,
+                    input,
+                    policy_fault: false,
+                },
+            );
+            super::super::resident_request::finish(&mut self.runtime, result)
+        }
         fn finish(&mut self) {
             self.runtime.retire_connection();
         }
@@ -1288,7 +1318,7 @@ mod tests {
         images: Vec<String>,
         payload_delay: Duration,
         kill_pid: Option<u32>,
-        no_selection: bool,
+        selection_subject: Option<&'static str>,
     }
     impl crate::LLMEngine for Provider {
         fn add_text_content(&mut self, _: &str) {}
@@ -1306,11 +1336,14 @@ mod tests {
             let index = self.calls.get();
             self.calls.set(index + 1);
             self.batches.borrow_mut().push(self.images.clone());
-            if self.no_selection {
+            let Some(subject) = self.selection_subject else {
                 return Ok("NONE".into());
-            }
-            Ok(if index.is_multiple_of(2) { "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\n---\nANSWER: Because the model fixture says so." }
-                else { "TRANSCRIPTION: why?" }.into())
+            };
+            Ok(if index.is_multiple_of(2) {
+                format!("QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: {subject}\n---\nANSWER: Because the model fixture says so.")
+            } else {
+                "TRANSCRIPTION: why?".into()
+            })
         }
     }
     #[test]
@@ -1328,7 +1361,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         reader.run_iteration().unwrap();
@@ -1392,6 +1425,168 @@ mod tests {
     #[derive(Default)]
     struct RecognitionProbe {
         conversation: Option<ConversationId>,
+        confirmed_source: bool,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn installed_reader_reopens_literal_history_with_the_original_overview_target() {
+        assert_installed_reader_subject_history("24 / 6", Some("24 / 6"));
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn installed_reader_keeps_an_uncertain_subject_out_of_history() {
+        assert_installed_reader_subject_history("NONE", None);
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn assert_installed_reader_subject_history(
+        proposed_subject: &'static str,
+        retained_subject: Option<&str>,
+    ) {
+        use crate::conversation::{receiving::answer::follow_up, ContextBudget, Role};
+
+        #[derive(Default)]
+        struct Continuation {
+            payload: serde_json::Value,
+            images: Vec<String>,
+            observed: Option<(serde_json::Value, Vec<String>)>,
+        }
+        impl crate::LLMEngine for Continuation {
+            fn add_text_content(&mut self, text: &str) {
+                if let Ok(payload) = serde_json::from_str(text) {
+                    self.payload = payload;
+                }
+            }
+            fn add_image_content(&mut self, image: &str) {
+                self.images.push(image.into());
+            }
+            fn clear_content(&mut self) {
+                self.payload = serde_json::Value::Null;
+                self.images.clear();
+            }
+            fn execute(&mut self) -> Result<String> {
+                self.observed = Some((self.payload.clone(), self.images.clone()));
+                Ok("follow-up fixture".into())
+            }
+        }
+
+        let (mut workflow, store, base, _events, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.resident_source.as_mut().unwrap().selection =
+            InstalledReaderSelection::fixture_with_installed_output();
+        let batches = Rc::new(RefCell::new(vec![]));
+        let calls = Rc::new(Cell::new(0));
+        let provider = Provider {
+            calls: calls.clone(),
+            batches: batches.clone(),
+            images: vec![],
+            payload_delay: Duration::ZERO,
+            kill_pid: None,
+            selection_subject: Some(proposed_subject),
+        };
+        let paths = store.paths.clone();
+        let mut reader = Orchestrator::new(workflow, provider, Ledger::new(store.clone()));
+        reader.run_iteration().unwrap();
+        let entries = store
+            .snapshot_heads_matching(&[Namespace::Source], 2, |_| true)
+            .unwrap();
+        let [entry] = entries.as_slice() else {
+            panic!("expected the original capture")
+        };
+        let Record::ResidentCapture(capture) = Ledger::decode(entry).unwrap() else {
+            panic!("resident capture")
+        };
+        let target = capture.reader_target.unwrap();
+        assert!((target[0] - 385.0 / 768.0).abs() < 1e-12);
+        assert!((target[1] - 230.0 / 1024.0).abs() < 1e-12);
+        assert_eq!(
+            capture.schema,
+            if retained_subject.is_some() { 3 } else { 2 }
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            capture
+                .reader_subject
+                .as_ref()
+                .map(crate::analysis::ReaderSourceSubject::as_str),
+            retained_subject
+        );
+        drop(reader);
+        drop(store);
+        let ledger = Ledger::new(Arc::new(Store::open(paths).unwrap()));
+        let records = ledger.inspect(capture.conversation, false).unwrap();
+        let turns = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn) => Some(turn),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [question, answer] = turns.as_slice() else {
+            panic!("expected separate role turns")
+        };
+        assert_eq!(question.role, Role::User);
+        assert_eq!(question.text.as_deref(), Some("why?"));
+        assert_eq!(answer.role, Role::Assistant);
+        assert_eq!(
+            answer.text.as_deref(),
+            Some("Because the model fixture says so.")
+        );
+        assert_eq!(question.sources, vec![capture.id]);
+        assert_eq!(answer.sources, question.sources);
+        assert_eq!(answer.outcome, Outcome::Failed);
+        let context = ledger
+            .context(
+                capture.conversation,
+                &ContextBudget {
+                    max_text_bytes: 16 * 1024,
+                    max_turns: 64,
+                    provider_token_limit: Some(16 * 1024),
+                },
+                |_| Ok(10),
+            )
+            .unwrap();
+        let mut continuation = Continuation::default();
+        follow_up(
+            &ledger,
+            &mut continuation,
+            &context,
+            "Why again?",
+            &crate::config::Personalization::default()
+                .snapshot()
+                .unwrap(),
+            None,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let (payload, images) = continuation.observed.unwrap();
+        assert_eq!(payload["history"], serde_json::json!([question]));
+        assert_eq!(images, batches.borrow()[0]);
+        let images = payload["historical_images"].as_array().unwrap();
+        assert_eq!(images.len(), 4);
+        assert_eq!(images[0]["dimensions"], serde_json::json!([768, 1024]));
+        assert_eq!(images[0]["source"], serde_json::json!(capture.id));
+        assert_eq!(images[0]["sha256"], capture.images[0].media.sha256);
+        let mut expected_target = serde_json::json!({
+            "turn": question.id,
+            "document": capture.before.document,
+            "page": capture.before.page,
+            "normalized": target,
+        });
+        if let Some(subject) = retained_subject {
+            expected_target["subject"] = serde_json::json!(subject);
+        }
+        assert_eq!(images[0]["reader_target"], expected_target);
+        assert!(images[1..]
+            .iter()
+            .all(|image| image.get("reader_target").is_none()));
+        drop(ledger);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     impl ResidentOutputBackend for RecognitionProbe {
@@ -1416,7 +1611,11 @@ mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
             assert!(self.conversation.replace(conversation).is_none());
-            Ok(PageUse::Unresolved)
+            Ok(if self.confirmed_source {
+                PageUse::ConfirmedNonBuddy
+            } else {
+                PageUse::Unresolved
+            })
         }
 
         fn adopt(
@@ -1452,6 +1651,104 @@ mod tests {
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
             panic!("unexpected renderer request");
+        }
+    }
+
+    #[test]
+    fn reader_records_the_original_insertion_reply_on_the_generated_answer() {
+        use crate::conversation::{AttemptReason, Role};
+        use crate::workflow::selected_backend::RefusingBackend;
+        use remarkable_open_sdk::native_adapter::Rejection;
+
+        for (mode, reply, outcome, reason) in [
+            (
+                "reconnect-source-handoff-current-rejected",
+                Reply::Rejected(Rejection::ExecutorBeforeMutation),
+                Outcome::Failed,
+                AttemptReason::NoSuccessor,
+            ),
+            (
+                "reconnect-source-handoff-current-indeterminate",
+                Reply::Indeterminate,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+            ),
+        ] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow(mode, vec![], Duration::ZERO);
+            let fixture = Fixture::new();
+            let runtime = fixture
+                .start_with_store(store.clone(), mode, Duration::from_secs(5))
+                .unwrap();
+            let owner = workflow.resident_source.as_mut().unwrap();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-profile"),
+                runtime.identity(),
+            )
+            .unwrap();
+            owner.session = Some(Box::new(OwnedSession {
+                runtime,
+                _fixture: fixture,
+                events: events.clone(),
+                delivery_fault: false,
+            }));
+            let source = RecognitionProbe {
+                confirmed_source: true,
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                    .with_test_output(Box::new(source)),
+            );
+            let calls = Rc::new(Cell::new(0));
+            let model = Provider {
+                calls: calls.clone(),
+                batches: Rc::new(RefCell::new(vec![])),
+                images: vec![],
+                payload_delay: Duration::ZERO,
+                kill_pid: None,
+                selection_subject: Some("24 / 6"),
+            };
+            let ledger = Ledger::new(store.clone());
+            let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+            let result = reader.run_iteration();
+            if reply == Reply::Indeterminate {
+                assert!(result.unwrap_err().to_string().contains("Indeterminate"));
+            } else {
+                result.unwrap();
+            }
+            assert_eq!(calls.get(), 2);
+            assert_eq!(
+                events.borrow().iter().filter(|e| **e == "insert").count(),
+                1
+            );
+            let attempts = resident_client::attempts(&store).unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
+            let records = ledger.inspect(attempts[0].conversation, false).unwrap();
+            let answer = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn) if turn.role == Role::Assistant => Some(turn),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(answer.outcome, outcome);
+            assert!(answer
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("Because the model fixture says so."));
+            assert!(records.iter().any(|record| matches!(record,
+                Record::OutcomeFact(fact) if fact.turn == answer.id && fact.outcome == outcome && fact.reason == reason
+            )));
+            assert!(!records
+                .iter()
+                .any(|record| matches!(record, Record::Binding(_))));
+            drop(reader);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
         }
     }
 
@@ -1522,7 +1819,9 @@ mod tests {
                     &mut backend,
                     &ledger,
                     next,
-                    "answer for the new conversation",
+                    super::super::resident_output::ResidentOutputText::Plain(
+                        "answer for the new conversation",
+                    ),
                     None,
                     &mut || panic!("unexpected effect callback"),
                 )
@@ -1562,6 +1861,11 @@ mod tests {
                 true,
             ),
             (
+                "reconnect-source-handoff-indeterminate-last-page",
+                Reply::Indeterminate,
+                true,
+            ),
+            (
                 "reconnect-source-handoff-rejected",
                 Reply::Rejected(Rejection::Unsupported),
                 false,
@@ -1572,8 +1876,15 @@ mod tests {
                 false,
             ),
         ] {
+            let mut releases = vec![released(Instant::now())];
+            if blocked {
+                releases.push(ReleasedReaderInput {
+                    gesture: ResidentGesture::BlankStart,
+                    ..released(Instant::now())
+                });
+            }
             let (mut workflow, store, base, events, _notify) =
-                workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+                workflow(mode, releases, Duration::ZERO);
             let fixture = Fixture::new();
             let mut runtime = fixture
                 .start_with_store(store.clone(), mode, Duration::from_secs(5))
@@ -1625,7 +1936,7 @@ mod tests {
                 images: vec![],
                 payload_delay: Duration::ZERO,
                 kill_pid: None,
-                no_selection: true,
+                selection_subject: None,
             };
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -1641,7 +1952,7 @@ mod tests {
                 assert_eq!(calls.get(), 1);
             }
             assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
-            assert_eq!(std::fs::read(journal).unwrap(), bytes);
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
             let entries = store
                 .snapshot_heads_matching(&[Namespace::Source], 2, |_| true)
                 .unwrap();
@@ -1666,6 +1977,37 @@ mod tests {
             assert!(!turns.iter().any(
                 |r| matches!(r, Record::Turn(t) if t.role == crate::conversation::Role::Assistant)
             ));
+            if blocked {
+                let saved_heads = || {
+                    store
+                        .snapshot_heads_matching(
+                            &[Namespace::Conversation, Namespace::Source],
+                            crate::storage::MAX_ITEMS,
+                            |_| true,
+                        )
+                        .unwrap()
+                };
+                let before = saved_heads();
+                let error = reader.run_iteration().unwrap_err();
+                assert!(error.to_string().contains(&original.0.to_string()));
+                assert!(
+                    saved_heads() == before,
+                    "blocked blank start changed Buddy history"
+                );
+                assert_eq!(calls.get(), 0);
+                assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                assert_eq!(
+                    &*events.borrow(),
+                    &[
+                        "reconnect",
+                        "observe",
+                        "capture",
+                        "reconnect",
+                        "observe",
+                        "capture"
+                    ]
+                );
+            }
             drop(reader);
             drop(ledger);
             drop(store);
@@ -1689,7 +2031,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: true,
+            selection_subject: None,
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
 
@@ -1906,7 +2248,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::from_millis(1500),
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         let error = reader.run_iteration().unwrap_err();
@@ -1996,7 +2338,7 @@ mod tests {
                         images: vec![],
                         payload_delay: Duration::ZERO,
                         kill_pid: Some(pid),
-                        no_selection: false,
+                        selection_subject: Some("24 / 6"),
                     };
                     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
                     reader.set_trigger_enabled(false); // The real release was already consumed above.
@@ -2039,7 +2381,7 @@ mod tests {
             images: vec![],
             payload_delay: Duration::ZERO,
             kill_pid: None,
-            no_selection: false,
+            selection_subject: Some("24 / 6"),
         };
         let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         assert!(reader.run_iteration().is_err());

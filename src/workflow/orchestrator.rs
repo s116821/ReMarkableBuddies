@@ -3,7 +3,9 @@ use log::{debug, error, info};
 
 use super::reader_attempt::Attempt;
 use super::{indicator::Failure, AnswerPageType, ReturnOutcome, Workflow};
-use crate::analysis::{BoundingBox, SelectionCenter};
+use crate::analysis::{
+    BoundingBox, ReaderSelection, ReaderSourceSubject, ReaderSubject, SelectionCenter,
+};
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -51,12 +53,22 @@ pub const ANALYSIS_PROMPT: &str = "Read the handwritten question on this tablet 
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
              spelled-out Greek letters. No LaTeX or Markdown.";
 
-/// Result from LLM analysis containing question, answer, question bounds and selected-content center
+const SOURCE_SUBJECT_FIELD: &str = "SELECTION_SUBJECT:";
+
+const SOURCE_SUBJECT_PROMPT: &str = "For this request, include one additional header line \
+    before the --- separator: SELECTION_SUBJECT: [short description of the marked source]. \
+    Name the selected content using only what is visibly supported by the images. \
+    Describe the selected subject, not the handwritten question or the answer. \
+    Use a single short phrase in plain ASCII, at most 120 characters. \
+    If you cannot name the selected subject reliably, write SELECTION_SUBJECT: NONE. Keep the original \
+    whole-response NONE rules for an absent or ambiguous question or selection.";
+
+/// Reader proposal before independent question verification.
 struct AnalysisResult {
     question: String,
     answer: String,
     _question_box: Option<BoundingBox>,
-    selection_center: SelectionCenter,
+    selection: ReaderSelection,
     _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
 }
 
@@ -292,6 +304,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .is_empty(),
                 "blank start already exists without a resolved page binding"
             );
+            #[cfg(feature = "installed-resident-output")]
+            if let Some(original) = self.blocked_unbound_insertion() {
+                self.workflow.check_request_progress()?;
+                anyhow::bail!(
+                    "Blank start cannot insert a page until original operation {} is reconciled",
+                    original.0
+                );
+            }
             let created_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
@@ -302,7 +322,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         match self.workflow.render_resident_answer(
             &self.ledger,
             conversation,
-            "",
+            super::resident_output::ResidentOutputText::Plain(""),
             association.as_ref(),
             &mut || Ok(()),
         )? {
@@ -311,6 +331,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             ResidentOutputOutcome::ReusedWithoutWrite => {
                 info!("Blank conversation reopened on existing bound page")
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("blank conversation page insertion was refused");
             }
             ResidentOutputOutcome::Unavailable | ResidentOutputOutcome::Unresolved => {
                 anyhow::bail!("blank conversation page placement unresolved");
@@ -429,29 +452,36 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let text = format!("{title}\n\n{body}\n");
         self.workflow.validate_resident_new_page_text(&text)?;
-        anyhow::ensure!(
-            self.workflow.render_resident_answer(
-                &self.ledger,
-                *conversation,
-                &text,
-                association.as_ref(),
-                &mut || Ok(())
-            )? == ResidentOutputOutcome::SubmittedUnverified,
-            "Writer draft generated but native placement is unresolved"
-        );
-        info!("Writer refinement submitted to the resident page");
+        match self.workflow.render_resident_answer(
+            &self.ledger,
+            *conversation,
+            super::resident_output::ResidentOutputText::Plain(&text),
+            association.as_ref(),
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Writer refinement submitted to the resident page");
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("Writer draft generated, but page insertion was refused");
+            }
+            _ => anyhow::bail!("Writer draft generated but native placement is unresolved"),
+        }
         Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    fn blocked_unbound_insertion(&self) -> Option<remarkable_open_sdk::OperationId> {
+        self.workflow
+            .resident_source
+            .as_ref()?
+            .blocked_unbound_insertion()
     }
 
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         if attempt.resident_output() && attempt.resident_answer.is_none() {
-            if let Some(original) = self
-                .workflow
-                .resident_source
-                .as_ref()
-                .and_then(|owner| owner.blocked_reader_insertion())
-            {
+            if let Some(original) = self.blocked_unbound_insertion() {
                 self.workflow.check_request_progress()?;
                 attempt.outcome(
                     &self.ledger,
@@ -561,7 +591,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                attempt.interpret(&self.ledger, &result.question)?;
+                if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
+                    attempt.interpret_with_selection(
+                        &self.ledger,
+                        &result.question,
+                        Some(&result.selection),
+                    )?;
+                } else {
+                    attempt.interpret(&self.ledger, &result.question)?;
+                }
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     let enriched =
@@ -637,11 +675,13 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated_with_memory(
-            &self.ledger,
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-            memory,
-        )?;
+        let installed = self.workflow.uses_installed_reader_history() && attempt.resident_output();
+        let stored_answer = if installed {
+            result.answer.clone()
+        } else {
+            Workflow::compose_qa(&result.question, &result.answer, result.selection.center)
+        };
+        attempt.generated_with_memory(&self.ledger, stored_answer, memory)?;
         if attempt.is_selected() {
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
         }
@@ -656,15 +696,19 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
-            let text =
-                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let text = super::resident_output::ResidentOutputText::Reader {
+                question: &result.question,
+                answer: &result.answer,
+                center: result.selection.center,
+                subject: result.selection.subject.as_ref().filter(|_| installed),
+            };
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
             let mut output_started = false;
             let rendered = self.workflow.render_resident_answer(
                 &self.ledger,
                 conversation,
-                &text,
+                text,
                 association.as_ref(),
                 &mut || {
                     if !output_started {
@@ -686,6 +730,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                     Outcome::Failed,
                     AttemptReason::NativeOutputUnavailable,
                 ),
+                Ok(super::resident_output::ResidentOutputOutcome::InsertionRefused) => attempt
+                    .outcome(
+                        &self.ledger,
+                        true,
+                        Outcome::Failed,
+                        AttemptReason::NoSuccessor,
+                    ),
                 Ok(super::resident_output::ResidentOutputOutcome::Unresolved) => attempt.outcome(
                     &self.ledger,
                     true,
@@ -804,17 +855,17 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt.check_selected()?;
         info!("Sending analysis + answer proposal");
 
+        let prompt = if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
+            std::borrow::Cow::Owned(format!("{ANALYSIS_PROMPT}\n\n{SOURCE_SUBJECT_PROMPT}"))
+        } else {
+            std::borrow::Cow::Borrowed(ANALYSIS_PROMPT)
+        };
         let payload = context
             .map(|context| {
                 let targets = std::iter::once(screenshot_base64.to_owned())
                     .chain(details.iter().cloned())
                     .collect::<Vec<_>>();
-                crate::handwriting::runtime::reader_payload(
-                    ANALYSIS_PROMPT,
-                    false,
-                    &targets,
-                    context,
-                )
+                crate::handwriting::runtime::reader_payload(&prompt, false, &targets, context)
             })
             .transpose()?;
         let owned = ModelContent(&mut self.llm);
@@ -822,7 +873,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         if let Some(parts) = payload {
             crate::handwriting::runtime::send_parts(owned.0, &parts);
         } else {
-            owned.0.add_text_content(ANALYSIS_PROMPT);
+            owned.0.add_text_content(&prompt);
             owned.0.add_image_content(screenshot_base64);
             for detail in details {
                 owned.0.add_image_content(detail);
@@ -869,7 +920,14 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let (header, body) = response.split_once("---")?;
+        let (header, body) = response
+            .match_indices("---")
+            .map(|(offset, marker)| (&response[..offset], &response[offset + marker.len()..]))
+            .find(|(header, _)| {
+                // The optional subject is literal through the end of its own line.
+                let line = header.rsplit_once('\n').map_or(*header, |(_, line)| line);
+                !line.trim_start().starts_with(SOURCE_SUBJECT_FIELD)
+            })?;
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
         // Extract question text
@@ -901,6 +959,23 @@ impl<M: LLMEngine> Orchestrator<M> {
             SCREENSHOT_VIRTUAL_HEIGHT,
         )?;
 
+        let mut subjects = header
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(SOURCE_SUBJECT_FIELD));
+        let subject = subjects
+            .next()
+            .map(str::trim)
+            .filter(|text| subjects.next().is_none() && !text.eq_ignore_ascii_case(&question_text))
+            .and_then(|text| {
+                if text.eq_ignore_ascii_case("NONE") {
+                    Some(ReaderSubject::Uncertain)
+                } else {
+                    ReaderSourceSubject::try_from(text.to_owned())
+                        .ok()
+                        .map(ReaderSubject::Recognized)
+                }
+            });
+
         debug!("Parsed question ({} bytes)", question_text.len());
         debug!("Question box: {:?}", question_box);
         debug!("Selected-content center: {}", selection_center);
@@ -909,7 +984,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             question: question_text,
             answer: answer_text.to_string(),
             _question_box: question_box,
-            selection_center,
+            selection: ReaderSelection {
+                center: selection_center,
+                subject,
+            },
             _screenshot_data: screenshot_png_data,
         })
     }
@@ -1222,7 +1300,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Render the Q&A
         let formatted_output =
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            Workflow::compose_qa(&result.question, &result.answer, result.selection.center);
 
         self.workflow.render_qa(&formatted_output)?;
 
@@ -1295,7 +1373,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::Orchestrator;
+    use super::{Orchestrator, ReaderSubject};
     use crate::OpenAI;
 
     #[test]
@@ -1362,7 +1440,73 @@ mod tests {
         assert_eq!(result.question, "G unc.?");
         assert!(result.answer.ends_with("---\nExtra answer line."));
         assert!(result._question_box.is_some());
-        assert_eq!(result.selection_center.to_string(), "(0.5, 0.5)");
+        assert_eq!(result.selection.center.to_string(), "(0.5, 0.5)");
+    }
+
+    #[test]
+    fn source_subject_stays_separate_from_question_and_answer() {
+        let first = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let parse = |field| {
+            let response = format!("{first}\n{field}\n---\nANSWER: The result is 4.");
+            Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap()
+        };
+        let result = parse("SELECTION_SUBJECT: 24 / 6");
+        assert_eq!(result.question, "why?");
+        assert_eq!(result.answer, "The result is 4.");
+        assert_eq!(
+            result.selection.recognized_subject().unwrap().as_str(),
+            "24 / 6"
+        );
+        let uncertain = parse("SELECTION_SUBJECT: NONE");
+        assert!(matches!(
+            uncertain.selection.subject.as_ref(),
+            Some(ReaderSubject::Uncertain)
+        ));
+        assert!(uncertain.selection.recognized_subject().is_none());
+        assert_eq!(uncertain.question, "why?");
+        assert_eq!(uncertain.answer, "The result is 4.");
+        for invalid in [
+            "",
+            "SELECTION_SUBJECT: Why?",
+            "SELECTION_SUBJECT: 24 / 6\nSELECTION_SUBJECT: NONE",
+            "SELECTION_SUBJECT: 24\u{2028}/ 6",
+        ] {
+            let result = parse(invalid);
+            assert!(result.selection.subject.is_none(), "{invalid:?}");
+            assert_eq!(result.question, "why?");
+            assert_eq!(result.answer, "The result is 4.");
+        }
+        assert!(parse(&format!("SELECTION_SUBJECT: {}", "x".repeat(161)))
+            .selection
+            .subject
+            .is_none());
+    }
+
+    #[test]
+    fn reader_keeps_literal_markers_in_the_subject_and_answer() {
+        let header = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let answer = "Keep --- and\n---\nANSWER: literal text.";
+        for (field, subject) in [
+            ("", None),
+            ("\nSELECTION_SUBJECT: A---B\n", Some("A---B")),
+            (
+                "\r\nSELECTION_SUBJECT: A---ANSWER: B\r\n",
+                Some("A---ANSWER: B"),
+            ),
+        ] {
+            let response = format!("{header}{field}---\nANSWER: {answer}");
+            let result =
+                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            assert_eq!(result.question, "why?");
+            assert_eq!(result.answer, answer);
+            assert_eq!(
+                result
+                    .selection
+                    .recognized_subject()
+                    .map(|subject| subject.as_str()),
+                subject
+            );
+        }
     }
 
     #[test]

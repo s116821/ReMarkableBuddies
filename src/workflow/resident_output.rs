@@ -34,6 +34,8 @@ pub enum PageUse {
 pub enum ResidentOutputOutcome {
     Unavailable,
     Unresolved,
+    /// The SDK explicitly rejected this insertion without applying it.
+    InsertionRefused,
     ReusedWithoutWrite,
     /// Rendering was submitted under the backend lease; persistence not implied.
     SubmittedUnverified,
@@ -45,6 +47,22 @@ pub enum SelectedConversationRequest {
         request: crate::writer::Request,
         require_current_draft: bool,
     },
+}
+
+pub enum ResidentOutputText<'a> {
+    Plain(&'a str),
+    Reader {
+        question: &'a str,
+        answer: &'a str,
+        center: crate::analysis::SelectionCenter,
+        subject: Option<&'a crate::analysis::ReaderSubject>,
+    },
+}
+
+impl ResidentOutputText<'_> {
+    pub(super) fn is_empty(&self) -> bool {
+        matches!(self, Self::Plain(text) if text.is_empty())
+    }
 }
 
 /// Trusted native adapter seam, analogous to DeviceBackend, not an authority
@@ -135,6 +153,25 @@ pub trait ResidentOutputBackend {
 /// history system. No native lease constructor is exposed by this coordinator.
 pub trait ResidentRenderer {
     fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()>;
+
+    fn render_output(
+        &mut self,
+        text: ResidentOutputText<'_>,
+        lease: &mut DevelopmentTargetLease<'_>,
+    ) -> Result<()> {
+        match text {
+            ResidentOutputText::Plain(text) => self.render(text, lease),
+            ResidentOutputText::Reader {
+                question,
+                answer,
+                center,
+                ..
+            } => self.render(
+                &super::Workflow::compose_qa(question, answer, center),
+                lease,
+            ),
+        }
+    }
 }
 pub(super) fn exact(actual: &ReaderFacts, expected: &ReaderFacts) -> Result<()> {
     ensure!(actual == expected, "resident output source/order changed");

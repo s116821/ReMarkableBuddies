@@ -286,6 +286,17 @@ impl Workflow {
         self.device.delay(duration);
     }
 
+    pub(super) fn uses_installed_reader_history(&self) -> bool {
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        {
+            self.resident_source
+                .as_ref()
+                .is_some_and(|owner| owner.installed_output_selected())
+        }
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        false
+    }
+
     /// Read-only request checks replace source-page progress drawing.
     #[cfg(target_os = "linux")]
     pub(super) fn selected_resident_conversation(
@@ -338,7 +349,7 @@ impl Workflow {
         &mut self,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<resident_output::ResidentOutputOutcome> {
