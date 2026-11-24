@@ -225,7 +225,7 @@ pub(crate) struct NavigationMetadata {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn ordered_pages(content: &Value) -> Result<Vec<OrderedPage>> {
+pub(crate) fn ordered_pages(content: &Value) -> Result<Vec<OrderedPage>> {
     let entries = content["cPages"]["pages"]
         .as_array()
         .context("Missing navigation page order")?;

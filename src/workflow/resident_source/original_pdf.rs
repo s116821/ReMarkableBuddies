@@ -32,6 +32,9 @@ const SOURCE_BYTES: usize = 2 * (PDF_BYTES + TABLE_BYTES);
 const METADATA_SAMPLE_WORK: usize = 64;
 const METADATA_SAMPLES: usize = 20;
 
+#[cfg(feature = "installed-resident-output")]
+pub mod saved_notebook;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Identity {
     dev: u64,
