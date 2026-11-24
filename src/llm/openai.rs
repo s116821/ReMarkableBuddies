@@ -1,4 +1,4 @@
-use super::LLMEngine;
+use super::{LLMEngine, ProviderRefused};
 use anyhow::{Context, Result};
 use log::{debug, info};
 use serde_json::json;
@@ -189,8 +189,7 @@ impl OpenAI {
                             .await
                             .map_err(provider_error)?
                             .error_for_status()
-                            .map_err(|error| error.without_url())
-                            .context("Model response status")?;
+                            .map_err(response_status_error)?;
                         // Preserve the previous bounded response behavior, including unknown lengths.
                         const MAX_RESPONSE: usize = 10 * 1024 * 1024;
                         anyhow::ensure!(
@@ -299,6 +298,29 @@ fn provider_error(error: reqwest::Error) -> anyhow::Error {
     }
 }
 
+fn is_definite_rejection(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode;
+    // Invalid request, invalid credentials, denied access, unavailable endpoint
+    // or model, and rejected input. Timeouts, conflicts, rate limits, and
+    // unknown statuses carry no definitive rejection for outcome recording.
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::UNPROCESSABLE_ENTITY
+    )
+}
+
+fn response_status_error(error: reqwest::Error) -> anyhow::Error {
+    if error.status().is_some_and(is_definite_rejection) {
+        ProviderRefused.into()
+    } else {
+        anyhow::Error::from(error.without_url()).context("Model response status")
+    }
+}
+
 fn parse_response(body_text: &str) -> Result<String> {
     let json: JsonValue = serde_json::from_str(body_text).context("Decode model response JSON")?;
     info!(
@@ -309,8 +331,18 @@ fn parse_response(body_text: &str) -> Result<String> {
     );
     debug!("Provider response decoded");
 
-    // Extract the response text
-    let response_text = json["choices"][0]["message"]["content"]
+    let message = &json["choices"][0]["message"];
+    let content = &message["content"];
+    let no_answer =
+        content.is_null() || content.as_str().is_some_and(|text| text.trim().is_empty());
+    if no_answer
+        && message["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(ProviderRefused.into());
+    }
+    let response_text = content
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No response content found"))?
         .to_string();
@@ -320,7 +352,51 @@ fn parse_response(body_text: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{is_definite_rejection, parse_response, ProviderRefused};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn definite_refusal_is_typed_and_hides_provider_text() {
+        for message in [
+            r#"{"refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":null,"refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":"","refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":" \t\n","refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+        ] {
+            let body = format!(r#"{{"choices":[{{"message":{message}}}]}}"#);
+            let error = parse_response(&body).unwrap_err();
+            assert!(error.is::<ProviderRefused>());
+            assert_eq!(
+                format!("{error:#}"),
+                "response service refused this request"
+            );
+        }
+        for body in [
+            r#"{"choices":[{"message":{"content":null}}]}"#,
+            r#"{"choices":[{"message":{"content":null,"refusal":" \t"}}]}"#,
+        ] {
+            assert!(!parse_response(body).unwrap_err().is::<ProviderRefused>());
+        }
+        assert_eq!(
+            parse_response(
+                r#"{"choices":[{"message":{"content":" Answer text ","refusal":"declined"}}]}"#
+            )
+            .unwrap(),
+            " Answer text "
+        );
+    }
+
+    #[test]
+    fn only_allowlisted_http_rejections_are_definite() {
+        for status in 100..=599 {
+            let expected = matches!(status, 400 | 401 | 403 | 404 | 422);
+            assert_eq!(
+                is_definite_rejection(StatusCode::from_u16(status).unwrap()),
+                expected,
+                "HTTP {status}",
+            );
+        }
+    }
 
     #[test]
     fn response_errors_do_not_panic_or_echo_response_content() {

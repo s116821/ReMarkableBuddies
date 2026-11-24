@@ -104,24 +104,30 @@ fn with_stored_feedback<R>(
     let mut seen = BTreeSet::new();
     for envelope in &snapshot {
         ensure!(
-            envelope.kind == Kind::Value
-                && matches!(
-                    envelope.domain_schema_version,
-                    1 | super::marked_question::SCHEMA
-                ),
+            envelope.kind == Kind::Value,
             "unsupported stored feedback history"
         );
         ensure!(
             seen.insert((envelope.namespace, envelope.record_id)),
             "conflicted stored feedback history"
         );
-        let owner = match Ledger::decode(envelope)
-            .map_err(|_| anyhow!("invalid stored feedback record"))?
-        {
+        let record =
+            Ledger::decode(envelope).map_err(|_| anyhow!("invalid stored feedback record"))?;
+        ensure!(
+            matches!(
+                envelope.domain_schema_version,
+                1 | super::marked_question::SCHEMA | super::target::SCHEMA
+            ) || (envelope.domain_schema_version == super::EXISTING_BINDING_SCHEMA
+                && matches!(&record, Record::Binding(_))),
+            "unsupported stored feedback history"
+        );
+        let owner = match record {
             Record::Root(root) => root.id,
             Record::Turn(turn) => turn.conversation,
             Record::OutcomeFact(fact) => fact.conversation,
             Record::RequestEvidence(evidence) => evidence.conversation,
+            Record::TargetUse(used) => used.conversation,
+            Record::TargetState(state) => state.conversation,
             Record::Binding(binding) => binding.conversation,
             Record::Receipt(receipt) => receipt.acknowledgment.conversation,
             _ => bail!("unsupported stored feedback record"),

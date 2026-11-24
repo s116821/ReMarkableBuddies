@@ -1484,11 +1484,18 @@ pub(crate) mod tests {
         rc::Rc,
     };
     type Events = Rc<RefCell<Vec<&'static str>>>;
+
+    struct ObserveFileChange {
+        pdf: PathBuf,
+        armed: Rc<Cell<bool>>,
+    }
+
     struct OwnedSession {
         runtime: ResidentRuntime,
         _fixture: Fixture,
         events: Events,
         delivery_fault: bool,
+        observe_file_change: Option<ObserveFileChange>,
         #[cfg(feature = "installed-resident-output")]
         writer_slot: Option<Rc<super::super::resident_supervisor::writer_request::FixtureSlot>>,
     }
@@ -1496,6 +1503,7 @@ pub(crate) mod tests {
         health: &'a mut ServiceHealth,
         input: &'a mut RequestInput,
         policy_fault: bool,
+        observe_file_change: Option<&'a ObserveFileChange>,
     }
     impl ReadOnlyAdmission for OwnedAdmission<'_> {
         fn pulse(&mut self, deadline: Instant) -> Result<()> {
@@ -1513,6 +1521,16 @@ pub(crate) mod tests {
                 ));
             }
             Ok(())
+        }
+        fn reply_observed(&mut self) {
+            if let Some(change) = self
+                .observe_file_change
+                .filter(|change| change.armed.replace(false))
+            {
+                // The SDK returned the original native facts, but the request
+                // still owns the observation boundary until it returns.
+                std::fs::write(&change.pdf, b"changed during native Observe").unwrap();
+            }
         }
     }
     impl SourceSession for OwnedSession {
@@ -1568,6 +1586,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: self.delivery_fault,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1589,6 +1608,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1602,11 +1622,12 @@ pub(crate) mod tests {
             deadline: Instant,
         ) -> std::result::Result<Reply, RequestFailure> {
             assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(10));
-            self.events.borrow_mut().push(match &request {
-                Request::Observe => "observe",
-                Request::CaptureSource(_) => "capture",
+            let (event, observe_file_change) = match &request {
+                Request::Observe => ("observe", self.observe_file_change.as_ref()),
+                Request::CaptureSource(_) => ("capture", None),
                 _ => panic!("effect request"),
-            });
+            };
+            self.events.borrow_mut().push(event);
             let result = self.runtime.request_read_only(
                 operation,
                 request,
@@ -1615,6 +1636,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1638,6 +1660,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1690,6 +1713,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: self.events.clone(),
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }))
@@ -1721,6 +1745,16 @@ pub(crate) mod tests {
             })
             .unwrap(),
         );
+        let (workflow, events, receiver) = workflow_with_store(mode, releases, delay, &store);
+        (workflow, store, base, events, receiver)
+    }
+
+    fn workflow_with_store(
+        mode: &'static str,
+        releases: Vec<ReleasedReaderInput>,
+        delay: Duration,
+        store: &Arc<Store>,
+    ) -> (Workflow, Events, UnixDatagram) {
         let events = Rc::new(RefCell::new(vec![]));
         let backend =
             super::super::selected_backend::RefusingBackend::with_resident_releases(releases);
@@ -1738,7 +1772,7 @@ pub(crate) mod tests {
             mode,
             delay,
         });
-        (workflow, store, base, events, receiver)
+        (workflow, events, receiver)
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -2083,6 +2117,7 @@ pub(crate) mod tests {
             _fixture: native,
             events: events.clone(),
             delivery_fault: false,
+            observe_file_change: None,
             writer_slot: Some(slot.clone()),
         }));
         let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
@@ -2119,15 +2154,43 @@ pub(crate) mod tests {
         page: ConversationId,
         root: PathBuf,
         executable: PathBuf,
-        model: impl FnOnce(&Ledger, PathBuf) -> M,
+        source_targets: bool,
+        model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
+        inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
     ) -> Result<(Result<()>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
-        let (mut workflow, store, base, events, _notify) =
-            workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
+                data: base.join("data"),
+                cache: base.join("cache"),
+                credentials: base.join("credentials"),
+            },
+            "model": "gpt-6.1-terra",
+            "model_credential": "fixture_model_key",
+            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
+            "research_policy": "required"
+        }))?;
+        config
+            .validate_values()
+            .context("Validate ordinary PDF fixture configuration")?;
+        let store = if source_targets {
+            Store::open_source_target_startup(&config)
+        } else {
+            Store::open(config.paths.clone())
+        }
+        .context("Open ordinary PDF fixture Store")?;
+        let store = Arc::new(store);
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
-        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let runtime = native
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .context("Start ordinary PDF fixture resident session")?;
         let order_change = native.ordinary_pdf_order_change();
+        let change_file_on_observe = Rc::new(Cell::new(false));
+        let pdf = root.join(format!("{document}.pdf"));
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.ordinary_pdf_fixture = Some((root, executable));
@@ -2136,28 +2199,28 @@ pub(crate) mod tests {
             _fixture: native,
             events: events.clone(),
             delivery_fault: false,
+            observe_file_change: Some(ObserveFileChange {
+                pdf,
+                armed: change_file_on_observe.clone(),
+            }),
             writer_slot: None,
         }));
         crate::storage::files::atomic(
             &store.paths.credentials.join("fixture_model_key"),
             b"PRIVATE_RESEARCH_FIXTURE",
-        )?;
-        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
-            "paths": store.paths,
-            "model": "gpt-6.1-terra",
-            "model_credential": "fixture_model_key",
-            "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
-            "research_policy": "required"
-        }))?;
-        config.validate_values()?;
+        )
+        .context("Write ordinary PDF fixture model credential")?;
         let ledger = Ledger::new(store.clone());
-        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .context("Admit ordinary PDF fixture local dispatch")?;
         let mut reader = Orchestrator::new(
             workflow,
-            model(&ledger, order_change),
+            model(&ledger, order_change, change_file_on_observe),
             Ledger::new(store.clone()),
         );
-        reader.set_local_handwriting(&dispatch)?;
+        reader
+            .set_local_handwriting(&dispatch)
+            .context("Configure ordinary PDF fixture handwriting")?;
         let result = reader.run_iteration_with_trigger(true, Some(&dispatch));
         {
             let events = events.borrow();
@@ -2173,12 +2236,15 @@ pub(crate) mod tests {
                 &[Namespace::Conversation],
                 crate::storage::MAX_ITEMS,
                 |_| true,
-            )?
+            )
+            .context("Read ordinary PDF fixture conversation heads")?
             .iter()
             .map(Ledger::decode)
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+            .context("Decode ordinary PDF fixture conversation records")?;
+        inspect(&ledger, &records).context("Inspect ordinary PDF fixture conversation")?;
         drop((reader, dispatch, ledger, store));
-        std::fs::remove_dir_all(base)?;
+        std::fs::remove_dir_all(base).context("Remove ordinary PDF fixture Store")?;
         Ok((result, records))
     }
 
@@ -2792,6 +2858,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));
@@ -3030,6 +3097,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));

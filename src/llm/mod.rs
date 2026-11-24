@@ -2,6 +2,19 @@ pub mod openai;
 
 use anyhow::Result;
 
+/// A definite provider response declining the submitted request. The error
+/// carries no upstream body, status details, or request data.
+#[derive(Debug)]
+pub(crate) struct ProviderRefused;
+
+impl std::fmt::Display for ProviderRefused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("response service refused this request")
+    }
+}
+
+impl std::error::Error for ProviderRefused {}
+
 /// Invoked at owned submission, never reconstructed from request JSON. The
 /// caller holds its complete ordered admission only while submit runs.
 pub type ModelHandoff<'a> = dyn FnMut(&mut dyn FnMut() -> Result<()>) -> Result<()> + 'a;
