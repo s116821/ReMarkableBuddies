@@ -22,6 +22,8 @@ use std::collections::BTreeSet;
 use tokio::sync::watch;
 
 const API_ORIGIN: &str = "https://api.capacities.io/";
+pub(crate) const REST_VERSION_HEADER: &str = "x-capacities-api-version";
+pub(crate) const REST_VERSION: &str = "1.0.0";
 const MAX_RESPONSE: usize = 1024 * 1024;
 
 pub struct CapacitiesDestination {
@@ -157,6 +159,7 @@ impl CapacitiesDestination {
         auth.set_sensitive(true);
         let mut default_headers = HeaderMap::new();
         default_headers.insert(AUTHORIZATION, auth);
+        default_headers.insert(REST_VERSION_HEADER, HeaderValue::from_static(REST_VERSION));
         let client = Client::builder()
             .default_headers(default_headers)
             .redirect(reqwest::redirect::Policy::none())

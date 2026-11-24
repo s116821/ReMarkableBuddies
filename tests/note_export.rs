@@ -615,6 +615,11 @@ fn request(socket: &mut TcpStream) -> (String, String, Value) {
     assert!(headers
         .lines()
         .any(|line| line.eq_ignore_ascii_case("authorization: Bearer fixture-token")));
+    if path == "/object" || path == "/blocks/block" {
+        assert!(headers
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("x-capacities-api-version: 1.0.0")));
+    }
     let length = headers
         .lines()
         .find_map(|line| {

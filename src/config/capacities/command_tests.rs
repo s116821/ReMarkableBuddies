@@ -381,6 +381,9 @@ async fn provider(listener: TcpListener, origin: String, space: Option<Uuid>) {
     let (headers, _) = request(&mut stream).await;
     assert!(headers.starts_with("GET /space HTTP/1.1"));
     assert!(headers.contains("authorization: Bearer synthetic-access-token"));
+    assert!(headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("x-capacities-api-version: 1.0.0")));
     response(&mut stream, json!({"id": space})).await;
 }
 

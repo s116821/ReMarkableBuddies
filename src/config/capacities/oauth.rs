@@ -3,7 +3,14 @@ use super::{
     lifecycle::{Exchange, Revocation, Rotation},
     private_text, Grant,
 };
-use crate::{config::inspection::strict_json, note_export::Failure, storage::Uuid};
+use crate::{
+    config::inspection::strict_json,
+    note_export::{
+        capacities::{REST_VERSION, REST_VERSION_HEADER},
+        Failure,
+    },
+    storage::Uuid,
+};
 use reqwest::{header, Client, Response, Url};
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{
@@ -407,6 +414,7 @@ impl<'a> OAuth<'a> {
                     self.client
                         .get(url)
                         .header(header::AUTHORIZATION, auth)
+                        .header(REST_VERSION_HEADER, REST_VERSION)
                         .send()
                         .await
                         .map_err(map_transport)?,
