@@ -520,8 +520,8 @@ already returned to the source. If it still needs to return, it tries one swipe.
 ### Nothing appears after the hold
 
 The source page can look unchanged even when Buddy recognized the gesture and
-saved an answer. Buddy records failures in its log and leaves status marks off
-the source page.
+saved a draft answer in its own history. Buddy records failures in its log and
+leaves status marks off the source page.
 
 - **Automatic page insertion.** If Buddy reports an unconfirmed insertion, stop there and keep the original notebook and Buddy history. The saved page order and original request let the operator check what happened. Repeating the hold cannot confirm the earlier insertion.
 - **Manual workflow.** Check how Buddy classified the next page in its log (`Blank`, `ExistingQA` or `Invalid`). Use the manual setup above if the next page contains unrelated content.
