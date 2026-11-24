@@ -109,6 +109,11 @@ impl PreparedRequestEvidence {
     pub fn context(&self) -> &FrozenRequestContext {
         &self.context
     }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn original_root(&self) -> ExpectedHeads {
+        ExpectedHeads(BTreeSet::from([self.root.revision]))
+    }
 }
 
 /// Exact ordinary ledger heads carried through one live source-aware follow-up.
@@ -142,9 +147,24 @@ impl FollowupEvidence {
         operation: Uuid,
         draft: Turn,
     ) -> Result<ExpectedHeads> {
+        self.generated_with_target(ledger, operation, draft, None)
+    }
+
+    pub(crate) fn generated_with_target(
+        &mut self,
+        ledger: &Ledger,
+        operation: Uuid,
+        draft: Turn,
+        about_user: Option<Uuid>,
+    ) -> Result<ExpectedHeads> {
         let id = draft.id;
-        let result =
-            ledger.append_followup(operation, self.root(), draft, Some(&mut self.capture))?;
+        let result = ledger.append_followup(
+            operation,
+            self.root(),
+            draft,
+            Some(&mut self.capture),
+            about_user,
+        )?;
         self.root = result.historical.applied_root_revision;
         self.with_current(ledger, || Ok(()))?;
         let revision = self
@@ -217,7 +237,7 @@ impl Ledger {
         let (generation, _) = self
             .store
             .conditional_snapshot(Namespace::Conversation, user.conversation)?;
-        let saved = self.append_followup(operation, expected, user, None)?;
+        let saved = self.append_followup(operation, expected, user, None, None)?;
         let root = saved.historical.applied_root_revision;
         let [observed_root, observed_user] = self.store.bounded_head_pair(
             Namespace::Conversation,

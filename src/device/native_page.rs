@@ -292,11 +292,33 @@ pub(crate) fn original_pdf_mapping(
         content["fileType"] == "pdf",
         "Unsupported original document type"
     );
+    pdf_mapping(&content, observed)?.context("Reader page has no original PDF redirect")
+}
+
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) fn ordinary_pdf_mapping(
+    raw: &[u8],
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+) -> Result<Option<(u32, u32)>> {
+    let content =
+        crate::config::inspection::strict_json(raw).context("Invalid original PDF page table")?;
+    match content["fileType"].as_str() {
+        Some("pdf") => pdf_mapping(&content, observed),
+        Some("notebook" | "epub") => Ok(None),
+        _ => anyhow::bail!("Unsupported original document type"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pdf_mapping(
+    content: &Value,
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+) -> Result<Option<(u32, u32)>> {
     let count = content["cPages"]["original"]["value"]
         .as_u64()
         .filter(|count| (1..=256).contains(count))
         .context("Invalid original PDF page count")?;
-    let order = ordered_pages(&content)?;
+    let order = ordered_pages(content)?;
     // The general navigation parser accepts an absent/null redirect for a
     // note page. A declared original redirect must carry an integer here.
     ensure!(
@@ -331,9 +353,9 @@ pub(crate) fn original_pdf_mapping(
     let redirect = order
         .iter()
         .find(|row| row.id == page)
-        .and_then(|row| row.redirect)
-        .context("Reader page has no original PDF redirect")?;
-    Ok((count.try_into()?, redirect.try_into()?))
+        .context("Reader page is absent from the original PDF order")?
+        .redirect;
+    Ok(redirect.map(|redirect| (count as u32, redirect as u32)))
 }
 
 #[cfg(any(target_os = "linux", test))]

@@ -1,5 +1,5 @@
 // Typed native image/intent ingress remains an explicit integration gap.
-mod followup_research;
+pub(super) mod followup_research;
 #[allow(dead_code)]
 pub(crate) mod handwriting;
 use crate::{
@@ -42,7 +42,7 @@ impl RuntimeRoute {
 }
 
 pub struct Dispatch<'a> {
-    config: &'a Config,
+    pub(super) config: &'a Config,
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
@@ -640,7 +640,7 @@ impl<'a> Dispatch<'a> {
             self.memory.as_deref(),
             timestamp,
             policy,
-            &research,
+            &research.answer,
             &check,
             submit,
         )?;

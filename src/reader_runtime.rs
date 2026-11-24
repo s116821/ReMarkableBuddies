@@ -33,10 +33,6 @@ impl Configuration {
             scope.validate()?;
         }
         if let Some(researched) = &self.researched_pdf {
-            ensure!(
-                self.selection.is_some(),
-                "researched Reader needs a selected document"
-            );
             researched.validate()?;
         }
         Ok(())

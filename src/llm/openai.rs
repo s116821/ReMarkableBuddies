@@ -138,7 +138,9 @@ impl OpenAI {
         let endpoint = format!("{}/v1/chat/completions", self.base_url);
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
-        let single_request = self.single_request;
+        // An admitted deadline owns one submission. Transport redirects or
+        // retries must not create another POST outside that handoff.
+        let single_request = self.single_request || deadline.is_some();
         let (cancel, mut canceled) = tokio::sync::watch::channel(false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let mut task = Some(move || {

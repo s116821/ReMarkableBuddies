@@ -1158,6 +1158,113 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
     assert!(observed.closed_at >= observed.request_at);
 }
 
+#[cfg(feature = "installed-resident-output")]
+#[test]
+#[ignore = "requires the retained normal binary; mandatory hosted composed-reader step"]
+fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Result<()> {
+    use crate::conversation::Role;
+
+    let executable = retained_command();
+    let fixture = Fixture::new();
+    let root = fixture.0.join("original-pdf");
+    fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let document = Uuid::new_v4();
+    let page = Uuid::new_v4();
+    let decoy = Uuid::new_v4();
+    let path = root.join(format!("{document}.pdf"));
+    let bytes = pdf_bytes("alpha acceleration original PDF evidence");
+    files::atomic_json(
+        &root.join(format!("{document}.content")),
+        &json!({"fileType":"pdf", "cPages":{"original":{"value":2}, "pages":[
+            {"id":page, "idx":{"value":"a"}, "redir":{"value":0}}
+        ]}}),
+    )?;
+    fs::write(
+        root.join(format!("{decoy}.pdf")),
+        pdf_bytes("alpha acceleration DECOY_DOCUMENT_MUST_NOT_BE_QUERIED"),
+    )?;
+
+    for drift in [false, true] {
+        fs::write(&path, &bytes)?;
+        let events = Arc::new(Mutex::new(vec![]));
+        let mut script = Scripted::new(Reading::Deny, false, false, events.clone());
+        let frames = script.frames.clone();
+        if drift {
+            script.hook = Some(Box::new(|stage, pending| {
+                if stage == 2 && pending {
+                    fs::write(&path, b"changed before answer handoff").unwrap();
+                }
+            }));
+        }
+        let (result, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+            document,
+            page,
+            root.clone(),
+            executable.clone(),
+            script,
+        )?;
+        let frames = frames.lock().unwrap();
+        let assistants = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn) if turn.role == Role::Assistant => Some(turn),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(records.iter().any(|record| matches!(
+            record, Record::Turn(turn)
+                if turn.outcome == Outcome::Interpreted && turn.text.as_deref() == Some(OPT_OUT)
+        )));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(r, Record::RequestEvidence(_)))
+                .count(),
+            1
+        );
+        if drift {
+            assert!(result.is_err());
+            assert_eq!(frames.len(), 2);
+            assert!(assistants.is_empty());
+            continue;
+        }
+
+        result?;
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["analysis", "verification", "answer"]
+        );
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].images, frames[1].images);
+        assert!(!frames[2].images.is_empty());
+        let context: Value = serde_json::from_str(&frames[2].texts[1])?;
+        assert_eq!(
+            context["research"]["disabled_reason"],
+            "request-no-internet"
+        );
+        let request = &context["context"]["request_context"];
+        assert_eq!(request["request"]["text"], OPT_OUT);
+        let retrieval = &request["retrieval"];
+        assert_eq!(retrieval["source"]["document"], json!(document));
+        assert_eq!(retrieval["source"]["source_sha256"], digest(&bytes));
+        assert_eq!(retrieval["passages"][0]["page"], 2);
+        assert!(retrieval["passages"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("alpha acceleration"));
+        assert!(!context
+            .to_string()
+            .contains("DECOY_DOCUMENT_MUST_NOT_BE_QUERIED"));
+        let [draft] = assistants.as_slice() else {
+            anyhow::bail!("Expected one persisted Reader answer");
+        };
+        let answer = draft.text.as_deref().unwrap();
+        assert!(answer.contains(&format!("[S1] Document {document}, page 2")));
+        assert!(!answer.contains("ANALYSIS_PROPOSAL_MUST_NOT_PUBLISH"));
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires the retained normal binary; mandatory hosted composed-reader step"]
 fn researched_pdf_opt_out_skips_transport() {

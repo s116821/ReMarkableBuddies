@@ -201,13 +201,15 @@ while True:
                     assert peer.recv(1) == b""
                     break
                 width, height = 192, 128
-                pixels = b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32))
+                ordinary_pdf = mode == "reconnect-source-handoff-ordinary-pdf"
+                pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
+                          b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
                 def chunk(tag, data):
                     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
                 rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
                 png = (b"\x89PNG\r\n\x1a\n"
                        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                       + chunk(b"IDAT", zlib.compress(rows))
+                       + chunk(b"IDAT", zlib.compress(rows, 0 if ordinary_pdf else -1))
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
                 image_hash = hashlib.sha256(png).digest()

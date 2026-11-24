@@ -166,6 +166,18 @@ impl SourceFrame {
             ledger.expected(Namespace::Conversation, TargetState::id(self.conversation))?;
         self.check(ledger)
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn advance_captured_root(
+        &mut self,
+        ledger: &Ledger,
+        previous: &ExpectedHeads,
+        next: ExpectedHeads,
+    ) -> Result<()> {
+        ensure!(&self.root == previous, "target capture root changed");
+        self.root = next;
+        self.check(ledger)
+    }
+
     pub(crate) fn expected_root(&self) -> ExpectedHeads {
         self.root.clone()
     }

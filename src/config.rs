@@ -188,6 +188,12 @@ impl Config {
         );
         self.reader.validate()?;
         ensure!(
+            self.reader.researched_pdf.is_none()
+                || self.reader.selection.is_some()
+                || !self.sync.enabled,
+            "Ordinary researched PDF requires the local Reader route"
+        );
+        ensure!(
             !(self.reader.selection.is_some() && self.sync.enabled),
             "selected Reader requires the separately qualified selected sync worker"
         );

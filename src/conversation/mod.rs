@@ -695,6 +695,7 @@ impl Ledger {
         expected: ExpectedHeads,
         turn: Turn,
         captured: Option<&mut crate::storage::captured::Captured>,
+        about_user: Option<Uuid>,
     ) -> Result<WriteResult> {
         ensure!(
             self.expected(Namespace::Conversation, Self::receipt_id(operation))?
@@ -703,14 +704,18 @@ impl Ledger {
             "Reader follow-up append is historical"
         );
         let sources: Vec<ImageUse> = vec![];
-        let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
+        let fingerprint = if let Some(user) = about_user {
+            Self::fingerprint(&("append-target-answer-v1", &turn, user))?
+        } else {
+            Self::fingerprint(&("append", &turn, &sources))?
+        };
         self.append_with_capture(
             operation,
             expected,
             turn,
             sources,
             fingerprint,
-            None,
+            about_user,
             captured,
             true,
         )

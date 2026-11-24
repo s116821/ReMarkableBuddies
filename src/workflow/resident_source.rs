@@ -29,6 +29,11 @@ use std::{
 };
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
+#[cfg(feature = "installed-resident-output")]
+type OrdinaryPdfCapture = (
+    ResidentSourceCapture,
+    Result<Option<original_pdf::ObservedOriginalPdf>>,
+);
 
 #[derive(Debug)]
 pub(super) struct FinalizedCancellation;
@@ -230,6 +235,8 @@ pub(super) struct ResidentSourceOwner {
     canceled: bool,
     fatal: bool,
     captured_source: Option<remarkable_open_sdk::native_adapter::ReaderFacts>,
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    ordinary_pdf_fixture: Option<(std::path::PathBuf, std::path::PathBuf)>,
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
@@ -250,6 +257,8 @@ impl ResidentSourceOwner {
             canceled: false,
             fatal: false,
             captured_source: None,
+            #[cfg(all(test, feature = "installed-resident-output"))]
+            ordinary_pdf_fixture: None,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
@@ -578,6 +587,78 @@ impl ResidentSourceOwner {
             &mut progress,
             original_pdf::ObservedOriginalPdf::captured_by_owner,
         )
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn acquire_ordinary_pdf(
+        &mut self,
+        health: &mut ServiceHealth,
+    ) -> Result<OrdinaryPdfCapture> {
+        if self.gesture != Some(ResidentGesture::Reader) {
+            return Ok((self.acquire(health)?, Ok(None)));
+        }
+        let deadline = self.deadline.context("Resident source deadline absent")?;
+        self.acquire_with_source(
+            health,
+            Some(deadline),
+            |_| Ok(()),
+            |owner, health, facts| {
+                #[cfg(test)]
+                let fixture = owner.ordinary_pdf_fixture.clone();
+                let mut progress = || owner.original_pdf_progress(health, deadline, &mut || Ok(()));
+                #[cfg(test)]
+                if let Some((root, _)) = fixture {
+                    return Ok(original_pdf::ObservedOriginalPdf::observe_ordinary_fixture(
+                        &root,
+                        facts,
+                        deadline,
+                        &mut progress,
+                    ));
+                }
+                // Defer source-specific admission until the acquired page has
+                // selected Reader. A queued Writer still owns its ordinary route.
+                Ok(original_pdf::ObservedOriginalPdf::observe_ordinary(
+                    facts,
+                    deadline,
+                    &mut progress,
+                ))
+            },
+        )
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn complete_ordinary_pdf(
+        &mut self,
+        health: &mut ServiceHealth,
+        observed: original_pdf::ObservedOriginalPdf,
+        deadline: Instant,
+    ) -> Result<original_pdf::CapturedOriginalPdf> {
+        let facts = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        let acquired = self.deadline.context("Resident source deadline absent")?;
+        #[cfg(test)]
+        let fixture = self.ordinary_pdf_fixture.clone();
+        let mut progress = || self.original_pdf_progress(health, acquired, &mut || Ok(()));
+        #[cfg(test)]
+        if let Some((_, executable)) = fixture {
+            return observed.complete_ordinary_fixture(
+                &facts,
+                &executable,
+                deadline,
+                &mut progress,
+            );
+        }
+        observed.captured_by_owner(&facts, deadline, &mut progress)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn ordinary_pdf_deadline(&self) -> Result<Instant> {
+        let acquired = self.deadline.context("Resident source deadline absent")?;
+        // Bound both readings, optional research and the final answer using
+        // the original release's acquisition deadline.
+        Ok(acquired + Duration::from_secs(270))
     }
 
     fn original_pdf_deadline(
@@ -1936,6 +2017,55 @@ pub(crate) mod tests {
                 && turn.role == Role::Assistant
                 && turn.mode == Mode::Writer
                 && turn.outcome == Outcome::Generated)));
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn ordinary_pdf_receiver_fixture(
+        document: ConversationId,
+        page: ConversationId,
+        root: PathBuf,
+        executable: PathBuf,
+        model: impl crate::LLMEngine,
+    ) -> Result<(Result<()>, Vec<Record>)> {
+        let mode = "reconnect-source-handoff-ordinary-pdf";
+        let (mut workflow, store, base, events, _notify) =
+            workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.ordinary_pdf_fixture = Some((root, executable));
+        owner.factory = Box::new(OwnedFactory {
+            source: Some((document, page)),
+            events: events.clone(),
+            mode,
+            delay: Duration::ZERO,
+        });
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": store.paths,
+            "reader": { "researched_pdf": {} },
+            "research_policy": "required"
+        }))?;
+        config.validate_values()?;
+        let ledger = Ledger::new(store.clone());
+        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+        let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        reader.set_local_handwriting(&dispatch)?;
+        let result = reader.run_iteration_with_trigger(true, Some(&dispatch));
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "spawn", "observe", "capture"]
+        );
+        let records = store
+            .snapshot_heads_matching(
+                &[Namespace::Conversation],
+                crate::storage::MAX_ITEMS,
+                |_| true,
+            )?
+            .iter()
+            .map(Ledger::decode)
+            .collect::<Result<Vec<_>>>()?;
+        drop((reader, dispatch, ledger, store));
+        std::fs::remove_dir_all(base)?;
+        Ok((result, records))
     }
 
     #[test]

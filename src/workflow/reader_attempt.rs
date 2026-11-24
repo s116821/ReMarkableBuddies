@@ -912,6 +912,48 @@ impl Attempt {
         Ok(())
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn retained_source(&self) -> Uuid {
+        self.evidence
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn advance_pdf_evidence(
+        &mut self,
+        ledger: &Ledger,
+        previous: &ExpectedHeads,
+        next: ExpectedHeads,
+    ) -> Result<()> {
+        if let Some(frame) = self.target_frame.as_mut() {
+            frame.advance_captured_root(ledger, previous, next)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn generated_from_pdf(
+        &mut self,
+        ledger: &Ledger,
+        evidence: &mut crate::conversation::evidence::FollowupEvidence,
+        text: String,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.resident_output() && !self.is_selected() && self.assistant.is_none(),
+            "PDF answer requires the ordinary resident request"
+        );
+        let previous = evidence.root();
+        let draft = self.answer_draft(text)?;
+        let id = draft.id;
+        evidence.generated_with_target(
+            ledger,
+            crate::writer::stage(self.user.exchange, "reader-pdf-generated"),
+            draft,
+            self.target_frame.as_ref().map(|_| self.user.id),
+        )?;
+        self.assistant = Some(evidence.draft(id)?);
+        self.advance_pdf_evidence(ledger, &previous, evidence.root())
+    }
+
     fn answer_draft(&self, text: String) -> Result<Turn> {
         let timestamp = now()?;
         Ok(Turn {
