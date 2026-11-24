@@ -278,7 +278,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         match self.workflow.render_resident_answer(
             &self.ledger,
             conversation,
-            "",
+            super::resident_output::ResidentOutputText::Plain(""),
             association.as_ref(),
             &mut || Ok(()),
         )? {
@@ -409,7 +409,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             self.workflow.render_resident_answer(
                 &self.ledger,
                 *conversation,
-                &text,
+                super::resident_output::ResidentOutputText::Plain(&text),
                 association.as_ref(),
                 &mut || Ok(())
             )? == ResidentOutputOutcome::SubmittedUnverified,
@@ -598,15 +598,18 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(target_os = "linux")]
         if attempt.resident_output() {
-            let text =
-                Workflow::compose_qa(&result.question, &result.answer, result.selection_center);
+            let text = super::resident_output::ResidentOutputText::Reader {
+                question: &result.question,
+                answer: &result.answer,
+                center: result.selection_center,
+            };
             let conversation = attempt.user.conversation;
             let association = attempt.resident_answer.clone();
             let mut output_started = false;
             let rendered = self.workflow.render_resident_answer(
                 &self.ledger,
                 conversation,
-                &text,
+                text,
                 association.as_ref(),
                 &mut || {
                     if !output_started {

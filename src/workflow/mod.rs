@@ -338,7 +338,7 @@ impl Workflow {
         &mut self,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<resident_output::ResidentOutputOutcome> {
