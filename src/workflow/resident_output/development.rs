@@ -25,6 +25,8 @@ use std::{
 pub(crate) const PROFILE: &str = "91ba3d8c200f8bfa3898ef7410595bf4ddff62f25fba3106c7f4ed442938eb5b";
 pub(crate) const ADAPTER: &str = "fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b3a6ba1e0ee63b843fc";
 const LEGACY_TITLE: &str = "=== Reader Buddy Answers ===";
+const LEGACY_INSTALLED_BINDING: &str = "installed-full-admission-fresh-observe-guarded-v1";
+const ADOPTED_BINDING: &str = "installed-explicit-legacy-adoption-v1";
 const UNIFIED_BINDING_PROCEDURE: &str = "installed-full-admission-fresh-observe-unified-display-v1";
 pub(crate) const REPEAT_PROFILE: &str =
     "40b1ddfc7a85d856e8c0091f136196f57dbdef99df29886bcca0947911d68070";
@@ -542,19 +544,22 @@ impl NativeOutputBackend {
         facts: &ReaderFacts,
         new: bool,
         legacy: Option<&LegacyAdoption>,
-    ) -> Result<()> {
+    ) -> Result<DisplayFormat> {
         let original = self
             .original
             .as_ref()
             .context("development original absent")?;
-        if let HistoricalPageAssociationInspection::HistoricalCandidate(_) = ledger
+        let installed_display = self.pin.new_page_display();
+        if let HistoricalPageAssociationInspection::HistoricalCandidate(binding) = ledger
             .inspect_page_association(
                 conversation,
                 stored(facts.page().document),
                 stored(facts.page().page),
             )?
         {
-            return Ok(());
+            let receipt = binding.receipt();
+            return Ok(installed_display
+                .for_binding(receipt.acquisition, &receipt.source.evidence_procedure));
         }
         let operation = legacy.map_or_else(Uuid::new_v4, |approval| approval.operation);
         let runtime = self.runtime.as_ref().unwrap();
@@ -571,7 +576,7 @@ impl NativeOutputBackend {
                     conversation,
                     &expected_order,
                 ))?),
-                "installed-explicit-legacy-adoption-v1",
+                ADOPTED_BINDING,
             ),
             OutputPin::Installed(pin) => (
                 crate::storage::digest(&serde_json::to_vec(&(
@@ -583,10 +588,10 @@ impl NativeOutputBackend {
                     facts.page().page.to_string(),
                     &expected_order,
                 ))?),
-                if new && self.pin.new_page_display() == DisplayFormat::Unified {
+                if new && installed_display == DisplayFormat::Unified {
                     UNIFIED_BINDING_PROCEDURE
                 } else {
-                    "installed-full-admission-fresh-observe-guarded-v1"
+                    LEGACY_INSTALLED_BINDING
                 },
             ),
         };
@@ -624,6 +629,7 @@ impl NativeOutputBackend {
                 BindingAcquisition::ExistingAdjacent
             },
         };
+        let display = installed_display.for_binding(receipt.acquisition, evidence_procedure);
         ledger.bind(
             operation,
             ledger.expected(Namespace::Conversation, conversation)?,
@@ -633,7 +639,7 @@ impl NativeOutputBackend {
             )?,
             receipt,
         )?;
-        Ok(())
+        Ok(display)
     }
 }
 impl NativeOutputBackend {
@@ -1136,22 +1142,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         progress()?;
         self.pin.current()?;
         ensure!(Instant::now() < end, "renderer expired");
-        self.bind(ledger, conversation, target, new, None)?;
-        let display = match self.pin.new_page_display() {
-            DisplayFormat::Unified => {
-                let HistoricalPageAssociationInspection::HistoricalCandidate(binding) = ledger
-                    .inspect_page_association(
-                        conversation,
-                        stored(target.page().document),
-                        stored(target.page().page),
-                    )?
-                else {
-                    anyhow::bail!("installed presentation binding unavailable");
-                };
-                DisplayFormat::for_binding(binding.receipt())
-            }
-            DisplayFormat::Legacy => DisplayFormat::Legacy,
-        };
+        let display = self.bind(ledger, conversation, target, new, None)?;
         Ok(Box::new(Renderer {
             keyboard: self.keyboard.clone(),
             pin: self.pin.clone(),
@@ -1167,16 +1158,17 @@ struct Renderer {
     display: DisplayFormat,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DisplayFormat {
     Legacy,
     Unified,
 }
 
 impl DisplayFormat {
-    fn for_binding(binding: &BindingReceipt) -> Self {
-        if binding.acquisition == BindingAcquisition::Inserted
-            && binding.source.evidence_procedure == UNIFIED_BINDING_PROCEDURE
+    fn for_binding(self, acquisition: BindingAcquisition, procedure: &str) -> Self {
+        if self == Self::Unified
+            && acquisition == BindingAcquisition::Inserted
+            && procedure == UNIFIED_BINDING_PROCEDURE
         {
             Self::Unified
         } else {
@@ -1271,27 +1263,41 @@ mod tests {
             answer,
             center,
         };
+        let unified = DisplayFormat::Unified
+            .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE);
+        let older = DisplayFormat::Unified
+            .for_binding(BindingAcquisition::Inserted, LEGACY_INSTALLED_BINDING);
         assert_eq!(
-            DisplayFormat::Unified.format(true, reader()),
+            DisplayFormat::Unified
+                .for_binding(BindingAcquisition::ExistingAdjacent, ADOPTED_BINDING),
+            DisplayFormat::Legacy
+        );
+        assert_eq!(
+            DisplayFormat::Legacy
+                .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE),
+            DisplayFormat::Legacy
+        );
+        assert_eq!(
+            unified.format(true, reader()),
             "ReMarkableBuddies\n\nQ: What does <Start of Q-A block> mean?\n\nA: Keep this literal.\n(0.1, 0.2) is part of the answer.\n"
         );
         assert_eq!(
-            DisplayFormat::Unified.format(false, reader()),
+            unified.format(false, reader()),
             format!("Q: {question}\n\nA: {answer}\n")
         );
         assert_eq!(
-            DisplayFormat::Legacy.format(true, reader()),
+            older.format(true, reader()),
             format!(
                 "=== Reader Buddy Answers ===\n\n{}",
                 crate::workflow::Workflow::compose_qa(question, answer, center)
             )
         );
         assert_eq!(
-            DisplayFormat::Unified.format(true, ResidentOutputText::Plain("")),
+            unified.format(true, ResidentOutputText::Plain("")),
             "ReMarkableBuddies\n\n"
         );
         assert_eq!(
-            DisplayFormat::Unified.format(false, ResidentOutputText::Plain("Draft\n\nBody\n")),
+            unified.format(false, ResidentOutputText::Plain("Draft\n\nBody\n")),
             "Draft\n\nBody\n"
         );
     }
