@@ -1259,13 +1259,13 @@ fn selected_notebook_original_and_stage_cutoffs_reach_the_staged_marker() {
         let fixture = NotebookFixture::new(false);
         let observation = NotebookMarkerObservation::new(&fixture, transition);
         let _clock = notebook_clock_for_test();
-        let expired = Instant::now() + Duration::from_secs(offset);
         let reached = Arc::new(AtomicBool::new(false));
         let reached_at_marker = reached.clone();
         let _interlock =
             files::interlock_marker_for_test(observation.marker.clone(), transition, move || {
                 reached_at_marker.store(true, Ordering::Release);
-                advance_notebook_clock_for_test(expired);
+                // The stage starts during produce, after fixture setup and earlier stages.
+                advance_notebook_clock_for_test(Instant::now() + Duration::from_secs(offset));
             });
         let mut model = Model::default();
         let report = fixture.produce(&mut model);
