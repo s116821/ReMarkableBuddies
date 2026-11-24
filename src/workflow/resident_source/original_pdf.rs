@@ -404,9 +404,7 @@ impl OrdinaryPdfSource {
 #[cfg(feature = "installed-resident-output")]
 pub(in crate::workflow) struct OrdinaryPdfCache {
     directory: Vec<Identity>,
-    table: Stamp,
     pdf: Stamp,
-    table_digest: String,
     units: crate::retrieval::pdf_worker::CachedNormalization,
 }
 
@@ -612,14 +610,13 @@ impl ObservedOriginalPdf {
     ) -> Result<(CapturedOriginalPdf, Option<OrdinaryPdfCache>)> {
         use crate::retrieval::pdf_worker::PdfInput;
 
-        // A hit must follow both full source reads and fresh capture admission.
+        // Each request checks its own table, including pages inserted since the
+        // last answer. Only the original PDF's identity carries across requests.
         let mut source = self.recheck_verified(verified, progress)?;
         let units = retained
             .filter(|cache| {
                 cache.directory == source.pin.directory.identities
-                    && cache.table == source.pin.table.stamp
                     && cache.pdf == source.pin.pdf.stamp
-                    && cache.table_digest == source.table_digest
             })
             .map(|cache| cache.units);
         let document = Uuid::from_bytes(*verified.page().document.as_bytes());
@@ -637,9 +634,7 @@ impl ObservedOriginalPdf {
         )?;
         let cache = units.map(|units| OrdinaryPdfCache {
             directory: source.pin.directory.identities.clone(),
-            table: source.pin.table.stamp.clone(),
             pdf: source.pin.pdf.stamp.clone(),
-            table_digest: source.table_digest,
             units,
         });
         source.pin.expires = deadline;
@@ -779,7 +774,7 @@ pub fn development_original_pdf(
     .captured_with_executable(capture, executable, deadline, progress)
 }
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, feature = "installed-resident-output"))]
 pub(crate) use tests::assert_ordinary_pdf_reuse;
+#[cfg(test)]
+mod tests;

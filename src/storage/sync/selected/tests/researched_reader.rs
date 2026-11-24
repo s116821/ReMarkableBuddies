@@ -570,6 +570,7 @@ struct Scripted<'a> {
     exhaust_answer_progress: Option<Arc<Mutex<ProgressExhaustion>>>,
     currentness_refusal: Option<Arc<AtomicBool>>,
     answer_refused: bool,
+    ordinary_pdf_questions: Vec<&'static str>,
 }
 impl<'a> Scripted<'a> {
     fn new(reading: Reading, required: bool, has_fact: bool, events: Events) -> Self {
@@ -587,6 +588,7 @@ impl<'a> Scripted<'a> {
             exhaust_answer_progress: None,
             currentness_refusal: None,
             answer_refused: false,
+            ordinary_pdf_questions: Vec::new(),
         }
     }
     fn question(&self) -> &'static str {
@@ -621,7 +623,12 @@ impl LLMEngine for Scripted<'_> {
     ) -> Result<String> {
         ensure!(Instant::now() < deadline, "fixture deadline");
         progress()?;
-        let stage = self.frames.lock().unwrap().len();
+        let ordinal = self.frames.lock().unwrap().len();
+        let (stage, question) = if self.ordinary_pdf_questions.is_empty() {
+            (ordinal, self.question())
+        } else {
+            (ordinal % 3, self.ordinary_pdf_questions[ordinal / 3])
+        };
         if let Some(hook) = &mut self.hook {
             hook(stage, true);
         }
@@ -682,7 +689,6 @@ impl LLMEngine for Scripted<'_> {
         if stage == 2 && self.answer_refused {
             return Err(crate::llm::ProviderRefused.into());
         }
-        let question = self.question();
         let deny = matches!(self.reading, Reading::Deny | Reading::Disagree);
         let intent = if deny {
             json!({"version":1,"intent":"no-internet","quote":"Don't use the internet"})
@@ -1169,6 +1175,113 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 }
 
 #[cfg(feature = "installed-resident-output")]
+fn assert_pdf_reuse_between_service_questions(executable: &std::path::Path) -> Result<()> {
+    use crate::conversation::Role;
+    use crate::workflow::OrdinaryPdfFixtureRounds;
+    use anyhow::Context;
+
+    const SECOND_QUESTION: &str = "Explain unrelated first page. Don't use the internet.";
+    let fixture = Fixture::new();
+    fs::DirBuilder::new().mode(0o700).create(&fixture.0)?;
+    let document = Uuid::new_v4();
+    let page = Uuid::new_v4();
+    let inserted_page = Uuid::new_v4();
+    let pdf = fixture.0.join(format!("{document}.pdf"));
+    let table = fixture.0.join(format!("{document}.content"));
+    let initial = json!({"fileType":"pdf", "cPages":{"original":{"value":2}, "pages":[
+        {"id":page, "idx":{"value":"a"}, "redir":{"value":0}}
+    ]}});
+    let mut after_insertion = initial.clone();
+    after_insertion["cPages"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":inserted_page, "idx":{"value":"b"}, "redir":null}));
+    let bytes = pdf_bytes("alpha acceleration original PDF evidence");
+    fs::write(&pdf, &bytes)?;
+    files::atomic_json(&table, &initial)?;
+
+    for restart in [false, true] {
+        let questions = if restart {
+            &[(SECOND_QUESTION, 1)][..]
+        } else {
+            &[(OPT_OUT, 2), (SECOND_QUESTION, 1)][..]
+        };
+        let mut update_order = |round, order: &std::path::Path| -> Result<()> {
+            if round == 1 {
+                // Model the SDK-visible order and durable table after the normal
+                // answer-page insertion, with the original page open again.
+                files::atomic_json(&table, &after_insertion)?;
+            }
+            if round == 1 || restart {
+                fs::write(order, inserted_page.to_string())?;
+            }
+            Ok(())
+        };
+        let scope = researched_fixture::Scope::new(None, false);
+        let mut model = Scripted::new(Reading::Deny, false, false, Events::default());
+        model.ordinary_pdf_questions = questions.iter().map(|&(question, _)| question).collect();
+        let frames = model.frames.clone();
+        let (results, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+            document,
+            page,
+            fixture.0.clone(),
+            executable.into(),
+            OrdinaryPdfFixtureRounds {
+                source_targets: false,
+                count: questions.len(),
+                before_round: Some(&mut update_order),
+            },
+            |_, _, _| model,
+            |_, _| Ok(()),
+        )?;
+        for result in results {
+            result.with_context(|| format!("Ordinary PDF service reuse run, restart={restart}"))?;
+        }
+        assert_eq!(frames.lock().unwrap().len(), questions.len() * 3);
+        assert_eq!(scope.constructions(), 0);
+        let workers = scope.ordinary_pdf_workers();
+        assert_eq!(
+            workers
+                .iter()
+                .map(|&(_, reused)| reused)
+                .collect::<Vec<_>>(),
+            if restart {
+                vec![false]
+            } else {
+                vec![false, true]
+            }
+        );
+        if let [first, second] = workers.as_slice() {
+            assert_ne!(first.0, second.0);
+        }
+        assert_eq!(fs::read(&pdf)?, bytes);
+        for &(question, expected_page) in questions {
+            let user = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn)
+                        if turn.role == Role::User && turn.text.as_deref() == Some(question) =>
+                    {
+                        Some(turn)
+                    }
+                    _ => None,
+                })
+                .context("Verified service question absent")?;
+            let reference = format!("[S1] Document {document}, page {expected_page}");
+            assert!(
+                records.iter().any(|record| matches!(
+                    record, Record::Turn(turn) if turn.role == Role::Assistant
+                        && turn.exchange == user.exchange
+                        && turn.text.as_deref().is_some_and(|answer| answer.contains(&reference))
+                )),
+                "Expected page {expected_page} for the exact question"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "installed-resident-output")]
 #[test]
 #[ignore = "requires the retained normal binary; mandatory hosted composed-reader step"]
 fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Result<()> {
@@ -1195,6 +1308,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
     }
 
     let executable = retained_command();
+    assert_pdf_reuse_between_service_questions(&executable).context(
+        "Exercise the installed Reader across a Buddy page insertion and service restart",
+    )?;
     let large_page = ".".repeat(400 * 1024);
     let oversized = pdf_pages(
         [large_page.as_str(); 6]
@@ -1290,15 +1406,19 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             );
         let frames = script.frames.clone();
         let path = &path;
-        let (result, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+        let (mut results, records) = crate::workflow::ordinary_pdf_receiver_fixture(
             document,
             page,
             root.clone(),
             executable.clone(),
-            matches!(
-                case,
-                Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets
-            ),
+            crate::workflow::OrdinaryPdfFixtureRounds {
+                source_targets: matches!(
+                    case,
+                    Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets
+                ),
+                count: 1,
+                before_round: None,
+            },
             |ledger, order_change, change_file_on_observe| {
                 let ledger = Ledger::new(ledger.store().clone());
                 script.hook = Some(Box::new(move |stage, pending| {
@@ -1420,6 +1540,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             },
         )
         .with_context(|| format!("Run ordinary PDF fixture case {case:?}"))?;
+        let result = results
+            .pop()
+            .context("Ordinary PDF fixture returned no result")?;
         let frames = frames.lock().unwrap();
         let assistants = records
             .iter()

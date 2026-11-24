@@ -195,6 +195,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         let deadline = owner.ordinary_pdf_deadline()?;
         let (captured, cache) =
             owner.complete_ordinary_pdf(health, observed, deadline, retained)?;
+        #[cfg(test)]
+        super::researched_fixture::record_ordinary_pdf_worker(&captured.index);
         let pdf = OriginalPdf::new(captured, deadline);
         let encoded = images
             .iter()

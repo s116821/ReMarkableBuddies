@@ -2150,15 +2150,26 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "installed-resident-output")]
+    pub(crate) struct OrdinaryPdfFixtureRounds<'a> {
+        pub source_targets: bool,
+        pub count: usize,
+        pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) type OrdinaryPdfRoundHook<'a> =
+        dyn FnMut(usize, &std::path::Path) -> Result<()> + 'a;
+
+    #[cfg(feature = "installed-resident-output")]
     pub(crate) fn ordinary_pdf_receiver_fixture<M: crate::LLMEngine>(
         document: ConversationId,
         page: ConversationId,
         root: PathBuf,
         executable: PathBuf,
-        source_targets: bool,
+        mut rounds: OrdinaryPdfFixtureRounds<'_>,
         model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
         inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
-    ) -> Result<(Result<()>, Vec<Record>)> {
+    ) -> Result<(Vec<Result<()>>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
         let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
         let config: crate::config::Config = serde_json::from_value(serde_json::json!({
@@ -2175,15 +2186,18 @@ pub(crate) mod tests {
         config
             .validate_values()
             .context("Validate ordinary PDF fixture configuration")?;
-        let store = if source_targets {
+        let store = if rounds.source_targets {
             Store::open_source_target_startup(&config)
         } else {
             Store::open(config.paths.clone())
         }
         .context("Open ordinary PDF fixture Store")?;
         let store = Arc::new(store);
+        let releases = (0..rounds.count)
+            .map(|_| released(Instant::now()))
+            .collect();
         let (mut workflow, events, _notify) =
-            workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, &store);
+            workflow_with_store(mode, releases, Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
         let runtime = native
@@ -2216,21 +2230,34 @@ pub(crate) mod tests {
             .context("Admit ordinary PDF fixture local dispatch")?;
         let mut reader = Orchestrator::new(
             workflow,
-            model(&ledger, order_change, change_file_on_observe),
+            model(&ledger, order_change.clone(), change_file_on_observe),
             Ledger::new(store.clone()),
         );
         reader
             .set_local_handwriting(&dispatch)
             .context("Configure ordinary PDF fixture handwriting")?;
-        let result = reader.run_iteration_with_trigger(true, Some(&dispatch));
-        {
-            let events = events.borrow();
-            assert_eq!(&events[..2], &["observe", "capture"]);
-            let (observations, remainder) = events[2..].as_chunks::<2>();
+        let mut results = Vec::with_capacity(rounds.count);
+        for ordinal in 0..rounds.count {
+            if let Some(before_round) = &mut rounds.before_round {
+                before_round(ordinal, &order_change)?;
+            }
+            results.push(reader.run_iteration_with_trigger(true, Some(&dispatch)));
+            let mut events = events.borrow_mut();
+            let acquisition: &[&str] = if ordinal == 0 {
+                &["observe", "capture"]
+            } else {
+                &["reconnect", "observe", "capture"]
+            };
+            assert!(
+                events.starts_with(acquisition),
+                "unexpected fixture acquisition: {events:?}"
+            );
+            let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
             assert!(remainder.is_empty());
             assert!(observations
                 .iter()
                 .all(|pair| *pair == ["reconnect", "observe"]));
+            events.clear();
         }
         let records = store
             .snapshot_heads_matching(
@@ -2246,7 +2273,7 @@ pub(crate) mod tests {
         inspect(&ledger, &records).context("Inspect ordinary PDF fixture conversation")?;
         drop((reader, dispatch, ledger, store));
         std::fs::remove_dir_all(base).context("Remove ordinary PDF fixture Store")?;
-        Ok((result, records))
+        Ok((results, records))
     }
 
     #[test]

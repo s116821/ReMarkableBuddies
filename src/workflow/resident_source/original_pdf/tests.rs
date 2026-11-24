@@ -168,8 +168,12 @@ pub(crate) fn assert_ordinary_pdf_reuse(
     let mut table: serde_json::Value = serde_json::from_slice(&fs::read(other.table_path())?)?;
     table["cPages"]["original"]["value"] = json!(7);
     fs::write(other.table_path(), serde_json::to_vec(&table)?)?;
-    let ((_, reused), _, cache) = query(&other, cache, "velocity marker", 7)?;
+    let ((large, reused), large_key, cache) = query(&other, cache, "velocity marker", 7)?;
     assert!(!reused && cache.is_none());
+    let ((second_large, reused), key, cache) = query(&other, cache, "marker", 7)?;
+    assert!(!reused && cache.is_none());
+    assert_ne!(large, second_large);
+    assert_eq!(key, large_key);
     Ok(())
 }
 

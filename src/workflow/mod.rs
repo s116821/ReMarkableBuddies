@@ -39,7 +39,7 @@ pub use resident_source::original_pdf::development_original_pdf;
 ))]
 pub(crate) use resident_source::tests::fresh_receiver_fixture;
 #[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
-pub(crate) use resident_source::tests::ordinary_pdf_receiver_fixture;
+pub(crate) use resident_source::tests::{ordinary_pdf_receiver_fixture, OrdinaryPdfFixtureRounds};
 
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
