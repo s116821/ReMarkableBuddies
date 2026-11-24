@@ -25,6 +25,8 @@ pub enum CliOperation {
     Inspect,
     CheckInitial,
     CreateInitial,
+    CheckExistingDefault,
+    CreateExistingDefault,
 }
 
 pub fn write_cli(
@@ -34,15 +36,14 @@ pub fn write_cli(
 ) -> Result<()> {
     use super::initial::{self, Action};
 
-    match operation {
-        CliOperation::Inspect => run(Operation::Inspect, path).write_to(output),
-        CliOperation::CheckInitial => {
-            initial::write_report(Action::CheckInitial, path.as_deref(), output)
-        }
-        CliOperation::CreateInitial => {
-            initial::write_report(Action::CreateInitial, path.as_deref(), output)
-        }
-    }
+    let action = match operation {
+        CliOperation::Inspect => return run(Operation::Inspect, path).write_to(output),
+        CliOperation::CheckInitial => Action::CheckInitial,
+        CliOperation::CreateInitial => Action::CreateInitial,
+        CliOperation::CheckExistingDefault => Action::CheckExistingDefault,
+        CliOperation::CreateExistingDefault => Action::CreateExistingDefault,
+    };
+    initial::write_report(action, path.as_deref(), output)
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]

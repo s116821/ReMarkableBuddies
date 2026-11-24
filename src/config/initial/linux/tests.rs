@@ -2,14 +2,18 @@ use super::*;
 use crate::{
     mode_maintenance, restore_maintenance,
     storage::{
-        digest,
         ordinary_restore::tests::{record, Fixture as RestoreFixture},
-        sync::mode::SyncModeChoice,
         Store,
     },
 };
 use serde_json::{json, Value};
-use std::{cell::Cell, collections::BTreeMap, os::unix::fs::symlink, sync::Barrier, thread};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    os::unix::fs::symlink,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Fault {
@@ -64,7 +68,7 @@ impl Fixture {
 
     fn run(&self, action: Action) -> State {
         Tree::open(&self.home, &self.home, &self.config)
-            .and_then(|tree| attempt(&tree, action, &self.defaults))
+            .and_then(|tree| run_in_tree(&tree, action, &self.defaults))
             .unwrap_or(State::Blocked)
     }
 
@@ -158,6 +162,136 @@ fn existing_valid_file_bypasses_creation_only_roots_and_keeps_exact_bytes() {
     assert!(same_inode(&original, &f.config.metadata().unwrap()));
     assert_eq!(fs::read(&f.config).unwrap(), baseline);
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep-secret");
+}
+
+#[test]
+fn existing_default_setup_preserves_owned_data_and_unlocks_the_revision_editor() {
+    use crate::{
+        config::personalization::{self, Operation, Status},
+        conversation::{Ledger, Record},
+    };
+    let f = Fixture::new();
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Blocked);
+    f.assert_no_store();
+    let store = Arc::new(Store::open(f.defaults.paths.clone()).unwrap());
+    let conversation = Uuid::new_v4();
+    Ledger::new(store.clone())
+        .create(conversation, Uuid::new_v4(), 1)
+        .unwrap();
+    let credential = f.defaults.paths.credentials.join("keep");
+    fs::write(&credential, b"retained credential").unwrap();
+    let current = f.defaults.paths.data.join("CURRENT");
+    let before = fs::read(&current).unwrap();
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Blocked);
+    assert!(!f.config.exists());
+    drop(store);
+
+    assert_eq!(f.run(Action::CheckInitial), State::Blocked);
+    assert_eq!(f.run(Action::CreateInitial), State::Blocked);
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Missing);
+    assert!(!f.config.exists());
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Created);
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Present);
+    assert_eq!(
+        fs::read(&f.config).unwrap(),
+        serde_json::to_vec(&f.defaults).unwrap()
+    );
+
+    let original =
+        personalization::run(Operation::Inspect, Some(f.config.clone()), &mut io::empty());
+    let input = serde_json::to_vec(&json!({
+        "contract_version": 1,
+        "expected_config_sha256": original.config_sha256.unwrap(),
+        "enabled": true,
+        "text": "Use concise examples.\nPreserve π.",
+    }))
+    .unwrap();
+    let saved = personalization::run(
+        Operation::Set,
+        Some(f.config.clone()),
+        &mut input.as_slice(),
+    );
+    assert_eq!(saved.status, Status::Ok);
+    assert!(saved.disk_reload_verified);
+    assert_eq!(
+        saved.personalization.unwrap().text,
+        "Use concise examples.\nPreserve π."
+    );
+    let edited = fs::read(&f.config).unwrap();
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Present);
+    assert_eq!(fs::read(&f.config).unwrap(), edited);
+    assert_eq!(fs::read(credential).unwrap(), b"retained credential");
+    assert_eq!(fs::read(current).unwrap(), before);
+    let ledger = Ledger::new(Arc::new(Store::open(f.defaults.paths.clone()).unwrap()));
+    assert!(ledger
+        .inspect(conversation, false)
+        .unwrap()
+        .iter()
+        .any(|record| matches!(record, Record::Root(root) if root.id == conversation)));
+}
+
+#[test]
+fn existing_default_setup_refuses_conflicting_and_unsafe_configuration_entries() {
+    let f = Fixture::new();
+    drop(Store::open(f.defaults.paths.clone()).unwrap());
+    let legacy = f.home.join(".config/reader-buddy/config.json");
+    fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    fs::write(&legacy, b"{}").unwrap();
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Blocked);
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Blocked);
+    assert!(!f.config.exists());
+    fs::write(&f.config, b"{}").unwrap();
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Blocked);
+    assert_eq!(fs::read(&f.config).unwrap(), b"{}");
+    assert_eq!(fs::read(&legacy).unwrap(), b"{}");
+    fs::remove_file(&legacy).unwrap();
+    symlink(f.home.join("missing"), &legacy).unwrap();
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Blocked);
+    fs::remove_file(&legacy).unwrap();
+    fs::write(&f.config, b"invalid").unwrap();
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Blocked);
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Blocked);
+    assert_eq!(fs::read(&f.config).unwrap(), b"invalid");
+}
+
+#[test]
+fn existing_default_setup_keeps_possible_publication_and_serializes_competing_requests() {
+    let f = Fixture::new();
+    drop(Store::open(f.defaults.paths.clone()).unwrap());
+    FAILURE.with(|slot| slot.set(Some(Fault::BeforePublication)));
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Blocked);
+    assert!(!f.config.exists());
+    FAILURE.with(|slot| slot.set(Some(Fault::AfterPublication)));
+    assert_eq!(f.run(Action::CreateExistingDefault), State::Unknown);
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Present);
+    assert_eq!(
+        fs::read(&f.config).unwrap(),
+        serde_json::to_vec(&f.defaults).unwrap()
+    );
+
+    let f = Fixture::new();
+    drop(Store::open(f.defaults.paths.clone()).unwrap());
+    let barrier = Barrier::new(2);
+    let results = thread::scope(|s| {
+        let left = s.spawn(|| {
+            barrier.wait();
+            f.run(Action::CreateExistingDefault)
+        });
+        barrier.wait();
+        let right = f.run(Action::CreateExistingDefault);
+        [left.join().unwrap(), right]
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|state| **state == State::Created)
+            .count(),
+        1
+    );
+    assert!(results
+        .iter()
+        .all(|state| matches!(state, State::Created | State::Present | State::Blocked)));
+    assert_eq!(f.run(Action::CheckExistingDefault), State::Present);
 }
 
 #[test]
@@ -269,6 +403,46 @@ fn unsupported_and_prepublication_failure_block_but_postpublication_is_unknown()
 
 #[test]
 fn anchored_creation_composes_with_initialize_and_verified_foreign_actor_restore() {
+    assert_first_config_restore(|source, root| {
+        let data = root.join("archive");
+        assert!(source.export(&data).unwrap());
+        data
+    });
+}
+
+#[test]
+fn anchored_creation_preserves_configuration_after_isolated_backup_restore() {
+    use crate::storage::{digest, sync::mode::SyncModeChoice};
+
+    assert_first_config_restore(|source, root| {
+        source
+            .set_sync_mode(
+                &source.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::IsolatedBackup {
+                    binding_sha256: digest(b"fixture binding"),
+                },
+            )
+            .unwrap();
+        let lease = source
+            .sync_mode_lease(&source.sync_mode_snapshot().unwrap().token)
+            .unwrap();
+        let package = root.join("package");
+        let mut attempted = None;
+        let exported = source
+            .export_isolated_package(&lease, &package, &root.join("config.json"), &mut attempted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Store::inspect_isolated_package(&package, attempted.as_deref()).unwrap(),
+            exported
+        );
+        assert!(!exported.data.configuration_included);
+        package.join("data")
+    });
+}
+
+fn assert_first_config_restore(archive: impl FnOnce(&Arc<Store>, &Path) -> PathBuf) {
     let target = Fixture::new();
     assert_eq!(target.run(Action::CreateInitial), State::Created);
     target.assert_no_store();
@@ -296,36 +470,7 @@ fn anchored_creation_composes_with_initialize_and_verified_foreign_actor_restore
     let entry = record(&source);
     assert_ne!(target_actor, entry.actor_id);
     source.commit(vec![entry.clone()], BTreeMap::new()).unwrap();
-    source
-        .set_sync_mode(
-            &source.sync_mode_snapshot().unwrap().token,
-            Uuid::new_v4(),
-            SyncModeChoice::IsolatedBackup {
-                binding_sha256: digest(b"fixture binding"),
-            },
-        )
-        .unwrap();
-    let lease = source
-        .sync_mode_lease(&source.sync_mode_snapshot().unwrap().token)
-        .unwrap();
-    let package = origin.root.join("package");
-    let mut attempted = None;
-    let exported = source
-        .export_isolated_package(
-            &lease,
-            &package,
-            &origin.root.join("config.json"),
-            &mut attempted,
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        Store::inspect_isolated_package(&package, attempted.as_deref()).unwrap(),
-        exported
-    );
-    assert!(!exported.data.configuration_included);
-
-    let data = package.join("data");
+    let data = archive(&source, &origin.root);
     let restore = |operation, value: Value| {
         let bytes = serde_json::to_vec(&value).unwrap();
         let mut output = Vec::new();

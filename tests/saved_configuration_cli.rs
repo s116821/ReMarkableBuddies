@@ -279,7 +279,12 @@ fn actual_first_configuration_selectors_refuse_alternate_path_before_access() {
     let f = Fixture::new();
     let baseline = b"{ \"model\": \"keep-existing\" }\n";
     fs::write(&f.config, baseline).unwrap();
-    for operation in ["check-initial", "create-initial"] {
+    for operation in [
+        "check-initial",
+        "create-initial",
+        "check-existing-default",
+        "create-existing-default",
+    ] {
         let output = f.command_for(operation).output().unwrap();
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
