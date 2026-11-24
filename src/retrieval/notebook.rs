@@ -16,8 +16,10 @@ use std::{collections::BTreeSet, io::Cursor};
 #[cfg(any(test, all(target_os = "linux", feature = "installed-resident-output")))]
 pub(crate) mod saved_render;
 mod structured_math;
+mod writer_visual;
 pub use structured_math::{Coverage, MathNode, StructuredSpan};
 use structured_math::{StructuredPolicyPage, StructuredPolicyResponse};
+pub(crate) use writer_visual::VISUAL_SECTION;
 
 fn whole_page_instructions(options: Options) -> String {
     format!(
@@ -28,6 +30,7 @@ fn whole_page_instructions(options: Options) -> String {
 const PROFILE_REVISION: &str = "notebook-ocr-unverified-v2:";
 const MIB: usize = 1024 * 1024;
 const MAX_ORDERED_NOTEBOOK_PAGES: usize = 32;
+pub(crate) const WRITER_VISUAL_REVISION: &str = "writer-notebook-visual-v1:";
 
 pub struct PageImage<'a> {
     pub page: u32,
@@ -126,41 +129,34 @@ impl OrderedNotebookImages<'_> {
             image_digest == expected_image_digest,
             "notebook images differ from acquisition receipt"
         );
-        let mut batches = pages.chunks(options.max_pages);
-        let mut transcribe = |pages: &[PageImage<'_>]| {
-            normalize(
-                self.document,
-                pages,
-                model_profile,
-                engine,
-                options,
-                progress,
-            )
-        };
-        let first = batches
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("complete ordered notebook source required"))?;
-        let NotebookText { mut document, .. } = transcribe(first)?;
-        let mut text_bytes = document
-            .units
-            .iter()
-            .map(|unit| unit.text.len())
-            .sum::<usize>();
-        for batch in batches {
-            let NotebookText { document: next, .. } = transcribe(batch)?;
-            text_bytes += next.units.iter().map(|unit| unit.text.len()).sum::<usize>();
+        ensure!(
+            !self.document.is_nil()
+                && !model_profile.trim().is_empty()
+                && model_profile.len() <= 128
+                && !model_profile.chars().any(char::is_control),
+            "invalid notebook identity"
+        );
+        let mut units = Vec::new();
+        let mut text_bytes = 0;
+        for batch in pages.chunks(options.max_pages) {
+            let next = writer_visual::extract(batch, engine, options, progress)?;
+            text_bytes += next.iter().map(|unit| unit.text.len()).sum::<usize>();
             ensure!(
                 text_bytes <= crate::writer::notebook::MAX_SELECTED_BYTES,
                 "notebook selected text too large"
             );
-            document.units.extend(next.units);
+            units.extend(next);
         }
-        if pages.len() > options.max_pages {
-            document.extractor_revision =
-                format!("ordered-batches-v1:{}", document.extractor_revision);
-        }
-        document.source_sha256 = image_digest;
-        Ok(document)
+        Ok(NormalizedDocument {
+            document: self.document,
+            format: SourceFormat::Notebook,
+            source_sha256: image_digest,
+            extractor_revision: format!(
+                "{WRITER_VISUAL_REVISION}{}",
+                digest(model_profile.as_bytes())
+            ),
+            units,
+        })
     }
 }
 
@@ -583,6 +579,15 @@ fn admit_pages(
     options: Options,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> Result<(Vec<ImageIdentity>, String)> {
+    admit_pages_with_pixels(pages, options, progress, |_| {})
+}
+
+fn admit_pages_with_pixels(
+    pages: &[PageImage<'_>],
+    options: Options,
+    progress: &mut dyn FnMut(Progress) -> Result<()>,
+    mut pixels_observed: impl FnMut(&[u8]),
+) -> Result<(Vec<ImageIdentity>, String)> {
     options.validate()?;
     ensure!(
         !pages.is_empty() && pages.len() <= options.max_pages,
@@ -634,6 +639,7 @@ fn admit_pages(
         decoder
             .read_image(&mut decoded)
             .map_err(|_| anyhow::anyhow!("notebook PNG decode refused"))?;
+        pixels_observed(&decoded);
         drop(decoded);
         progress(Progress::AfterDecode(i))
             .map_err(|_| anyhow::anyhow!("notebook progress refused"))?;
