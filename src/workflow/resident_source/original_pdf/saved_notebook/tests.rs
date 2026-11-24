@@ -46,10 +46,11 @@ impl Fixture {
         }
         private_write(
             f.templates.join("templates.json"),
-            br#"{"templates":[{"filename":"blank","name":"Blank"}]}"#,
+            br#"{"templates":[{"filename":"blank","name":"Blank"},{"filename":"ruled","name":"Ruled"}]}"#,
         )
         .unwrap();
         private_write(f.templates.join("blank.svg"), "<svg/>").unwrap();
+        private_write(f.templates.join("ruled.svg"), "<svg><path/></svg>").unwrap();
         let scene = include_bytes!("../../../../../tests/fixtures/native-history/applied.rm");
         private_write(f.scene(f.first), scene).unwrap();
         private_write(f.scene(f.last), scene).unwrap();
@@ -59,6 +60,31 @@ impl Fixture {
 
     fn scene(&self, page: Uuid) -> PathBuf {
         self.root.join(format!("{}/{page}.rm", self.document))
+    }
+
+    fn table_path(&self) -> PathBuf {
+        self.root.join(format!("{}.content", self.document))
+    }
+
+    fn page_template(&self, page: Uuid, template: Option<&str>) -> Result<()> {
+        let path = self.table_path();
+        let mut table: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let pages = table["cPages"]["pages"].as_array_mut().unwrap();
+        let row = pages
+            .iter_mut()
+            .find(|row| row["id"] == page.to_string())
+            .unwrap();
+        let fields = row.as_object_mut().unwrap();
+        match template {
+            Some(template) => {
+                fields.insert("template".into(), json!({"value":template}));
+            }
+            None => {
+                fields.remove("template");
+            }
+        }
+        private_write(path, serde_json::to_vec(&table)?)?;
+        Ok(())
     }
 
     fn table(&self, insert: bool) {
@@ -72,7 +98,7 @@ impl Fixture {
             pages.push(row(self.output, "b"));
         }
         private_write(
-            self.root.join(format!("{}.content", self.document)),
+            self.table_path(),
             json!({
                 "fileType":"notebook", "formatVersion":2, "pageCount": pages.len(),
                 "orientation":"portrait",
@@ -145,6 +171,26 @@ fn saved_notebook_stays_current_only_for_the_same_ordered_source_inputs() -> Res
     let excluded = HashSet::from([f.output]);
     assert_eq!(initial, f.get(inserted.clone(), excluded.clone())?);
     fs::write(f.scene(f.output), b"confirmed Buddy output").unwrap();
+    assert_eq!(initial, f.get(inserted.clone(), excluded.clone())?);
+
+    let pagedata = f.root.join(format!("{}.pagedata", f.document));
+    private_write(&pagedata, "Blank\nBlank\nBlank\n")?;
+    assert_eq!(initial, f.get(inserted.clone(), excluded.clone())?);
+    private_write(&pagedata, "Blank\nRuled\nBlank\n")?;
+    f.page_template(f.output, Some("Ruled"))?;
+    private_write(
+        f.templates.join("ruled.svg"),
+        "<svg><path id='changed'/></svg>",
+    )?;
+    assert_eq!(initial, f.get(inserted.clone(), excluded.clone())?);
+    f.page_template(f.last, Some("Ruled"))?;
+    assert_ne!(initial, f.get(inserted.clone(), excluded.clone())?);
+    f.page_template(f.last, None)?;
+    let error = f.get(inserted.clone(), excluded.clone()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Missing explicit original template assignment"));
+    f.page_template(f.last, Some("Blank"))?;
     assert_eq!(initial, f.get(inserted.clone(), excluded.clone())?);
 
     let scene = fs::read(f.scene(f.last))?;

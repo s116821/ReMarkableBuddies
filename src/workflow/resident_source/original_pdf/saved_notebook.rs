@@ -209,11 +209,17 @@ impl Inputs<'_, '_> {
 }
 
 #[derive(Serialize)]
+struct TemplateInputs<'a> {
+    registry_entry: &'a Value,
+    asset_digests: Vec<Option<String>>,
+}
+
+#[derive(Serialize)]
 struct Original<'a> {
     id: &'a str,
     page_layout: &'a Value,
     scene_sha256: &'a str,
-    template: &'a [Option<String>],
+    template: &'a TemplateInputs<'a>,
 }
 
 fn acquire(
@@ -288,10 +294,8 @@ fn acquire(
         );
         inputs.missing.push((0, name));
     }
-    let page_data = inputs.optional(&dirs, 0, format!("{document}.pagedata"), TABLE_BYTES)?;
-
     let mut registry_bytes = Vec::new();
-    let registry_sha256 = inputs.read(
+    inputs.read(
         &dirs,
         2,
         "templates.json".into(),
@@ -337,13 +341,15 @@ fn acquire(
             .context("Missing original row")?;
         let template = page_layout["template"]["value"]
             .as_str()
-            .context("Missing original template assignment")?
+            .filter(|template| !template.is_empty())
+            // This producer only admits explicit cPages assignments.
+            .context("Missing explicit original template assignment")?
             .to_owned();
         if !template_assets.contains_key(&template) {
             let mut entries = registry.iter().filter(|entry| entry["name"] == template);
-            let stem = entries
-                .next()
-                .and_then(|entry| entry["filename"].as_str())
+            let entry = entries.next().context("Unresolved stock template asset")?;
+            let stem = entry["filename"]
+                .as_str()
                 .context("Unresolved stock template asset")?;
             ensure!(
                 entries.next().is_none()
@@ -367,7 +373,13 @@ fn acquire(
                 assets.iter().any(Option::is_some),
                 "Stock template assets absent"
             );
-            template_assets.insert(template.clone(), assets);
+            template_assets.insert(
+                template.clone(),
+                TemplateInputs {
+                    registry_entry: entry,
+                    asset_digests: assets,
+                },
+            );
         }
         page_layout
             .as_object_mut()
@@ -392,8 +404,6 @@ fn acquire(
             "saved-notebook-source-v1",
             document.to_string(),
             layout,
-            page_data,
-            registry_sha256,
             exact,
         ))?)
     );
