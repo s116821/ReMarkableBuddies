@@ -295,6 +295,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let ledger = crate::conversation::Ledger::new(self.ledger.store().clone());
         let (draft, source) = selected.values()?;
         let conversation = draft.conversation;
+        let current_page_save = matches!(export, NoteExport::CurrentPage);
         let correlation = match export {
             NoteExport::CurrentPage => {
                 let current = source_note(capture);
@@ -347,6 +348,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                     ledger.expected(Namespace::Conversation, conversation)? == selected.root,
                     "Writer draft changed before export"
                 );
+                if current_page_save {
+                    ensure!(
+                        ledger
+                            .correlated_export_owner(source_note(capture))?
+                            .is_none_or(|owner| owner == conversation),
+                        "Source-page export owner changed"
+                    );
+                }
             }
             ensure!(
                 saved.is_none_or(|revision| revision.current()),
