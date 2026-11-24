@@ -22,6 +22,8 @@ image = "0.25.5"
 byteorder = "1.4"
 clap = { version = "4.0", features = ["derive", "env"] }
 resvg = "0.45"
+roxmltree = "0.20"
+remarkable-rm = { git = "https://github.com/citizen-stig/remarkable-tablet-cli-rs", rev = "544968f002f230ff55c5d438e843aab5a5e9c552" }
 dotenv = "0.15"
 imageproc = "0.25.0"
 env_logger = "0.11.6"

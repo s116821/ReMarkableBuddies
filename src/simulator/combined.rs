@@ -59,6 +59,43 @@ impl LLMEngine for Model {
     }
 }
 
+#[cfg(test)]
+struct InterruptedNotebookStream<'a> {
+    model: Model,
+    streaming: &'a std::cell::Cell<bool>,
+}
+
+#[cfg(test)]
+impl LLMEngine for InterruptedNotebookStream<'_> {
+    fn clear_content(&mut self) {
+        self.model.clear_content();
+    }
+
+    fn add_text_content(&mut self, text: &str) {
+        self.model.add_text_content(text);
+    }
+
+    fn add_image_content(&mut self, image: &str) {
+        self.model.add_image_content(image);
+    }
+
+    fn execute(&mut self) -> Result<String> {
+        self.model.execute()
+    }
+
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        // The map stream loses its visit only while the provider is in flight.
+        self.streaming.set(self.model.seen.len() == 1);
+        let current = progress();
+        self.streaming.set(false);
+        current?;
+        self.execute()
+    }
+}
+
 fn scope(ledger: &Ledger, conversation: Uuid, source: &SourceObservation) -> Result<RequestScope> {
     Ok(RequestScope {
         conversation,
@@ -732,50 +769,95 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     model.seen.clear();
 
     let draft_text = "# Study note\n\nExamples from pages 1 and 4.";
-    let interrupted_conversation = Uuid::new_v4();
-    ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
-    let interrupted = scope(&ledger, interrupted_conversation, &source)?;
-    let reducer = NotebookStage::identity(interrupted.operation, NotebookStageKind::Reduce, 0);
-    let mut changed = false;
-    let mut observe_until_publication = || {
-        if let Some(envelope) = ledger.store().value(Namespace::Conversation, reducer)? {
-            let Record::NotebookStage(stage) = Ledger::decode(&envelope)? else {
-                anyhow::bail!("expected reducer stage");
-            };
-            if stage.outcome == Some(NotebookStageOutcome::Generated) {
-                changed = true;
-                return Ok(revised_source.clone());
+    let mut navigated_source = source.clone();
+    navigated_source.page = last;
+    assert_eq!(navigated_source.content_revision, source.content_revision);
+    assert_eq!(navigated_source.order_revision, source.order_revision);
+    for observation_fails in [false, true] {
+        let interrupted_conversation = Uuid::new_v4();
+        ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
+        let interrupted = scope(&ledger, interrupted_conversation, &source)?;
+        let streaming = std::cell::Cell::new(false);
+        let mut engine = InterruptedNotebookStream {
+            model: Model {
+                replies: [
+                    transcript.to_string(),
+                    "Map response".into(),
+                    draft_text.into(),
+                ]
+                .into(),
+                ..Model::default()
+            },
+            streaming: &streaming,
+        };
+        let (stopped, pending) = dispatch.whole_notebook(
+            &ledger,
+            &mut engine,
+            request,
+            &images,
+            &receipt,
+            "fixture",
+            &interrupted,
+            &mut || {
+                if streaming.get() {
+                    ensure!(!observation_fails, "simulated live observation error");
+                    return Ok(navigated_source.clone());
+                }
+                Ok(source.clone())
+            },
+        )?;
+        assert_eq!(stopped.status, Status::Canceled);
+        assert_eq!(stopped.local_invocations, 1);
+        assert_eq!(engine.model.seen.len(), 1);
+        assert!(pending.is_none() && stopped.draft.is_none());
+    }
+
+    for current_source in [&revised_source, &navigated_source] {
+        let interrupted_conversation = Uuid::new_v4();
+        ledger.create(interrupted_conversation, Uuid::new_v4(), 1)?;
+        let interrupted = scope(&ledger, interrupted_conversation, &source)?;
+        let reducer = NotebookStage::identity(interrupted.operation, NotebookStageKind::Reduce, 0);
+        let mut changed = false;
+        let mut observe_until_publication = || {
+            if let Some(envelope) = ledger.store().value(Namespace::Conversation, reducer)? {
+                let Record::NotebookStage(stage) = Ledger::decode(&envelope)? else {
+                    anyhow::bail!("expected reducer stage");
+                };
+                if stage.outcome == Some(NotebookStageOutcome::Generated) {
+                    changed = true;
+                    return Ok(current_source.clone());
+                }
             }
-        }
-        Ok(source.clone())
-    };
-    let mut interrupted_model = Model::default();
-    interrupted_model.replies.extend([
-        transcript.to_string(),
-        "Ordered source coverage from pages 1 and 4.".into(),
-        draft_text.into(),
-    ]);
-    let (stopped, pending) = dispatch.whole_notebook(
-        &ledger,
-        &mut interrupted_model,
-        request,
-        &images,
-        &receipt,
-        "fixture",
-        &interrupted,
-        &mut observe_until_publication,
-    )?;
-    assert!(changed);
-    assert_eq!(interrupted_model.seen.len(), 3);
-    assert_eq!(stopped.status, Status::Canceled);
-    assert!(pending.is_none() && stopped.draft.is_none());
-    assert!(ledger
-        .store()
-        .value(
-            Namespace::Conversation,
-            writer::stage(interrupted.operation, "draft"),
-        )?
-        .is_none());
+            Ok(source.clone())
+        };
+        let mut interrupted_model = Model::default();
+        interrupted_model.replies.extend([
+            transcript.to_string(),
+            "Ordered source coverage from pages 1 and 4.".into(),
+            draft_text.into(),
+        ]);
+        let (stopped, pending) = dispatch.whole_notebook(
+            &ledger,
+            &mut interrupted_model,
+            request,
+            &images,
+            &receipt,
+            "fixture",
+            &interrupted,
+            &mut observe_until_publication,
+        )?;
+        assert!(changed);
+        assert_eq!(interrupted_model.seen.len(), 3);
+        assert_eq!(stopped.status, Status::Canceled);
+        assert!(pending.is_none() && stopped.draft.is_none());
+        assert!(ledger
+            .store()
+            .value(
+                Namespace::Conversation,
+                writer::stage(interrupted.operation, "draft"),
+            )?
+            .is_none());
+    }
 
     model.replies.extend([
         transcript.to_string(),

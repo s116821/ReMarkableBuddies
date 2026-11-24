@@ -1,5 +1,5 @@
 //! The installed Writer action for the observed source page.
-use super::{Dispatch, Orchestrator};
+use super::{Dispatch, Orchestrator, Workflow};
 use crate::{
     conversation::{
         ExpectedHeads, HistoricalPageAssociation, Mode, Outcome, PreparedResidentCapture,
@@ -502,20 +502,25 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     pub(super) fn require_same_resident_source(&mut self, deadline: Instant) -> Result<()> {
-        let resident = self
-            .workflow
-            .resident_source
-            .as_mut()
-            .context("installed Writer page owner unavailable")?;
-        let health = self
-            .workflow
-            .service_health
-            .as_mut()
-            .context("installed Writer service health unavailable")?;
-        ensure!(
-            resident.captured_page_matches(health, deadline)?,
-            "Source page or page order changed"
-        );
-        Ok(())
+        require_same_resident_source(&mut self.workflow, deadline)
     }
+}
+
+pub(super) fn require_same_resident_source(
+    workflow: &mut Workflow,
+    deadline: Instant,
+) -> Result<()> {
+    let resident = workflow
+        .resident_source
+        .as_mut()
+        .context("installed Writer page owner unavailable")?;
+    let health = workflow
+        .service_health
+        .as_mut()
+        .context("installed Writer service health unavailable")?;
+    ensure!(
+        resident.captured_page_matches(health, deadline)?,
+        "Source page or page order changed"
+    );
+    Ok(())
 }
