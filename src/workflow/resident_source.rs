@@ -3,7 +3,7 @@
 use super::resident_runtime::ReadOnlyAdmission;
 use super::{
     resident_request::{FailureKind, RequestFailure},
-    resident_runtime::ReadOnlyRequest as Request,
+    resident_runtime::{ReadOnlyRequest as Request, ResidentRuntime},
     resident_supervisor::{
         health::ServiceHealth,
         recovery::activation::{InstalledReaderSelection, Session},
@@ -45,7 +45,10 @@ trait SourceSession {
         input: &mut RequestInput,
         deadline: Instant,
     ) -> std::result::Result<(), RequestFailure>;
-    fn identity(&self) -> RuntimeIdentity;
+    fn runtime(&self) -> &ResidentRuntime;
+    fn identity(&self) -> RuntimeIdentity {
+        self.runtime().identity().clone()
+    }
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
@@ -104,8 +107,8 @@ impl SourceSession for Session {
     ) -> std::result::Result<(), RequestFailure> {
         self.source_delivery(health, input, deadline)
     }
-    fn identity(&self) -> RuntimeIdentity {
-        self.source_identity()
+    fn runtime(&self) -> &ResidentRuntime {
+        self.source_runtime()
     }
     #[cfg(all(
         feature = "development-resident-bootstrap",
@@ -288,6 +291,19 @@ impl ResidentSourceOwner {
     }
     pub(super) fn blank_start_requested(&self) -> bool {
         self.gesture == Some(ResidentGesture::BlankStart)
+    }
+
+    /// An unbound single-page notebook has no installed output route other
+    /// than insertion. Legacy adoption requires an adjacent page. The SDK's
+    /// retained loss is authoritative even when this is a different notebook.
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn blocked_reader_insertion(&self) -> Option<OperationId> {
+        if self.selection.has_installed_output()
+            && self.captured_source.as_ref()?.order().len() == 1
+        {
+            return self.session.as_ref()?.runtime().unresolved_operation();
+        }
+        None
     }
 
     #[cfg(all(
@@ -1048,7 +1064,7 @@ impl DevelopmentTargetLease<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflow::resident_runtime::{tests::Fixture, ResidentRuntime};
+    use crate::workflow::resident_runtime::tests::Fixture;
     use crate::workflow::{
         resident_client,
         resident_output::{
@@ -1128,8 +1144,8 @@ mod tests {
             );
             super::super::resident_request::finish(&mut self.runtime, result)
         }
-        fn identity(&self) -> RuntimeIdentity {
-            self.runtime.identity().clone()
+        fn runtime(&self) -> &ResidentRuntime {
+            &self.runtime
         }
         fn reconnect(
             &mut self,
@@ -1527,6 +1543,130 @@ mod tests {
             assert_eq!(conversation_state(), original_state);
 
             drop(workflow);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn reader_checks_original_insert_loss_before_paying_for_a_different_notebook() {
+        use crate::conversation::AttemptReason;
+        use remarkable_open_sdk::{native_adapter::Rejection, PageKey};
+
+        for (mode, prior_reply, blocked) in [
+            (
+                "reconnect-source-handoff-indeterminate",
+                Reply::Indeterminate,
+                true,
+            ),
+            (
+                "reconnect-source-handoff-rejected",
+                Reply::Rejected(Rejection::Unsupported),
+                false,
+            ),
+            (
+                "reconnect-source-handoff-indeterminate-successor",
+                Reply::Indeterminate,
+                false,
+            ),
+        ] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+            let fixture = Fixture::new();
+            let mut runtime = fixture
+                .start_with_store(store.clone(), mode, Duration::from_secs(5))
+                .unwrap();
+            let source = PageKey {
+                document: operation().0,
+                page: operation().0,
+            };
+            let original = operation();
+            let prior = ConversationId::new_v4();
+            let insertion = InsertAfter {
+                source: ReaderFacts::new(source, vec![source.page]).unwrap(),
+                target: operation().0,
+            };
+            assert_eq!(
+                runtime
+                    .connection()
+                    .unwrap()
+                    .insert_after(
+                        prior,
+                        original,
+                        insertion,
+                        Instant::now() + Duration::from_secs(3)
+                    )
+                    .unwrap(),
+                prior_reply
+            );
+            runtime.retire_connection();
+            let journal = store.paths.data.join("native-insertion-attempts-v1.json");
+            let bytes = std::fs::read(&journal).unwrap();
+            let history = resident_client::attempts(&store).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].conversation, prior);
+            assert_eq!(history[0].request.frame().operation, original);
+            assert_eq!(history[0].reply.as_ref(), Some(&prior_reply));
+            let owner = workflow.resident_source.as_mut().unwrap();
+            owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+            owner.session = Some(Box::new(OwnedSession {
+                runtime,
+                _fixture: fixture,
+                events: events.clone(),
+                delivery_fault: false,
+            }));
+            owner.reconnect = true;
+            let calls = Rc::new(Cell::new(0));
+            let model = Provider {
+                calls: calls.clone(),
+                batches: Rc::new(RefCell::new(vec![])),
+                images: vec![],
+                payload_delay: Duration::ZERO,
+                kill_pid: None,
+                no_selection: true,
+            };
+            let ledger = Ledger::new(store.clone());
+            let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+            let result = reader.run_iteration();
+            if blocked {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains(&original.0.to_string()));
+                assert_eq!(calls.get(), 0);
+            } else {
+                result.unwrap();
+                assert_eq!(calls.get(), 1);
+            }
+            assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
+            assert_eq!(std::fs::read(journal).unwrap(), bytes);
+            let entries = store
+                .snapshot_heads_matching(&[Namespace::Source], 2, |_| true)
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            let Record::ResidentCapture(capture) =
+                serde_json::from_value(entries[0].payload.clone()).unwrap()
+            else {
+                panic!("expected the second notebook capture");
+            };
+            assert_ne!(
+                capture.before.document.as_bytes(),
+                source.document.as_bytes()
+            );
+            assert_ne!(capture.conversation, prior);
+            let turns = ledger.inspect(capture.conversation, false).unwrap();
+            let reason = if blocked {
+                AttemptReason::NativeOutputUnavailable
+            } else {
+                AttemptReason::NoSelection
+            };
+            assert!(turns.iter().any(|r| matches!(r, Record::OutcomeFact(f) if f.outcome == Outcome::Failed && f.reason == reason)));
+            assert!(!turns.iter().any(
+                |r| matches!(r, Record::Turn(t) if t.role == crate::conversation::Role::Assistant)
+            ));
+            drop(reader);
             drop(ledger);
             drop(store);
             std::fs::remove_dir_all(base).unwrap();

@@ -10,42 +10,42 @@ use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Shared by the live workflow and bounded vision-comparison helper.
-pub const ANALYSIS_PROMPT: &str = "Read the handwritten question annotation on this tablet page and answer it from \
-             the technical concept selected by a hand-drawn closed outline or a deliberate \
-             highlighted passage. A highlight can select content without any surrounding \
-             outline and may appear gray on a grayscale tablet. Handwriting may be neat \
-             uppercase block letters, connected cursive, or abbreviated shorthand. \
-             Questions may appear in the margins or above the printed document title.\n\
+pub const ANALYSIS_PROMPT: &str = "Read the handwritten question on this tablet page and answer it \
+             using the content selected by a hand-drawn closed outline or a deliberate highlight. \
+             The source may be handwritten or printed and may include text, equations, or diagrams. \
+             A highlight can select content without any surrounding outline and may appear gray \
+             on a grayscale tablet. Handwriting may be neat uppercase block letters, connected \
+             cursive, or abbreviated shorthand. The question may be near the selection, in a \
+             margin, or inside the same outline.\n\
              The first image is the full-page overview; \
              the following three images are overlapping full-width detail strips in \
              top-to-bottom order. They show the SAME page.\n\
-             Transcribe the ink question as written, retaining abbreviations. Distinguish \
-             these annotations from the document's typeset prose, equations and headings. \
-             Do not turn printed source text into a question. If there is no readable question \
-             annotation, no clear user outline or highlight, or the question's meaning is \
-             ambiguous, return NONE. If several distinct topics are marked and the question's \
-             association is unclear, return NONE rather than choosing a topic arbitrarily. \
+             Transcribe only the question as written, retaining abbreviations. Distinguish the \
+             question from selected content and surrounding notes even when all are handwritten. \
+             A nearby question may refer to the selection without repeating its contents. Use \
+             the visible selection and placement to identify a clear referent, but do not add \
+             that content to the transcription. If there is no readable handwritten question, \
+             no clear user outline or highlight, or the question or its referent is ambiguous, \
+             return NONE. If several distinct topics are marked and the question's association \
+             is unclear, return NONE rather than choosing a topic arbitrarily. \
              Do not guess missing question words or confidently answer an uncertain reading. \
              Cross-check the question in the overview and full-width detail before answering. \
              Resolve shorthand only if its meaning is clear from the visible words and source. \
              If any essential word or abbreviation is unreadable or has competing meanings, \
-             return NONE. A plausible transcription alone is not enough: you must understand \
-             exactly what the annotation is asking. Never substitute a general summary of the \
-             passage for an answer to an unclear question.\n\
-             The outline or highlight selects the topic, not a restriction on sources. You may use the \
-             surrounding page and general knowledge to explain that topic and answer the \
-             actual handwritten question. Distinguish general explanation from claims about \
-             this paper. For paper-specific values, preserve visible numbers, uncertainties \
-             and units rather than substituting remembered values or inventing measurements. \
+             return NONE. Never substitute a general summary for an answer to an unclear question.\n\
+             The selection identifies the subject. You may use the surrounding page and general \
+             knowledge to answer the actual question. Distinguish general explanation from \
+             claims about the source. Preserve source-specific numbers, uncertainties and units \
+             rather than substituting remembered values or inventing measurements. \
              If a source detail is unreadable, say so rather than guessing.\n\
-             A question inside an outline is also valid. An X mark, printed gray figure or \
-             document shading is not a user selection. Do not infer a selection from these.\n\
+             An X mark, printed gray figure or document shading is not a user selection. \
+             Do not infer a selection from these.\n\
              Reply in this exact format, with coordinates in the overview's 768x1024 space:\n\
              QUESTION: [question]\n\
              QUESTION_BOX: x,y,width,height\n\
              SELECTION_CENTER: x,y\n\
              ---\n\
-             ANSWER: [concise answer about the selected concept]\n\
+             ANSWER: [concise answer about the selected content]\n\
              SELECTION_CENTER is the approximate center of the selected outlined OR highlighted content; \
              use the full-page overview pixel frame, not the question location or detail-strip coordinates.\n\
              Use plain ASCII notation: +/- for uncertainty, * for multiplication, ^ for powers, \
@@ -444,11 +444,32 @@ impl<M: LLMEngine> Orchestrator<M> {
     }
 
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if attempt.resident_output() && attempt.resident_answer.is_none() {
+            if let Some(original) = self
+                .workflow
+                .resident_source
+                .as_ref()
+                .and_then(|owner| owner.blocked_reader_insertion())
+            {
+                self.workflow.check_request_progress()?;
+                attempt.outcome(
+                    &self.ledger,
+                    false,
+                    Outcome::Failed,
+                    AttemptReason::NativeOutputUnavailable,
+                )?;
+                anyhow::bail!(
+                    "Reader cannot insert an answer page until original operation {} is reconciled",
+                    original.0
+                );
+            }
+        }
+        let personalization = self.personalization.clone();
         anyhow::ensure!(
             self.handwriting_operation.is_none(),
             "handwriting context already captured for this operation"
         );
-        let personalization = self.personalization.clone();
         let images = attempt.images(&self.ledger)?;
         let screenshot_png_data = images
             .first()
@@ -907,15 +928,26 @@ impl<M: LLMEngine> Orchestrator<M> {
         if !(0..1024).contains(&bounds.y) || bounds.height <= 0 {
             return Ok(Some(Failure::Transcription));
         }
-        let prompt =
-            "Transcribe only the handwritten question annotation in these images of the same page. Typeset \
-             document text is not a handwritten question. Preserve the visible words and \
-             abbreviations; shorthand and fragments are valid annotations and need not form \
-             a complete sentence. Read the written letters without requiring an expanded \
-             meaning. Do not expand or guess them from printed context. Do not answer \
-             the question. If an essential handwritten word is uncertain, overstruck or \
-             unreadable, or there is no handwritten question, return only NONE. Otherwise \
-             return one line: TRANSCRIPTION: [exact handwritten text].";
+        // Use the same verifier instruction with and without confirmed examples.
+        macro_rules! question_prompt {
+            ($receiver:ident.llm.add_text_content($text:literal,);) => {
+                $text
+            };
+        }
+        let prompt = question_prompt! {
+        self.llm.add_text_content(
+            "Transcribe only the handwritten question in these images of the same page. \
+             Use the outline or highlight and placement to identify the question, which may \
+             be nearby or inside the outline and may refer to the selection without repeating it. \
+             Distinguish the question from selected content and surrounding notes whether they \
+             are handwritten or printed. Preserve only the visible question text, including \
+             shorthand, fragments, and abbreviations. Do not add words from the selection \
+             or expand or guess text from context. Do not answer the question. If an essential \
+             handwritten word is uncertain, overstruck or unreadable, or the question is absent \
+             or cannot be distinguished from the source, return only NONE. Otherwise \
+             return one line: TRANSCRIPTION: [exact handwritten text].",
+        );
+        };
         let payload = context
             .map(|c| crate::handwriting::runtime::reader_payload(prompt, true, images, c))
             .transpose()?;
@@ -1103,8 +1135,8 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// 2. Navigate right to next page
     /// 3. Compare to original to verify we actually moved
     /// 4. Check if page is valid (blank or existing QA page)
-    /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
-    /// 6. If valid â†’ render Q&A on that page
+    /// 5. If not valid or didn't move ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ verify the source and record a non-ink failure
+    /// 6. If valid ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ render Q&A on that page
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),

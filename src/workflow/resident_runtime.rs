@@ -388,6 +388,13 @@ impl ResidentRuntime {
     pub fn identity(&self) -> &RuntimeIdentity {
         &self.prepared.identity
     }
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn unresolved_operation(&self) -> Option<OperationId> {
+        match self.retired_loss {
+            LostRequest::Indeterminate { operation, .. } => Some(operation),
+            LostRequest::NoPendingMutation => None,
+        }
+    }
     /// Keep runtime integrity admission active through every SDK progress check.
     pub fn with_connection<T>(
         &mut self,

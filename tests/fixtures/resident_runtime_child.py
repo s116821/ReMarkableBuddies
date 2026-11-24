@@ -90,6 +90,8 @@ count = 0
 # Explicit owned source-handoff model, never native current-page authority.
 source_page = uuid.uuid4().bytes
 source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", 1) + source_page
+if mode == "reconnect-source-handoff-indeterminate-successor":
+    source_facts = source_facts[:32] + struct.pack(">H", 2) + source_page + uuid.uuid4().bytes
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
@@ -164,6 +166,12 @@ while True:
                 elif mode.endswith("-wrong-scope"):
                     response[146] ^= 1
                 send(response)
+                continue
+            if mode in ("reconnect-source-handoff-indeterminate", "reconnect-source-handoff-indeterminate-successor",
+                        "reconnect-source-handoff-rejected") and request[202:204] == b"\x02\x01":
+                assert count == 1 and request[204:220] != source_facts[:16]
+                reply = b"\x03\x00" if mode.endswith("-rejected") else b"\x04"
+                send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
                 send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
