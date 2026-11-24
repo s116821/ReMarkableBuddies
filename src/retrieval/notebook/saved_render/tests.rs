@@ -81,43 +81,49 @@ fn saved_page(id: Uuid, bytes: &[u8]) -> SavedPage<'_> {
 #[test]
 fn saved_render_keeps_blank_page_and_full_extent_in_native_order() -> Result<()> {
     let document = Uuid::new_v4();
-    let first = Uuid::new_v4();
+    let originals = [(); 4].map(|_| Uuid::new_v4());
     let buddy = Uuid::new_v4();
     let last = Uuid::new_v4();
     let last_y = MAX_HEIGHT - 24;
     let mut raster = NotebookRaster::default();
-    raster.push(saved_page(first, &scene(None)), &mut || Ok(()))?;
+    for id in originals {
+        raster.push(saved_page(id, &scene(None)), &mut || Ok(()))?;
+    }
     raster.push(
         saved_page(last, &scene(Some((last_y as f32, Pen::FinelinerV2 as u32)))),
         &mut || Ok(()),
     )?;
 
-    raster.images(
-        document,
-        &[first, buddy, last],
-        &BTreeSet::from([buddy]),
-        |images| {
-            assert_eq!(
-                images
-                    .originals
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .collect::<Vec<_>>(),
-                [first, last]
-            );
-            let blank = image::load_from_memory(images.originals[0].1)?.to_luma8();
-            let extended = image::load_from_memory(images.originals[1].1)?.to_luma8();
-            assert_eq!(blank.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
-            assert!(blank.as_raw().iter().all(|&channel| channel == 255));
-            assert_eq!(extended.dimensions(), (DEFAULT_WIDTH, last_y + 24));
-            assert!(extended.get_pixel(DEFAULT_WIDTH / 2, last_y)[0] < 240);
-            assert_eq!(
-                extended.get_pixel(DEFAULT_WIDTH / 2, DEFAULT_HEIGHT - 1)[0],
-                255
-            );
-            Ok(())
-        },
-    )
+    let order = [
+        originals[0],
+        buddy,
+        originals[1],
+        originals[2],
+        originals[3],
+        last,
+    ];
+    let expected = [originals.as_slice(), &[last]].concat();
+    raster.images(document, &order, &BTreeSet::from([buddy]), |images| {
+        assert_eq!(
+            images
+                .originals
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let blank = image::load_from_memory(images.originals[0].1)?.to_luma8();
+        let extended = image::load_from_memory(images.originals[4].1)?.to_luma8();
+        assert_eq!(blank.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        assert!(blank.as_raw().iter().all(|&channel| channel == 255));
+        assert_eq!(extended.dimensions(), (DEFAULT_WIDTH, last_y + 24));
+        assert!(extended.get_pixel(DEFAULT_WIDTH / 2, last_y)[0] < 240);
+        assert_eq!(
+            extended.get_pixel(DEFAULT_WIDTH / 2, DEFAULT_HEIGHT - 1)[0],
+            255
+        );
+        Ok(())
+    })
 }
 
 #[test]
