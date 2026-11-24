@@ -394,6 +394,32 @@ impl Workflow {
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) fn place_resident_writer_export(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        full: &str,
+        receipt: &str,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+    ) -> Result<()> {
+        use resident_output::ResidentOutputText::WriterSourceDraft;
+
+        let backend = self
+            .device
+            .resident_output_backend()
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        let full = WriterSourceDraft(full);
+        let output = if backend.supports_page_text(full, false)?
+            && (association.is_some() || backend.supports_page_text(full, true)?)
+        {
+            full
+        } else {
+            WriterSourceDraft(receipt)
+        };
+        self.place_resident_writer_draft(ledger, conversation, output, association)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn place_resident_writer_draft(
         &mut self,
         ledger: &crate::conversation::Ledger,

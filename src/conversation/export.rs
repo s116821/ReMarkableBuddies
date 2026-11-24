@@ -503,6 +503,34 @@ impl ExportAssociation {
 }
 
 impl Ledger {
+    /// Before allocating a source-page export, find its existing local owner
+    /// across destination spaces. This lookup confers no effect authority.
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn correlated_export_owner(&self, correlation: Uuid) -> Result<Option<Uuid>> {
+        self.complete_store()?;
+        let heads =
+            self.store
+                .snapshot_heads_matching(&[Namespace::ExportAssociation], 8, |entry| {
+                    entry.record_id == correlation
+                        || entry.payload["record"]["capacities"]["correlation"]
+                            .as_str()
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                            == Some(correlation)
+                })?;
+        let mut owner = None;
+        for head in heads {
+            let Record::Export(association) = Self::decode(&head)? else {
+                bail!("invalid export ownership record");
+            };
+            ensure!(
+                owner.is_none_or(|current| current == association.conversation),
+                "source-page export has conflicting owners"
+            );
+            owner = Some(association.conversation);
+        }
+        Ok(owner)
+    }
+
     /// Resolve the portable correlation against existing heads, including all
     /// conflicting heads of a matching record. No active provider preference.
     pub(crate) fn original_exports(

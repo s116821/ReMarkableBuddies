@@ -106,6 +106,7 @@ pub enum Outcome {
     Prepared,
     Interpreted,
     Generated,
+    Clarification,
     Completed,
     Failed,
     Canceled,

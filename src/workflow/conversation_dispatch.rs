@@ -60,6 +60,8 @@ pub struct Dispatch<'a> {
     #[cfg(target_os = "linux")]
     regional_writer_model: Option<String>,
     input_events: std::collections::BTreeSet<Uuid>,
+    #[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) test_note_destination: Option<Arc<crate::writer_flow::tests::Destination>>,
 }
 
 impl<'a> Dispatch<'a> {
@@ -97,6 +99,8 @@ impl<'a> Dispatch<'a> {
             #[cfg(target_os = "linux")]
             regional_writer_model: None,
             input_events: Default::default(),
+            #[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+            test_note_destination: None,
         })
     }
 

@@ -747,11 +747,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .as_deref()
                 .context("Writer draft text unavailable")?,
         )?;
-        let text = if let Some(result) = result {
-            format_exchange(request, format_args!("{result}\n\n{title}\n\n{body}"))
-        } else {
-            format_exchange(request, format_args!("{title}\n\n{body}"))
-        };
+        if let Some(result) = result {
+            let full = format_exchange(request, format_args!("{result}\n\n{title}\n\n{body}"));
+            let receipt = format!("{result}\n\nFull draft saved in Buddy history.\n");
+            return self.workflow.place_resident_writer_export(
+                &self.ledger,
+                conversation,
+                &full,
+                &receipt,
+                association.as_ref(),
+            );
+        }
+        let text = format_exchange(request, format_args!("{title}\n\n{body}"));
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)
         } else {

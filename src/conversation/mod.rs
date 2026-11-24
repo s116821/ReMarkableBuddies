@@ -1213,6 +1213,14 @@ impl Ledger {
                 turn.role == Role::Assistant && turn.text.is_some(),
                 "invalid generated draft"
             ),
+            Outcome::Clarification => ensure!(
+                turn.role == Role::Assistant
+                    && turn.mode == Mode::Writer
+                    && turn.text.is_some()
+                    && turn.sources.is_empty()
+                    && turn.correction_of.is_none(),
+                "invalid Writer clarification"
+            ),
             Outcome::Completed => {
                 let evidence = turn
                     .completion
@@ -2587,11 +2595,13 @@ enum ContextPurpose<'a> {
 
 impl ContextPurpose<'_> {
     fn admits(self, turn: &Turn) -> bool {
-        matches!(turn.outcome, Outcome::Completed | Outcome::Interpreted)
-            || (matches!(self, Self::Presentation | Self::Pair(_))
-                && turn.mode == Mode::Writer
-                && turn.role == Role::Assistant
-                && turn.outcome == Outcome::Generated)
+        matches!(
+            turn.outcome,
+            Outcome::Completed | Outcome::Interpreted | Outcome::Clarification
+        ) || (matches!(self, Self::Presentation | Self::Pair(_))
+            && turn.mode == Mode::Writer
+            && turn.role == Role::Assistant
+            && turn.outcome == Outcome::Generated)
             || matches!(self, Self::Pair(draft) if turn == draft)
     }
 }

@@ -18,6 +18,26 @@ pub(super) enum NoteExport {
     Separate,
 }
 
+pub(super) enum WriterCapture<'a> {
+    Draft,
+    Save,
+    Clarification(&'a str),
+}
+
+const EXPORT_CLARIFICATION: &str =
+    "Should I save a note from this page to your configured destination?";
+
+fn source_conversation(capture: &ResidentSourceCapture) -> Uuid {
+    writer::stage(
+        crate::conversation::Ledger::binding_id(capture.document(), capture.page()),
+        "source-page-conversation",
+    )
+}
+
+fn source_note(capture: &ResidentSourceCapture) -> Uuid {
+    writer::stage(source_conversation(capture), "current-page-note")
+}
+
 pub(super) struct PreparedWriterCapture {
     pub(super) association: Option<HistoricalPageAssociation>,
     pub(super) conversation: Uuid,
@@ -57,6 +77,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             operation,
             writer::stage(operation, "source-capture"),
+            if export.is_some() {
+                WriterCapture::Save
+            } else {
+                WriterCapture::Draft
+            },
         )?;
         let source_sha256 = evidence.original_png.sha256;
 
@@ -148,12 +173,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             drop(owner);
             let selected = produced.context("fresh Writer selection unavailable")?;
             let (selected, result) = self.export_resident_page_draft(
-                dispatch,
-                conversation,
-                operation,
-                selected,
-                deadline,
-                export,
+                dispatch, capture, operation, selected, deadline, export,
             )?;
             self.present_resident_writer_result(
                 conversation,
@@ -187,11 +207,16 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             operation,
             writer::stage(operation, "source-capture"),
+            WriterCapture::Clarification(request),
         )?;
-        let text = format_exchange(
-            request,
-            "Should I save a note from this page to your configured destination?",
+        self.require_same_resident_source(prepared.deadline)?;
+        ensure!(
+            self.ledger
+                .expected(Namespace::Conversation, prepared.conversation)?
+                == prepared.expected,
+            "Clarification history changed before presentation"
         );
+        let text = format_exchange(request, EXPORT_CLARIFICATION);
         self.workflow.place_resident_writer_draft(
             &self.ledger,
             prepared.conversation,
@@ -203,40 +228,114 @@ impl<M: LLMEngine> Orchestrator<M> {
     fn export_resident_page_draft(
         &mut self,
         dispatch: &Dispatch<'_>,
-        conversation: Uuid,
+        capture: &ResidentSourceCapture,
         operation: Uuid,
         selected: crate::conversation::WriterSelection,
         deadline: Instant,
         export: NoteExport,
     ) -> Result<(crate::conversation::WriterSelection, &'static str)> {
-        use crate::{
-            note_export::dispatch::ConfiguredDestination,
-            writer_flow::{Phase, Request, Status},
-        };
+        use crate::note_export::dispatch::ConfiguredDestination;
         let config = dispatch.config;
         if !dispatch.admits(Mode::Writer, true) {
             return Ok((selected, "Draft saved. Note export is disabled."));
         }
-        let ledger = crate::conversation::Ledger::new(self.ledger.store().clone());
         let saved = config.saved_revision();
-        let destination =
-            match ConfiguredDestination::selected(config, saved.as_ref(), Some(ledger.store())) {
-                Ok(destination) => destination,
-                Err(_) => {
-                    return Ok((
-                        selected,
-                        "Draft saved. The configured note destination is unavailable.",
-                    ))
+        #[cfg(test)]
+        if let Some(destination) = &dispatch.test_note_destination {
+            return self.export_page_to_destination(
+                capture,
+                operation,
+                selected,
+                deadline,
+                export,
+                config,
+                saved.as_ref(),
+                &crate::note_export::dispatch::LegacyDestination(destination.as_ref()),
+            );
+        }
+        let destination = match ConfiguredDestination::selected(
+            config,
+            saved.as_ref(),
+            Some(self.ledger.store()),
+        ) {
+            Ok(destination) => destination,
+            Err(_) => {
+                return Ok((
+                    selected,
+                    "Draft saved. The configured note destination is unavailable.",
+                ))
+            }
+        };
+        self.export_page_to_destination(
+            capture,
+            operation,
+            selected,
+            deadline,
+            export,
+            config,
+            saved.as_ref(),
+            &destination,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn export_page_to_destination(
+        &mut self,
+        capture: &ResidentSourceCapture,
+        operation: Uuid,
+        selected: crate::conversation::WriterSelection,
+        deadline: Instant,
+        export: NoteExport,
+        config: &crate::config::Config,
+        saved: Option<&crate::config::SavedRevision>,
+        destination: &impl crate::note_export::dispatch::OwnedDestination,
+    ) -> Result<(crate::conversation::WriterSelection, &'static str)> {
+        use crate::writer_flow::{Phase, Request, Status};
+
+        let ledger = crate::conversation::Ledger::new(self.ledger.store().clone());
+        let (draft, source) = selected.values()?;
+        let conversation = draft.conversation;
+        let correlation = match export {
+            NoteExport::CurrentPage => {
+                let current = source_note(capture);
+                if ledger
+                    .correlated_export_owner(current)?
+                    .is_some_and(|owner| owner != conversation)
+                {
+                    return Ok((selected, "Draft saved. An earlier save is linked to another conversation. Check that export before retrying."));
                 }
-            };
-        let (draft, _) = selected.values()?;
+                let original = writer::stage(conversation, "current-page-note");
+                let legacy = if original == current {
+                    None
+                } else {
+                    ledger.export_association(
+                        conversation,
+                        destination.association_id(conversation, original),
+                    )?
+                };
+                if let Some(prior) = legacy {
+                    ensure!(
+                        prior.backend == destination.backend()
+                            && prior.source_scope == source.scope()
+                            && ledger
+                                .export_association(
+                                    conversation,
+                                    destination.association_id(conversation, current)
+                                )?
+                                .is_none(),
+                        "Conflicting prior source-page exports"
+                    );
+                    original
+                } else {
+                    current
+                }
+            }
+            NoteExport::Separate => writer::stage(operation, "separate-current-page-note"),
+        };
         let request = Request::ExportDraft {
             conversation,
             draft: draft.id,
-            correlation: match export {
-                NoteExport::CurrentPage => writer::stage(conversation, "current-page-note"),
-                NoteExport::Separate => writer::stage(operation, "separate-current-page-note"),
-            },
+            correlation,
             outer_operation: writer::stage(operation, "save-note"),
             effect_operation: writer::stage(operation, "save-note-effect"),
         };
@@ -250,14 +349,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                 );
             }
             ensure!(
-                saved.as_ref().is_none_or(|revision| revision.current()),
+                saved.is_none_or(|revision| revision.current()),
                 "Note destination configuration changed"
             );
             Ok(())
         };
         let report = crate::writer_flow::run_guarded_draft_export(
             &ledger,
-            &destination,
+            destination,
             &request,
             &preference,
             check,
@@ -289,6 +388,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         capture: &ResidentSourceCapture,
         operation: Uuid,
         preparation: Uuid,
+        purpose: WriterCapture<'_>,
     ) -> Result<PreparedWriterCapture> {
         let association = self.ledger.resident_answer_association(capture)?;
         let conversation = if let Some(binding) = &association {
@@ -303,7 +403,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                 self.blocked_unbound_insertion().is_none(),
                 "an earlier Buddy page insertion needs reconciliation"
             );
-            writer::stage(operation, "conversation")
+            match purpose {
+                WriterCapture::Draft => writer::stage(operation, "conversation"),
+                WriterCapture::Save | WriterCapture::Clarification(_) => self
+                    .ledger
+                    .correlated_export_owner(source_note(capture))?
+                    .unwrap_or_else(|| source_conversation(capture)),
+            }
         };
         ensure!(
             self.ledger
@@ -320,7 +426,13 @@ impl<M: LLMEngine> Orchestrator<M> {
             .duration_since(UNIX_EPOCH)?
             .as_millis()
             .try_into()?;
-        if association.is_none() {
+        if association.is_none()
+            && self
+                .ledger
+                .expected(Namespace::Conversation, conversation)?
+                .0
+                .is_empty()
+        {
             self.ledger.create(
                 conversation,
                 writer::stage(operation, "conversation-create"),
@@ -330,27 +442,40 @@ impl<M: LLMEngine> Orchestrator<M> {
         let expected = self
             .ledger
             .expected(Namespace::Conversation, conversation)?;
-        let (capture, prepared) = self.ledger.prepare_resident_historical_with_receipt(
-            writer::stage(operation, "source-capture-admission"),
-            expected,
-            Turn {
-                id: preparation,
-                conversation,
-                exchange: operation,
-                sequence: 0,
-                role: Role::User,
-                mode: Mode::Writer,
-                outcome: Outcome::Prepared,
-                text: None,
-                sources: vec![],
-                correction_of: None,
-                created_ms: timestamp,
-                updated_ms: timestamp,
-                completion: None,
-            },
-            writer::stage(operation, "source-evidence"),
-            capture,
-        )?;
+        let admission = writer::stage(operation, "source-capture-admission");
+        let turn = Turn {
+            id: preparation,
+            conversation,
+            exchange: operation,
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Writer,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: timestamp,
+            updated_ms: timestamp,
+            completion: None,
+        };
+        let evidence = writer::stage(operation, "source-evidence");
+        let (capture, prepared) = match purpose {
+            WriterCapture::Clarification(request) => {
+                self.ledger.prepare_resident_writer_clarification(
+                    admission,
+                    expected,
+                    turn,
+                    evidence,
+                    capture,
+                    (request, EXPORT_CLARIFICATION),
+                )?
+            }
+            WriterCapture::Draft | WriterCapture::Save => {
+                self.ledger.prepare_resident_historical_with_receipt(
+                    admission, expected, turn, evidence, capture,
+                )?
+            }
+        };
         let expected = ExpectedHeads(
             prepared
                 .current_root

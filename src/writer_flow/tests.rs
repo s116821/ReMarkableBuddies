@@ -133,7 +133,7 @@ struct Remote {
     discovery_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 #[derive(Default)]
-struct Destination(Mutex<Remote>);
+pub(crate) struct Destination(Mutex<Remote>);
 impl NoteDestination for Destination {
     fn backend(&self) -> &str {
         "fixture"
@@ -187,6 +187,14 @@ impl NoteDestination for Destination {
     }
 }
 impl Destination {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn lose_next_ack(&self) {
+        self.0.lock().unwrap().lose_ack = true;
+    }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn remote_note_count(&self) -> usize {
+        self.0.lock().unwrap().notes.len()
+    }
     fn write(
         &self,
         id: &str,
@@ -216,7 +224,7 @@ impl Destination {
             Ok(note)
         }
     }
-    fn counts(&self) -> (usize, usize, usize) {
+    pub(crate) fn counts(&self) -> (usize, usize, usize) {
         let s = self.0.lock().unwrap();
         (s.discovers, s.reads, s.writes)
     }

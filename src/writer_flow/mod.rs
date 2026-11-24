@@ -714,4 +714,4 @@ pub(crate) fn run_guarded_draft_export(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
