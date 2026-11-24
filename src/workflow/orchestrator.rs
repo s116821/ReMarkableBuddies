@@ -510,7 +510,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                 }
                 info!("Got verified Q&A");
 
-                attempt.interpret(&self.ledger, &result.question)?;
+                if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
+                    attempt.interpret_with_selection(
+                        &self.ledger,
+                        &result.question,
+                        Some(result.selection_center),
+                    )?;
+                } else {
+                    attempt.interpret(&self.ledger, &result.question)?;
+                }
                 let mut memory_view = None;
                 if self.memory.is_some() || personalization.effective_text().is_some() {
                     let enriched =
@@ -586,11 +594,13 @@ impl<M: LLMEngine> Orchestrator<M> {
     ) -> Result<()> {
         self.workflow.check_request_progress()?;
         attempt.check_selected()?;
-        attempt.generated_with_memory(
-            &self.ledger,
-            Workflow::compose_qa(&result.question, &result.answer, result.selection_center),
-            memory,
-        )?;
+        let stored_answer =
+            if self.workflow.uses_installed_reader_history() && attempt.resident_output() {
+                result.answer.clone()
+            } else {
+                Workflow::compose_qa(&result.question, &result.answer, result.selection_center)
+            };
+        attempt.generated_with_memory(&self.ledger, stored_answer, memory)?;
         if attempt.is_selected() {
             anyhow::bail!("Selected Generated draft acknowledged; qualified Pending/native output unavailable");
         }

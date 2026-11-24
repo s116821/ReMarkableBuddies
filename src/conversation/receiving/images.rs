@@ -27,6 +27,16 @@ pub(crate) struct Association {
     dimensions: [u32; 2],
     attachment_index: usize,
     sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reader_target: Option<ReaderTarget>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReaderTarget {
+    turn: Uuid,
+    document: Uuid,
+    page: Uuid,
+    normalized: [f64; 2],
 }
 
 pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> {
@@ -111,7 +121,8 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
     let mut proof_pixels = 0u64;
     for source in context.turns.iter().flat_map(|turn| &turn.sources) {
         if let Some(images) = by_source.remove(source) {
-            if let Some(capture) = resident.get(source) {
+            let resident_capture = resident.get(source);
+            if let Some(capture) = resident_capture {
                 ensure!(
                     resident_proofs.len() < MAX_IMAGES,
                     "historical resident proof count exceeded"
@@ -172,6 +183,16 @@ pub(crate) fn resolve(ledger: &Ledger, context: &ContextView) -> Result<Images> 
                     dimensions,
                     attachment_index,
                     sha256: media.sha256,
+                    reader_target: resident_capture
+                        .filter(|_| ordinal == 0)
+                        .and_then(|capture| {
+                            capture.reader_target.map(|normalized| ReaderTarget {
+                                turn: capture.turn,
+                                document: capture.before.document,
+                                page: capture.before.page,
+                                normalized,
+                            })
+                        }),
                 });
             }
         }
