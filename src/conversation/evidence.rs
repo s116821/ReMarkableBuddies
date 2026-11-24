@@ -135,6 +135,34 @@ pub(crate) struct FollowupRequestHead {
     user: Uuid,
 }
 
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+impl FollowupRequestHead {
+    pub(crate) fn from_pdf_interpretation(
+        receipt: &WriteResult,
+        published: &[Envelope],
+        user: Uuid,
+        generation: Uuid,
+    ) -> Result<Self> {
+        let turn = published
+            .iter()
+            .find(|record| record.namespace == Namespace::Conversation && record.record_id == user)
+            .context("Interpreted PDF turn missing from publication")?;
+        Ok(Self {
+            generation,
+            root: receipt.historical.applied_root_revision,
+            user: turn.revision_id,
+        })
+    }
+
+    pub(crate) fn expected_root(&self) -> ExpectedHeads {
+        ExpectedHeads(BTreeSet::from([self.root]))
+    }
+
+    pub(crate) fn generation(&self) -> Uuid {
+        self.generation
+    }
+}
+
 impl FollowupEvidence {
     pub(crate) fn with_current<T>(
         &self,

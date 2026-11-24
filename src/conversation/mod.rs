@@ -1343,8 +1343,9 @@ impl Ledger {
         capture: Uuid,
         selection: &crate::analysis::ReaderSelection,
         prepared: &crate::storage::captured::Captured,
-    ) -> Result<WriteResult> {
-        self.advance_with_capture(
+    ) -> Result<(WriteResult, Vec<Envelope>)> {
+        let mut published = Vec::new();
+        let (result, _) = self.advance_with_capture(
             Uuid::new_v4(),
             root,
             user,
@@ -1354,9 +1355,9 @@ impl Ledger {
             Some((capture, selection)),
             Some(prepared),
             None,
-            None,
-        )
-        .map(|(result, _)| result)
+            Some(&mut published),
+        )?;
+        Ok((result, published))
     }
     /// Fact-only outcome recording. Never renders, navigates or replays effects.
     pub fn record_attempt_outcome(

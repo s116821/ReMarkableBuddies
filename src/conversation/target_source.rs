@@ -400,6 +400,7 @@ impl Ledger {
             installed_center,
             None,
         )
+        .map(|(result, _)| result)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -412,7 +413,7 @@ impl Ledger {
         candidate: &Candidate,
         installed_center: Option<crate::analysis::SelectionCenter>,
         captured: Option<&crate::storage::captured::Captured>,
-    ) -> Result<WriteResult> {
+    ) -> Result<(WriteResult, Vec<crate::storage::Envelope>)> {
         let capture_id = frame.source.record.record;
         let selection = installed_center.map(|center| {
             let subject = if matches!(candidate.understanding, Understanding::Interpreted)
@@ -456,7 +457,7 @@ impl Ledger {
             frame.source.record.revision = capture.revision_id;
         }
         frame.acknowledge(self, &result)?;
-        Ok(result)
+        Ok((result, published))
     }
 }
 impl Ledger {
