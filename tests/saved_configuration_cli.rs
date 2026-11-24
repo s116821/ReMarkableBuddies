@@ -25,6 +25,9 @@ impl Fixture {
         Self { root, config }
     }
     fn command(&self) -> Command {
+        self.command_for("inspect")
+    }
+    fn command_for(&self, operation: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_reader-buddy"));
         command
             .env_clear()
@@ -36,7 +39,7 @@ impl Fixture {
                 "http://127.0.0.1:1/unreachable-secret-sentinel",
             )
             .env("RUST_LOG", "trace")
-            .args(["--configuration-operation", "inspect"]);
+            .args(["--configuration-operation", operation]);
         command
     }
     fn run(&self, bytes: &[u8]) -> (Value, Output) {
@@ -269,6 +272,39 @@ fn actual_saved_config_cli_rejects_mixed_runtime_and_maintenance_before_io() {
     }
     assert!(!f.config.exists());
     assert_eq!(fs::read_dir(&f.root).unwrap().count(), 1);
+}
+
+#[test]
+fn actual_first_configuration_selectors_refuse_alternate_path_before_access() {
+    let f = Fixture::new();
+    let baseline = b"{ \"model\": \"keep-existing\" }\n";
+    fs::write(&f.config, baseline).unwrap();
+    for operation in [
+        "check-initial",
+        "create-initial",
+        "check-existing-default",
+        "create-existing-default",
+    ] {
+        let output = f.command_for(operation).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.ends_with(b"\n") && output.stdout.len() <= 4096);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report,
+            json!({"report_version":1,"operation":operation,"state":"blocked"})
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), baseline);
+
+        let mixed = f
+            .command_for(operation)
+            .arg("--inspect-owned-data")
+            .output()
+            .unwrap();
+        assert!(!mixed.status.success());
+        assert!(mixed.stdout.is_empty());
+    }
+    assert_eq!(fs::read_dir(&f.root).unwrap().count(), 2);
 }
 
 #[cfg(unix)]

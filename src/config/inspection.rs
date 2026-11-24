@@ -19,6 +19,33 @@ pub const MAX_OUTPUT: usize = 128 * 1024;
 pub enum Operation {
     Inspect,
 }
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum CliOperation {
+    Inspect,
+    CheckInitial,
+    CreateInitial,
+    CheckExistingDefault,
+    CreateExistingDefault,
+}
+
+pub fn write_cli(
+    operation: CliOperation,
+    path: Option<PathBuf>,
+    output: &mut impl Write,
+) -> Result<()> {
+    use super::initial::{self, Action};
+
+    let action = match operation {
+        CliOperation::Inspect => return run(Operation::Inspect, path).write_to(output),
+        CliOperation::CheckInitial => Action::CheckInitial,
+        CliOperation::CreateInitial => Action::CreateInitial,
+        CliOperation::CheckExistingDefault => Action::CheckExistingDefault,
+        CliOperation::CreateExistingDefault => Action::CreateExistingDefault,
+    };
+    initial::write_report(action, path.as_deref(), output)
+}
+
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
