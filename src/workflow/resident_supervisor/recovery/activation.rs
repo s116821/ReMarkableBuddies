@@ -235,6 +235,14 @@ impl InstalledReaderSelection {
         }
     }
 
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    pub(crate) fn fixture_with_installed_output() -> Self {
+        Self {
+            installed_output: true,
+            ..Self::fixture()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture_for_output(path: &Path, runtime: &RuntimeIdentity) -> Result<Self> {
         use std::{io::Write, os::unix::fs::DirBuilderExt};
@@ -651,8 +659,8 @@ impl Session {
             .finish_request(resident_request::finish(&mut self.runtime, result))
     }
 
-    pub(crate) fn source_identity(&self) -> RuntimeIdentity {
-        self.runtime.identity().clone()
+    pub(in crate::workflow) fn source_runtime(&self) -> &ResidentRuntime {
+        &self.runtime
     }
     pub(crate) fn finish_source_request(&mut self) {
         self.runtime.retire_connection();
