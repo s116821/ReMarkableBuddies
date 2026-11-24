@@ -191,7 +191,7 @@ pub struct Args {
     /// OpenAI endpoint (overrides OPENAI_BASE_URL)
     #[arg(long)]
     base_url: Option<String>,
-    /// Trigger corner (UR, UL, LR, LL)
+    /// Trigger corner (UR, UL, LR, LL). Defaults to lower-right unless set in the config file.
     #[arg(long)]
     trigger_corner: Option<String>,
     /// Global log level, overriding RUST_LOG: off, error, warn, info, debug, trace
