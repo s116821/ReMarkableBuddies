@@ -55,8 +55,8 @@ const SOURCE_SUBJECT_PROMPT: &str = "For this request, include one additional he
     before the --- separator: SELECTION_SUBJECT: [short description of the marked source]. \
     Name the selected content using only what is visibly supported by the images. \
     Describe the selected subject, not the handwritten question or the answer. \
-    Use a single short phrase in plain ASCII, at most 120 characters. If you cannot name \
-    the selected subject reliably, write SELECTION_SUBJECT: NONE. Keep the original \
+    Use a single short phrase in plain ASCII, at most 120 characters, without the separator. \
+    If you cannot name the selected subject reliably, write SELECTION_SUBJECT: NONE. Keep the original \
     whole-response NONE rules for an absent or ambiguous question or selection.";
 
 /// Reader proposal before independent question verification.
@@ -844,10 +844,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Parse the structured response
         // Missing fields or explicit abstention must never become typed Q&A.
-        let (header, body) = response
-            .split_once("\n---\n")
-            .or_else(|| response.split_once("\r\n---\r\n"))
-            .or_else(|| response.split_once("---"))?;
+        let (header, body) = response.split_once("---")?;
         let answer_text = body.trim().strip_prefix("ANSWER:")?.trim();
 
         // Extract question text

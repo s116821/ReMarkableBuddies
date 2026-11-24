@@ -44,7 +44,7 @@ impl SelectionCenter {
 pub struct ReaderSourceSubject(String);
 
 impl ReaderSourceSubject {
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
