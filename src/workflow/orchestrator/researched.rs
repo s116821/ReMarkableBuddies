@@ -105,7 +105,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             .map(|image| crate::storage::digest(image))
             .collect();
         attempt.capture_selected_handwriting(&targets)?;
-        let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
+        let encoded = encode_model_images(images);
         let prompt = format!(
             "{}\n{INTENT_INSTRUCTIONS}",
             ANALYSIS_PROMPT.replace(
@@ -115,8 +115,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         );
         self.workflow.deliver_reader_acquisition()?;
         let raw =
-            self.researched_reading(&attempt, ResearchStage::Analysis, &prompt, &encoded, false)?;
-        let mut result = Self::parse_analysis_response(&raw, images[0].clone())
+            self.researched_reading(&attempt, ResearchStage::Analysis, &prompt, encoded, false)?;
+        let mut result = Self::parse_analysis_response(&raw)
             .context("researched Reader analysis is unavailable")?;
         let separator = raw
             .match_indices("---")
@@ -142,17 +142,13 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Read the same acknowledged batch again. The verifier sees none of the
         // first response, including proposed question geometry or web intent.
-        let verification: Vec<String> = attempt
-            .images(&self.ledger)?
-            .iter()
-            .map(|bytes| STANDARD.encode(bytes))
-            .collect();
+        let verification = encode_model_images(attempt.images(&self.ledger)?);
         let verify_prompt = format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}");
         let raw = self.researched_reading(
             &attempt,
             ResearchStage::Verification,
             &verify_prompt,
-            &verification,
+            verification,
             true,
         )?;
         let agreement =
@@ -335,7 +331,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         attempt: &Attempt,
         stage: ResearchStage,
         prompt: &str,
-        images: &[String],
+        images: Vec<String>,
         verification: bool,
     ) -> Result<String> {
         attempt.check_selected()?;
@@ -345,7 +341,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 crate::handwriting::runtime::researched_reader_payload(
                     prompt,
                     verification,
-                    images,
+                    &images,
                     context,
                 )
             })
@@ -356,10 +352,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             crate::handwriting::runtime::send_parts(owned.0, &parts);
         } else {
             owned.0.add_text_content(prompt);
-            for image in images {
+            for image in &images {
                 owned.0.add_image_content(image);
             }
         }
+        drop(images);
         if !verification && attempt.source_target_enabled() {
             owned
                 .0
