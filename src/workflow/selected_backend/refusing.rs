@@ -25,6 +25,8 @@ impl RefusingBackend {
     pub(in crate::workflow) fn with_owned_fixture() -> Self {
         Self {
             transport: ReadOnlyTransport::OwnedFixture,
+            #[cfg(target_os = "linux")]
+            output: None,
         }
     }
 
