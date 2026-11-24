@@ -268,6 +268,17 @@ impl Factory for InstalledFactory {
     }
 }
 
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+#[derive(Clone, Copy)]
+enum WriterAtRelease {
+    NoRefinement,
+    Refinement(SelectedRefinement),
+    Unavailable,
+}
+
 pub(super) struct ResidentSourceOwner {
     selection: InstalledReaderSelection,
     store: Arc<Store>,
@@ -279,7 +290,7 @@ pub(super) struct ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    writer_at_release: Option<SelectedRefinement>,
+    writer_at_release: WriterAtRelease,
     deadline: Option<Instant>,
     reconnect: bool,
     canceled: bool,
@@ -306,7 +317,7 @@ impl ResidentSourceOwner {
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
             ))]
-            writer_at_release: None,
+            writer_at_release: WriterAtRelease::NoRefinement,
             deadline: None,
             reconnect: false,
             canceled: false,
@@ -431,12 +442,14 @@ impl ResidentSourceOwner {
         ))]
         if writer && self.selection.has_installed_output() {
             // A failed read cannot carry over a previously observed request.
-            self.writer_at_release = None;
-            self.writer_at_release = match (&self.session, released.released_boot_second) {
+            self.writer_at_release = WriterAtRelease::Unavailable;
+            let selected = match (&self.session, released.released_boot_second) {
                 (Some(session), Some(second)) => session.writer_at_release(second)?,
                 _ => None,
             };
-            return Ok(reader || self.writer_at_release.is_some());
+            self.writer_at_release =
+                selected.map_or(WriterAtRelease::NoRefinement, WriterAtRelease::Refinement);
+            return Ok(reader || selected.is_some());
         }
         Ok(reader)
     }
@@ -466,7 +479,7 @@ impl ResidentSourceOwner {
         capture: &ResidentSourceCapture,
         action: SlotAction,
     ) -> Result<Option<crate::writer::Request>> {
-        let Some(selected) = self.writer_at_release else {
+        let WriterAtRelease::Refinement(selected) = self.writer_at_release else {
             return Ok(None);
         };
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
@@ -486,7 +499,10 @@ impl ResidentSourceOwner {
         &self,
         capture: &ResidentSourceCapture,
     ) -> Result<Option<super::resident_output::SelectedConversationRequest>> {
-        if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
+        if self.gesture != Some(ResidentGesture::Reader)
+            || !self.selection.has_installed_output()
+            || !matches!(self.writer_at_release, WriterAtRelease::NoRefinement)
+        {
             return Ok(None);
         }
         use super::{
@@ -980,7 +996,7 @@ impl ResidentSourceOwner {
             feature = "development-input-diagnostics"
         ))]
         {
-            self.writer_at_release = None;
+            self.writer_at_release = WriterAtRelease::NoRefinement;
         }
         self.deadline = None;
         self.captured_source = None;
@@ -2706,14 +2722,15 @@ pub(crate) mod tests {
             &*events.borrow(),
             &["writer slot unavailable", "writer slot unavailable"]
         );
+        events.borrow_mut().push("current-target-writer-queued");
+        let source = workflow.acquire_reader_evidence().unwrap();
         assert!(workflow
-            .resident_source
-            .as_ref()
+            .selected_resident_conversation(&source, true)
             .unwrap()
-            .writer_at_release
             .is_none());
+        assert!(events.borrow().contains(&"current-target-writer-queued"));
         workflow.finish_request().unwrap();
-        drop((workflow, store));
+        drop((source, workflow, store));
         std::fs::remove_dir_all(base).unwrap();
     }
 
