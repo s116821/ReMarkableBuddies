@@ -742,7 +742,8 @@ impl ResidentSourceOwner {
         };
         // One original output deadline. Provider work cannot refresh this window;
         // later stages only clamp it, and synchronous work is checked on return.
-        let end = Instant::now() + Duration::from_secs(90);
+        let placement_started = Instant::now();
+        let end = placement_started + Duration::from_secs(90);
         self.selection.current(end)?;
         admitted_progress(end, || self.progress(health))?;
         let original = self
@@ -955,6 +956,7 @@ impl ResidentSourceOwner {
         if text.is_empty() && !newly_created {
             return Ok(Outcome::ReusedWithoutWrite);
         }
+        let target_ready = Instant::now();
         // Fresh full service/broker admission plus a second exact Observe before
         // requesting a live render lease. Historical Insert/PNG are not that lease.
         let delivery =
@@ -1001,7 +1003,15 @@ impl ResidentSourceOwner {
             end,
             steps: 0,
         };
+        let render_started = Instant::now();
         renderer.render_output(text, &mut lease)?;
+        let render_finished = Instant::now();
+        log::info!(
+            "Resident page text input finished: placement_ms={} render_setup_ms={} text_input_ms={}",
+            target_ready.duration_since(placement_started).as_millis(),
+            render_started.duration_since(target_ready).as_millis(),
+            render_finished.duration_since(render_started).as_millis(),
+        );
         lease.current()?;
         let rendered_target = lease.target.clone();
         let rendered_runtime = lease.runtime.clone();
@@ -1009,7 +1019,10 @@ impl ResidentSourceOwner {
         drop(renderer);
         let rendered = self.output_capture(health, &rendered_target, end)?;
         backend.record_rendered(&rendered_runtime, &rendered_target, &rendered)?;
-        log::info!("Resident answer submitted; persistence remains unverified");
+        log::info!(
+            "Resident answer submitted; persistence remains unverified; post_render_ms={}",
+            render_finished.elapsed().as_millis(),
+        );
         Ok(Outcome::SubmittedUnverified)
     }
 }

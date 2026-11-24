@@ -3,7 +3,8 @@
 ReMarkableBuddies (Buddy) is one reMarkable tablet app with two workflows.
 Reader answers handwritten questions about circled or highlighted content.
 Writer generates and refines note drafts from source text in a conversation.
-[Writer draft commands](docs/reference/writer-drafts.md)
+See [using Writer on the tablet](#using-writer-on-the-tablet) or the
+[Writer draft commands](docs/reference/writer-drafts.md).
 
 The Vellum package is named `remarkable-buddies`. The executable and systemd
 service keep their original names, `reader-buddy` and `reader-buddy.service`.
@@ -50,6 +51,19 @@ check adds an API request for recognized questions. It reduces confident misread
 but can reject valid handwriting when the readings differ; agreement is not a
 guarantee of correctness. See the [hardware evidence comments](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142)
 for results and limitations, and the [build and cost details](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876514).
+
+## Using Writer on the tablet
+
+Handwritten Writer requests require the combined Reader/Writer development
+preview on reMarkable 2 with Writer enabled. The `v0.78.3` release predates
+this input. With automatic page insertion enabled, a one-page notebook is enough.
+
+1. Open the notebook page you want to use. Write “Make a note from this page” for a whole-page draft. To use one passage or drawing, circle it and write “Make a note about the circled part” beside it.
+2. Hold one finger still in the **lower-right corner** for three seconds, then release once.
+3. On a successful run, the adjacent Buddy page shows the request Buddy read and the draft beneath it. For a circled note, check the **About** line against the content you selected.
+
+This gesture saves a draft in Buddy. Export to a connected notes service is
+a separate action.
 
 ## Undo and redo the latest answer
 
