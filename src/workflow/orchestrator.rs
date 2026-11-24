@@ -13,6 +13,8 @@ use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WI
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod circled_writer;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod current_page_writer;
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod ordinary_pdf;
@@ -340,6 +342,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     SourceIntent::WriterCurrentPage { request } => {
                         return self.run_resident_current_page_writer(request, capture, dispatch);
                     }
+                    SourceIntent::WriterCircled { request, target } => {
+                        return self
+                            .run_resident_circled_writer(request, target, capture, dispatch);
+                    }
                     SourceIntent::Unresolved => {
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());
@@ -631,6 +637,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 model_profile,
                 owner: &owner,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+                accepted: None,
             },
             &mut produced,
         );

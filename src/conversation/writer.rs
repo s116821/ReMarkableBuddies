@@ -215,6 +215,7 @@ impl Ledger {
         mut turn: Turn,
         source: WriterSource,
         selected: Option<Turn>,
+        accepted: Option<&Turn>,
     ) -> Result<WriterPreparation> {
         source.validate()?;
         if let Some(region) = &source.region {
@@ -230,12 +231,16 @@ impl Ledger {
                 && turn.conversation == source.conversation,
             "invalid Writer preparation"
         );
-        let fingerprint = Self::fingerprint(&(
-            "prepare-writer-v1",
-            &turn,
-            &source,
-            selected.as_ref().map(|draft| draft.id),
-        ))?;
+        let fingerprint = if let Some(accepted) = accepted {
+            Self::fingerprint(&("prepare-fresh-regional-writer-v1", &turn, &source, accepted))?
+        } else {
+            Self::fingerprint(&(
+                "prepare-writer-v1",
+                &turn,
+                &source,
+                selected.as_ref().map(|draft| draft.id),
+            ))?
+        };
         if let Some(prior) = self.replay(operation, &fingerprint)? {
             return Ok(WriterPreparation {
                 fresh: false,
@@ -244,14 +249,47 @@ impl Ledger {
             });
         }
         let (_, mut root) = self.live_root(turn.conversation, Some(&expected))?;
-        // As with allocated sequence, publication time is assigned only after
-        // replay comparison; retry fingerprints keep their stable input shape.
-        turn.created_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u64::MAX as u128) as u64;
-        turn.updated_ms = turn.created_ms;
+        let prior_user = if let Some(accepted) = accepted {
+            let region = source
+                .region
+                .as_ref()
+                .context("fresh regional source absent")?;
+            let current = self
+                .store
+                .value(Namespace::Conversation, accepted.id)?
+                .context("fresh regional Writer request absent")?;
+            let Record::Turn(saved) = Self::decode(&current)? else {
+                anyhow::bail!("fresh regional Writer request kind differs");
+            };
+            ensure!(
+                &saved == accepted
+                    && saved.id == turn.id
+                    && saved.conversation == turn.conversation
+                    && saved.exchange == turn.exchange
+                    && saved.role == turn.role
+                    && saved.mode == turn.mode
+                    && saved.outcome == turn.outcome
+                    && saved.text == turn.text
+                    && saved.sources.len() == 1
+                    && saved.correction_of.is_none()
+                    && selected.is_none()
+                    && self.current_target_reference(turn.conversation)?.as_ref()
+                        == Some(&region.target),
+                "fresh regional Writer request changed"
+            );
+            turn = saved;
+            turn.sources.push(source.id);
+            Some(ExpectedHeads(BTreeSet::from([current.revision_id])))
+        } else {
+            // Publication time is assigned after replay comparison.
+            turn.created_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            turn.updated_ms = turn.created_ms;
+            None
+        };
         let mut records = Vec::new();
         let source_parents = if source.turn == turn.id {
             ExpectedHeads::default()
@@ -297,13 +335,15 @@ impl Ledger {
             )?);
         }
         self.validate_correction_target(&turn)?;
-        turn.sequence = root.next_sequence;
-        root.next_sequence = root
-            .next_sequence
-            .checked_add(1)
-            .context("sequence exhausted")?;
-        root.updated_ms = turn.updated_ms;
-        if let Some(region) = &source.region {
+        if prior_user.is_none() {
+            turn.sequence = root.next_sequence;
+            root.next_sequence = root
+                .next_sequence
+                .checked_add(1)
+                .context("sequence exhausted")?;
+            root.updated_ms = turn.updated_ms;
+        }
+        if let Some(region) = source.region.as_ref().filter(|_| prior_user.is_none()) {
             let used = target::TargetUse {
                 id: target::TargetUse::id(turn.id),
                 conversation: turn.conversation,
@@ -334,7 +374,7 @@ impl Ledger {
         records.push(self.envelope(
             Namespace::Conversation,
             turn.id,
-            ExpectedHeads::default(),
+            prior_user.unwrap_or_default(),
             Record::Turn(turn),
             vec![],
         )?);

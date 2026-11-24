@@ -458,6 +458,7 @@ fn run_with_configuration<E: LLMEngine>(
                 model_profile: profile,
                 owner: &writer_owner,
                 deadline: started + std::time::Duration::from_secs(300),
+                accepted: None,
             },
             &mut produced,
         );

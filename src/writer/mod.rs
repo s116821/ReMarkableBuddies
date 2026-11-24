@@ -372,23 +372,36 @@ fn selected(
     let source = crate::conversation::WriterSource::decode(source)?;
     Ok((draft, source))
 }
-fn history(ledger: &Ledger, conversation: Uuid) -> Result<crate::conversation::ContextView> {
-    // Use the existing context contract. Counting UTF8 bytes is a conservative
-    // caller budget for this bounded text consumer, not provider tokenization proof.
-    let view = ledger.context(
-        conversation,
-        &crate::conversation::ContextBudget {
-            max_text_bytes: MAX_HISTORY,
-            max_turns: 64,
-            provider_token_limit: Some(MAX_HISTORY),
-        },
-        |turns| {
-            Ok(turns
-                .iter()
-                .map(|t| t.text.as_ref().map_or(0, String::len))
-                .sum())
-        },
-    )?;
+fn history(
+    ledger: &Ledger,
+    conversation: Uuid,
+    before: Option<u64>,
+) -> Result<crate::conversation::ContextView> {
+    // Count UTF-8 bytes conservatively for this bounded text consumer.
+    let budget = crate::conversation::ContextBudget {
+        max_text_bytes: MAX_HISTORY,
+        max_turns: 64,
+        provider_token_limit: Some(MAX_HISTORY),
+    };
+    let count = |turns: &[Turn]| {
+        Ok(turns
+            .iter()
+            .map(|t| t.text.as_ref().map_or(0, String::len))
+            .sum())
+    };
+    let view = match before {
+        Some(0) => Ledger::context_from_records(vec![], None, &budget, count, |_| false)?,
+        Some(end_exclusive) => ledger.context_range(
+            conversation,
+            Some(crate::conversation::TurnRange {
+                start: 0,
+                end_exclusive,
+            }),
+            &budget,
+            count,
+        )?,
+        None => ledger.context(conversation, &budget, count)?,
+    };
     ensure!(
         view.missing_media.is_empty(),
         "historical media unavailable"
@@ -531,6 +544,11 @@ struct ReceivingPreferences<'a> {
     personalization: &'a PersonalizationSnapshot,
     memory: Option<&'a dyn crate::memory::Provider>,
 }
+struct RegionalInput<'a> {
+    proof: crate::conversation::target::RegionSource,
+    accepted: Option<&'a Turn>,
+}
+
 fn run_owned_source<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
@@ -538,8 +556,10 @@ fn run_owned_source<E: LLMEngine>(
     preferences: ReceivingPreferences<'_>,
     canceled: &mut dyn FnMut() -> bool,
     control: OwnedRun<'_, '_>,
-    regional: Option<crate::conversation::target::RegionSource>,
+    regional: Option<RegionalInput<'_>>,
 ) -> Report {
+    let accepted = regional.as_ref().and_then(|input| input.accepted);
+    let regional = regional.map(|input| input.proof);
     let ReceivingPreferences {
         personalization,
         memory,
@@ -632,7 +652,7 @@ fn run_owned_source<E: LLMEngine>(
             }
             _ => unreachable!(),
         };
-        let history = history(ledger, conversation)?;
+        let history = history(ledger, conversation, accepted.map(|turn| turn.sequence))?;
         let images = if control.historical_images && source.region.is_none() {
             crate::conversation::receiving::images::resolve(ledger, &history)?
         } else {
@@ -687,7 +707,8 @@ fn run_owned_source<E: LLMEngine>(
         source.id,
     );
     user.correction_of = prior.as_ref().map(|t| t.id);
-    let prepared = ledger.prepare_writer(operation, expected, user, source.clone(), prior);
+    let prepared =
+        ledger.prepare_writer(operation, expected, user, source.clone(), prior, accepted);
     let Ok(prepared) = prepared else {
         return Report::refused(request, Failure::Storage);
     };
@@ -773,6 +794,9 @@ fn run_owned_source<E: LLMEngine>(
         }
         if let Some(context) = context {
             content.0.add_text_content(&context);
+        }
+        if accepted.is_some() {
+            content.0.add_text_content("Ground the note only in source_units from the masked region. Use conversation history and preferences to understand the request and format. They do not supply facts about the selected content.");
         }
         content.0.add_text_content(&payload);
         for image in &images.attachments {

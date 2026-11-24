@@ -82,17 +82,22 @@ pub(crate) fn parse_candidate(raw: &str) -> Option<Candidate> {
     if raw.len() > 32 * 1024 {
         return None;
     }
-    let mut candidate: Candidate = serde_json::from_str(raw).ok()?;
-    candidate.geometry = candidate
-        .geometry
-        .map(|geometry| geometry.canonicalize())
-        .transpose()
-        .ok()?;
-    candidate.validate().ok()?;
-    Some(candidate)
+    serde_json::from_str::<Candidate>(raw)
+        .ok()?
+        .canonicalize()
+        .ok()
 }
 
 impl Candidate {
+    pub(crate) fn canonicalize(mut self) -> Result<Self> {
+        self.geometry = self
+            .geometry
+            .map(geometry::Geometry::canonicalize)
+            .transpose()?;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             crate::analysis::ReaderSourceSubject::valid_stored_text(&self.subject),

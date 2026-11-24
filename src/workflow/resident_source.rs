@@ -2940,6 +2940,8 @@ pub(crate) mod tests {
         refuse_new_reader_text: bool,
         successor: Option<SuccessorProbe>,
         #[cfg(feature = "installed-resident-output")]
+        insertion_source: Option<ConversationId>,
+        #[cfg(feature = "installed-resident-output")]
         writer_preview: Option<Rc<RefCell<Vec<String>>>>,
     }
 
@@ -3165,7 +3167,8 @@ pub(crate) mod tests {
                 previous.is_none() || (self.successor.is_some() && previous == Some(conversation))
             );
             #[cfg(feature = "installed-resident-output")]
-            if self.writer_preview.is_some()
+            if self.insertion_source.is_none()
+                && self.writer_preview.is_some()
                 && self
                     .successor
                     .as_ref()
@@ -3221,13 +3224,17 @@ pub(crate) mod tests {
             _: &Ledger,
             _: ConversationId,
             _: &RuntimeIdentity,
-            _: &ReaderFacts,
-            _: bool,
+            _target: &ReaderFacts,
+            _newly_created: bool,
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
             #[cfg(feature = "installed-resident-output")]
             if let Some(preview) = &self.writer_preview {
+                if let Some(source) = self.insertion_source {
+                    assert!(_newly_created);
+                    assert_ne!(_target.page().page.as_bytes(), source.as_bytes());
+                }
                 return Ok(Box::new(WriterPreview(preview.clone())));
             }
             panic!("unexpected renderer request");
