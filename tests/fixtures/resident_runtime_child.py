@@ -93,9 +93,12 @@ if declared_source.is_file():
     source_document, source_page = [uuid.UUID(value).bytes for value in json.loads(declared_source.read_text())]
 else:
     source_document, source_page = uuid.uuid4().bytes, uuid.uuid4().bytes
-source_facts = source_document + source_page + struct.pack(">H", 1) + source_page
+source_order = [source_page]
 if mode == "reconnect-source-handoff-indeterminate-successor":
-    source_facts = source_facts[:32] + struct.pack(">H", 2) + source_page + uuid.uuid4().bytes
+    source_order.append(uuid.uuid4().bytes)
+elif mode == "reconnect-source-handoff-indeterminate-last-page":
+    source_order.insert(0, uuid.uuid4().bytes)
+source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
@@ -176,7 +179,8 @@ while True:
                 reply = b"\x03\x02" if mode.endswith("-rejected") else b"\x04"
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
-            if mode in ("reconnect-source-handoff-indeterminate", "reconnect-source-handoff-indeterminate-successor",
+            if mode in ("reconnect-source-handoff-indeterminate", "reconnect-source-handoff-indeterminate-last-page",
+                        "reconnect-source-handoff-indeterminate-successor",
                         "reconnect-source-handoff-rejected") and request[202:204] == b"\x02\x01":
                 assert count == 1 and request[204:220] != source_facts[:16]
                 reply = b"\x03\x00" if mode.endswith("-rejected") else b"\x04"
