@@ -1097,13 +1097,20 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     fn analysis_separator(response: &str) -> Option<usize> {
         response.match_indices("---").find_map(|(start, marker)| {
-            let line = response[..start].rsplit('\n').next()?.trim();
+            let header = &response[..start];
+            let line = header.rsplit('\n').next()?.trim();
             let rest = &response[start + marker.len()..];
             let standalone = line.is_empty() && rest.split('\n').next()?.trim().is_empty();
+            // A compact question can end the header only after the required selection center.
+            // In the usual field order even literal "---ANSWER:" belongs to the handwritten question.
+            let final_question = line.starts_with("QUESTION:")
+                && header
+                    .lines()
+                    .any(|field| field.trim_start().starts_with("SELECTION_CENTER:"));
             // Older responses can attach the answer boundary to the final question or coordinate field.
             // The JSON and subject fields can themselves contain literal "---ANSWER:" text.
             let compact = (line.is_empty()
-                || line.starts_with("QUESTION:")
+                || final_question
                 || line.starts_with("QUESTION_BOX:")
                 || line.starts_with("SELECTION_CENTER:"))
                 && rest.trim_start().starts_with("ANSWER:");
@@ -1822,10 +1829,23 @@ mod tests {
 
     #[test]
     fn compact_answer_can_follow_the_question_as_the_last_header() {
-        let response = "QUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nQUESTION: How much?---ANSWER: Four.";
-        let result = Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).unwrap();
-        assert_eq!(result.question, "How much?");
-        assert_eq!(result.answer, "Four.");
+        let coordinates = "QUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
+        let literal = "Does A---ANSWER: B mean four?";
+        for (response, question) in [
+            (
+                format!("{coordinates}\nQUESTION: How much?---ANSWER: Four."),
+                "How much?",
+            ),
+            (
+                format!("QUESTION: {literal}\n{coordinates}\n---\nANSWER: Four."),
+                literal,
+            ),
+        ] {
+            let result =
+                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            assert_eq!(result.question, question);
+            assert_eq!(result.answer, "Four.");
+        }
     }
 
     #[test]
