@@ -2908,8 +2908,14 @@ pub(crate) mod tests {
         conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
         refuse_new_reader_text: bool,
+        successor: Option<SuccessorProbe>,
         #[cfg(feature = "installed-resident-output")]
         writer_preview: Option<Rc<RefCell<Vec<String>>>>,
+    }
+
+    struct SuccessorProbe {
+        position: PathBuf,
+        interrupt_restore: bool,
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -3121,7 +3127,10 @@ pub(crate) mod tests {
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
-            assert!(self.conversation.replace(Some(conversation)).is_none());
+            let previous = self.conversation.replace(Some(conversation));
+            assert!(
+                previous.is_none() || (self.successor.is_some() && previous == Some(conversation))
+            );
             #[cfg(feature = "installed-resident-output")]
             if self.writer_preview.is_some() {
                 return Ok(PageUse::RelevantBuddy);
@@ -3146,13 +3155,27 @@ pub(crate) mod tests {
 
         fn navigate(
             &mut self,
-            _: RequestInput,
-            _: LogicalDirection,
+            input: RequestInput,
+            direction: LogicalDirection,
             _: &RuntimeIdentity,
             _: Instant,
-            _: &mut dyn FnMut() -> Result<()>,
+            progress: &mut dyn FnMut() -> Result<()>,
         ) -> Result<RequestInput> {
-            panic!("unexpected navigation");
+            let probe = self.successor.as_ref().expect("unexpected navigation");
+            progress()?;
+            match direction {
+                LogicalDirection::Next => {
+                    assert!(!probe.position.exists());
+                    std::fs::write(&probe.position, [])?;
+                }
+                LogicalDirection::Previous => {
+                    assert!(probe.position.exists());
+                    anyhow::ensure!(!probe.interrupt_restore, "fixture navigation interrupted");
+                    std::fs::remove_file(&probe.position)?;
+                }
+            }
+            progress()?;
+            Ok(input)
         }
 
         fn renderer(
@@ -3248,29 +3271,47 @@ pub(crate) mod tests {
         use crate::workflow::selected_backend::RefusingBackend;
         use remarkable_open_sdk::native_adapter::Rejection;
 
-        for (mode, reply, outcome, reason) in [
+        for (mode, reply, outcome, reason, successor) in [
             (
                 "reconnect-source-handoff-current-rejected",
                 Some(Reply::Rejected(Rejection::ExecutorBeforeMutation)),
                 Outcome::Failed,
                 AttemptReason::NoSuccessor,
+                None,
             ),
             (
                 "reconnect-source-handoff-current-indeterminate",
                 Some(Reply::Indeterminate),
                 Outcome::ReconcileRequired,
                 AttemptReason::DeviceUncertain,
+                None,
             ),
             (
                 "reconnect-source-handoff-current-rejected",
                 None,
                 Outcome::Failed,
                 AttemptReason::NativeOutputUnavailable,
+                None,
+            ),
+            (
+                "reconnect-source-handoff-text-refusal",
+                None,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+                Some(false),
+            ),
+            (
+                "reconnect-source-handoff-text-refusal",
+                None,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+                Some(true),
             ),
         ] {
             let (mut workflow, store, base, events, _notify) =
                 workflow(mode, vec![], Duration::ZERO);
             let fixture = Fixture::new();
+            let position = fixture.successor_position();
             let runtime = fixture
                 .start_with_store(store.clone(), mode, Duration::from_secs(5))
                 .unwrap();
@@ -3296,6 +3337,10 @@ pub(crate) mod tests {
             let source = RecognitionProbe {
                 confirmed_source: true,
                 refuse_new_reader_text: reply.is_none(),
+                successor: successor.map(|interrupt_restore| SuccessorProbe {
+                    position: position.clone(),
+                    interrupt_restore,
+                }),
                 ..RecognitionProbe::default()
             };
             let conversation = source.conversation.clone();
@@ -3315,7 +3360,12 @@ pub(crate) mod tests {
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
             let result = reader.run_iteration();
-            if reply == Some(Reply::Indeterminate) {
+            if successor == Some(true) {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("navigation interrupted"));
+            } else if reply == Some(Reply::Indeterminate) {
                 assert!(result.unwrap_err().to_string().contains("Indeterminate"));
             } else {
                 result.unwrap();
@@ -3340,6 +3390,13 @@ pub(crate) mod tests {
                     .exists());
             }
             let records = ledger.inspect(conversation, false).unwrap();
+            if let Some(interrupted) = successor {
+                assert_eq!(position.exists(), interrupted);
+                assert!(records.iter().any(|record| matches!(
+                    record,
+                    Record::OutcomeFact(fact) if fact.reason == AttemptReason::OutputPending
+                )));
+            }
             let answer = records
                 .iter()
                 .find_map(|record| match record {
