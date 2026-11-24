@@ -59,9 +59,14 @@ pub(crate) fn run(
     startup: ReaderPreferences,
     startup_token: SelectionToken,
 ) -> Result<()> {
-    let corner =
-        TriggerCorner::from_string(startup.config().trigger_corner.as_deref().unwrap_or("LL"))
-            .map_err(|_| anyhow::anyhow!("invalid selected Reader corner"))?;
+    let corner = TriggerCorner::from_string(
+        startup
+            .config()
+            .trigger_corner
+            .as_deref()
+            .unwrap_or(config::DEFAULT_TRIGGER_CORNER),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid selected Reader corner"))?;
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
