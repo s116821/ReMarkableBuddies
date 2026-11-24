@@ -14,14 +14,35 @@ enum Circled {
     Selected,
     MissingOutline,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Submission {
+    Reader,
+    CurrentPage,
+    BoundHistory,
+    Circled(Circled),
+    WholeNotebook,
+}
+
+impl Submission {
+    fn draft_expected(self) -> bool {
+        matches!(self, Self::CurrentPage | Self::Circled(Circled::Selected))
+    }
+
+    fn circled(self) -> Option<Circled> {
+        match self {
+            Self::Circled(region) => Some(region),
+            _ => None,
+        }
+    }
+}
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
 const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
 const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
 struct SubmissionModel {
-    writer: bool,
-    circled: Option<Circled>,
+    submission: Submission,
     last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
@@ -64,7 +85,7 @@ impl crate::LLMEngine for SubmissionModel {
     fn execute(&mut self) -> Result<String> {
         let step = self.steps.get();
         self.steps.set(step + 1);
-        match (step, self.writer) {
+        match (step, self.submission.draft_expected()) {
             (0, writer) => {
                 let [image] = self.images.as_slice() else {
                     panic!("expected exactly one original page at intent intake");
@@ -83,7 +104,14 @@ impl crate::LLMEngine for SubmissionModel {
                     return Ok(r#"{"intent":"unresolved"}"#.into());
                 }
                 assert_eq!(self.text.len(), 1, "fresh notebook has no history part");
-                if let Some(circled) = self.circled {
+                if self.submission == Submission::WholeNotebook {
+                    return Ok(serde_json::json!({
+                        "intent": "writer-whole-notebook",
+                        "request": "Make a note from my whole notebook.",
+                    })
+                    .to_string());
+                }
+                if let Some(circled) = self.submission.circled() {
                     let target = match circled {
                         Circled::Selected => serde_json::json!({
                             "subject": "selected equation",
@@ -109,7 +137,7 @@ impl crate::LLMEngine for SubmissionModel {
                     Ok(r#"{"intent":"reader"}"#.into())
                 }
             }
-            (1, true) if self.circled == Some(Circled::Selected) => {
+            (1, true) if self.submission == Submission::Circled(Circled::Selected) => {
                 let original = image::load_from_memory(
                     &STANDARD.decode(self.source.borrow().as_deref().unwrap())?,
                 )?
@@ -134,7 +162,7 @@ impl crate::LLMEngine for SubmissionModel {
             (2, true) => {
                 assert!(self.images.is_empty());
                 let input = serde_json::from_str::<serde_json::Value>(self.text.last().unwrap())?;
-                if self.circled == Some(Circled::Selected) {
+                if self.submission == Submission::Circled(Circled::Selected) {
                     assert_eq!(input["request"], CIRCLE_NOTE);
                     assert_eq!(input["history"], serde_json::json!([]));
                     assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
@@ -255,15 +283,20 @@ fn seed_history(
 
 #[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request, bound_history, circled) in [
-        (true, false, false, None),
-        (true, true, false, None),
-        (false, true, false, None),
-        (true, false, true, None),
-        (true, true, false, Some(Circled::Selected)),
-        (false, true, false, Some(Circled::Selected)),
-        (true, false, false, Some(Circled::MissingOutline)),
+    for (reader_enabled, submission) in [
+        (true, Submission::Reader),
+        (true, Submission::CurrentPage),
+        (false, Submission::CurrentPage),
+        (true, Submission::BoundHistory),
+        (true, Submission::Circled(Circled::Selected)),
+        (false, Submission::Circled(Circled::Selected)),
+        (true, Submission::Circled(Circled::MissingOutline)),
+        (true, Submission::WholeNotebook),
+        (false, Submission::WholeNotebook),
     ] {
+        let writer_request = submission.draft_expected();
+        let circled = submission.circled();
+        let bound_history = submission == Submission::BoundHistory;
         let mode = match (circled, writer_request) {
             (Some(Circled::Selected), _) => "reconnect-source-handoff-writer-insert",
             (_, true) => "reconnect-source-handoff-text-refusal",
@@ -340,8 +373,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let steps = Rc::new(Cell::new(0));
         let source = Rc::new(RefCell::new(None));
         let model = SubmissionModel {
-            writer: writer_request,
-            circled,
+            submission,
             last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
@@ -351,8 +383,19 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
 
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
-        service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))?;
-        if bound_history || circled == Some(Circled::MissingOutline) {
+        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        let notebook_unavailable = submission == Submission::WholeNotebook;
+        if notebook_unavailable {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "Whole-notebook Writer needs complete ordered coverage of the notebook's source pages"
+            );
+            assert!(!events.borrow().contains(&"insert"));
+            assert!(!position.exists());
+        } else {
+            result?;
+        }
+        if bound_history || circled == Some(Circled::MissingOutline) || notebook_unavailable {
             assert_eq!(steps.get(), 1);
             assert!(written.borrow().is_empty());
             assert!(conversation.get().is_none());
