@@ -1,5 +1,123 @@
 use super::*;
 
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+mod ordinary_startup {
+    use super::*;
+    use crate::device::interaction::Interaction;
+    use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn ordinary_startup_waits_then_repeats_read_only_preparation_once() -> Result<()> {
+        let (socket, _receiver) = UnixDatagram::pair()?;
+        let mut health = ServiceHealth::fixture(socket);
+        health.ready()?;
+        let mut opens = 0;
+        let mut attempts = 0;
+        let mut protected = 0;
+        ordinary_startup_with(
+            &mut health,
+            Instant::now() + Duration::from_secs(2),
+            || {
+                opens += 1;
+                Ok(RequestInput::scripted(if opens == 1 {
+                    vec![
+                        Ok(vec![]),
+                        Ok(vec![Interaction::Invalidated]),
+                        Ok(vec![Interaction::Invalidated]),
+                        Ok(vec![]),
+                    ]
+                } else {
+                    vec![]
+                }))
+            },
+            |_, input| {
+                attempts += 1;
+                activation_input_progress(input, ActivationPhase::Preparation, true)?;
+                activation_input_progress(input, ActivationPhase::Preparation, true)?;
+                protected += 1;
+                activation_input_progress(input, ActivationPhase::Protected, true)
+            },
+        )?;
+        assert_eq!((opens, attempts, protected), (2, 2, 1));
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_startup_stops_on_protected_input_loss_or_occupied_slot() -> Result<()> {
+        for fault in ["protected input", "lost observer", "occupied slot"] {
+            let (socket, _receiver) = UnixDatagram::pair()?;
+            let mut health = ServiceHealth::fixture(socket);
+            health.ready()?;
+            let mut attempts = 0;
+            let err = ordinary_startup_with(
+                &mut health,
+                Instant::now() + Duration::from_secs(2),
+                || {
+                    Ok(RequestInput::scripted(match fault {
+                        "protected input" => vec![Ok(vec![]), Ok(vec![Interaction::Invalidated])],
+                        "lost observer" => vec![
+                            Ok(vec![Interaction::Invalidated]),
+                            Err(anyhow::anyhow!("lost observer")),
+                        ],
+                        _ => vec![],
+                    }))
+                },
+                |_, input| {
+                    attempts += 1;
+                    activation_input_progress(input, ActivationPhase::Preparation, true)?;
+                    ensure!(fault != "occupied slot", "occupied slot");
+                    activation_input_progress(input, ActivationPhase::Protected, true)
+                },
+            )
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                err.to_string(),
+                if fault == "protected input" {
+                    "Input canceled resident activation"
+                } else {
+                    fault
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_startup_deadline_does_not_renew_and_request_cancellation_is_sticky() -> Result<()> {
+        let (socket, _receiver) = UnixDatagram::pair()?;
+        let mut health = ServiceHealth::fixture(socket);
+        health.ready()?;
+        let mut attempts = 0;
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let expired = ordinary_startup_with(
+            &mut health,
+            deadline,
+            || {
+                Ok(RequestInput::scripted(
+                    (0..8).map(|_| Ok(vec![Interaction::Invalidated])).collect(),
+                ))
+            },
+            |_, input| {
+                attempts += 1;
+                activation_input_progress(input, ActivationPhase::Preparation, true)
+            },
+        );
+        assert!(expired.is_err());
+        assert_eq!(attempts, 1);
+
+        let mut request = RequestInput::scripted(vec![Ok(vec![Interaction::Reader]), Ok(vec![])]);
+        let err = activation_input_progress(&mut request, ActivationPhase::Preparation, false)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "Input canceled resident activation");
+        assert_eq!(request.poll()?, InputProgress::Canceled);
+        Ok(())
+    }
+}
+
 #[test]
 fn final_handoff_refusal_or_expiry_never_calls_stop() {
     for expired in [false, true] {

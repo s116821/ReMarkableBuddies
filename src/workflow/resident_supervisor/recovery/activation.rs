@@ -21,6 +21,69 @@ use std::sync::Arc;
 
 const ACTIVATION: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy)]
+enum ActivationPhase {
+    Preparation,
+    Protected,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Input busy during read-only resident startup preparation")]
+struct StartupInputBusy;
+
+fn activation_input_progress(
+    input: &mut RequestInput,
+    phase: ActivationPhase,
+    ordinary_startup: bool,
+) -> Result<()> {
+    if ordinary_startup && matches!(phase, ActivationPhase::Preparation) {
+        if input.poll()? == InputProgress::Canceled {
+            return Err(StartupInputBusy.into());
+        }
+        Ok(())
+    } else {
+        input.require_quiet()
+    }
+}
+
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+fn ordinary_startup_with<T>(
+    health: &mut ServiceHealth,
+    deadline: Instant,
+    mut open: impl FnMut() -> Result<RequestInput>,
+    mut activate: impl FnMut(&mut ServiceHealth, &mut RequestInput) -> Result<T>,
+) -> Result<T> {
+    let mut waiting = false;
+    loop {
+        check_deadline(deadline)?;
+        health.progress()?;
+        let mut input = open()?;
+        match activate(health, &mut input) {
+            Err(error) if error.is::<StartupInputBusy>() => {
+                if !waiting {
+                    log::info!("Resident Reader startup waiting for quiet input");
+                    waiting = true;
+                }
+                loop {
+                    check_deadline(deadline)?;
+                    health.progress()?;
+                    if input.sample_quiet()? {
+                        break;
+                    }
+                    thread::sleep(
+                        Duration::from_millis(50)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                }
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Explicit mode in a release-approved, strictly pinned installed profile.
 /// This value does not advertise native capability; no approved profile is shipped.
 pub struct InstalledReaderSelection {
@@ -390,11 +453,52 @@ impl Session {
         original_deadline: Instant,
         selection: Option<&InstalledReaderSelection>,
     ) -> Result<Self> {
-        let deadline = original_deadline.min(Instant::now() + ACTIVATION);
+        Self::activate_with_input_mode(
+            store,
+            health,
+            input,
+            original_deadline.min(Instant::now() + ACTIVATION),
+            selection,
+            false,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn activate_ordinary_startup(
+        store: Arc<Store>,
+        health: &mut ServiceHealth,
+        selection: &InstalledReaderSelection,
+        open: impl FnMut() -> Result<RequestInput>,
+    ) -> Result<Self> {
+        let deadline = Instant::now() + ACTIVATION;
+        ordinary_startup_with(health, deadline, open, |health, input| {
+            selection.current(deadline)?;
+            Self::activate_with_input_mode(
+                store.clone(),
+                health,
+                input,
+                deadline,
+                Some(selection),
+                true,
+            )
+        })
+    }
+
+    fn activate_with_input_mode(
+        store: Arc<Store>,
+        health: &mut ServiceHealth,
+        input: &mut RequestInput,
+        deadline: Instant,
+        selection: Option<&InstalledReaderSelection>,
+        ordinary_startup: bool,
+    ) -> Result<Self> {
         let mut session = Self::activate_with_progress(
             store,
             health,
-            &mut || input.require_quiet(),
+            &mut |phase| activation_input_progress(input, phase, ordinary_startup),
             deadline,
             selection,
         )?;
@@ -409,7 +513,7 @@ impl Session {
     fn activate_with_progress(
         store: Arc<Store>,
         health: &mut ServiceHealth,
-        progress: &mut dyn FnMut() -> Result<()>,
+        progress: &mut dyn FnMut(ActivationPhase) -> Result<()>,
         deadline: Instant,
         selection: Option<&InstalledReaderSelection>,
     ) -> Result<Self> {
@@ -417,7 +521,7 @@ impl Session {
             unsafe { libc::geteuid() } == 0,
             "installed activation requires root"
         );
-        progress()?;
+        progress(ActivationPhase::Preparation)?;
         health.progress()?; // Requires the original READY main-thread owner.
         let mut installation = Installation::load(deadline)?;
         let runtime_directory = installation.profile.runtime_directory()?;
@@ -505,12 +609,16 @@ impl Session {
         };
         installation.profile.validate(&record)?;
         installation.current(deadline)?;
-        progress()?;
         ensure!(
             installed_directory_identity_at(&runtime_directory)? == Some(identity),
             "activation directory changed"
         );
-        // Publication may fail after creating partial occupied state. Arm BEFORE it.
+        check_deadline(deadline)?;
+        progress(ActivationPhase::Preparation)?;
+        // Preparation can be abandoned only above. Arm recovery before the
+        // first operation that could leave occupied state.
+        let mut protected_progress = || progress(ActivationPhase::Protected);
+        let progress: &mut dyn FnMut() -> Result<()> = &mut protected_progress;
         let exit = health.exit_on_drop()?;
         let lease = publish_installed_at(record, &runtime_directory)?;
         let pending = Pending {
