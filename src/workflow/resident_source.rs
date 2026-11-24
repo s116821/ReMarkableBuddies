@@ -637,25 +637,26 @@ impl ResidentSourceOwner {
         health: &mut ServiceHealth,
         observed: original_pdf::ObservedOriginalPdf,
         deadline: Instant,
-    ) -> Result<original_pdf::CapturedOriginalPdf> {
+        retained: Option<original_pdf::OrdinaryPdfCache>,
+    ) -> Result<(
+        original_pdf::CapturedOriginalPdf,
+        Option<original_pdf::OrdinaryPdfCache>,
+    )> {
         let facts = self
             .captured_source
             .clone()
             .context("Resident PDF capture facts absent")?;
         let acquired = self.deadline.context("Resident source deadline absent")?;
+        let executable = std::path::Path::new(original_pdf::INSTALLED_EXECUTABLE);
         #[cfg(test)]
         let fixture = self.ordinary_pdf_fixture.clone();
-        let mut progress = || self.original_pdf_progress(health, acquired, &mut || Ok(()));
         #[cfg(test)]
-        if let Some((_, executable)) = fixture {
-            return observed.complete_ordinary_fixture(
-                &facts,
-                &executable,
-                deadline,
-                &mut progress,
-            );
-        }
-        observed.captured_by_owner(&facts, deadline, &mut progress)
+        let executable = fixture
+            .as_ref()
+            .map_or(executable, |(_, path)| path.as_path());
+        observed.complete_ordinary(&facts, executable, deadline, retained, &mut || {
+            self.original_pdf_progress(health, acquired, &mut || Ok(()))
+        })
     }
 
     #[cfg(feature = "installed-resident-output")]

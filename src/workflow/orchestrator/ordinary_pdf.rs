@@ -170,6 +170,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         observed: ObservedOriginalPdf,
         dispatch: &Dispatch<'_>,
     ) -> Result<()> {
+        // A refused or interrupted PDF request consumes the retained slot.
+        let retained = self.ordinary_pdf_cache.take();
         dispatch.require_ledger(&self.ledger)?;
         let prepared = attempt.capture_pdf_reading(&self.ledger)?;
         let config = dispatch.config;
@@ -191,7 +193,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             .as_mut()
             .context("Resident PDF health owner absent")?;
         let deadline = owner.ordinary_pdf_deadline()?;
-        let captured = owner.complete_ordinary_pdf(health, observed, deadline)?;
+        let (captured, cache) =
+            owner.complete_ordinary_pdf(health, observed, deadline, retained)?;
         let pdf = OriginalPdf::new(captured, deadline);
         let encoded = images
             .iter()
@@ -292,7 +295,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .map(OrdinarySearch::for_installed_pdf),
             deadline,
         };
-        self.answer_ordinary_pdf(attempt, &pdf, dispatch, policy, research, &mut result, head)
+        self.answer_ordinary_pdf(attempt, &pdf, dispatch, policy, research, &mut result, head)?;
+        self.ordinary_pdf_cache = cache;
+        Ok(())
     }
 
     fn read_ordinary_pdf(

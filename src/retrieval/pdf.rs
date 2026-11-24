@@ -566,7 +566,14 @@ fn extract(
 }
 
 /// Caller-supplied bytes only. Library allocations are not a global RAM/CPU bound.
-pub fn normalize(document: Uuid, mut input: impl Read) -> Result<PdfText> {
+pub fn normalize(document: Uuid, input: impl Read) -> Result<PdfText> {
+    normalize_with_index(document, input).map(|(text, _)| text)
+}
+
+pub(super) fn normalize_with_index(
+    document: Uuid,
+    mut input: impl Read,
+) -> Result<(PdfText, Index)> {
     ensure!(!document.is_nil(), "Missing PDF document identity");
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 32768];
@@ -645,9 +652,12 @@ pub fn normalize(document: Uuid, mut input: impl Read) -> Result<PdfText> {
         extractor_revision: EXTRACTOR_REVISION.into(),
         units,
     };
-    Index::build(document.clone()).context("Invalid normalized PDF output")?;
-    Ok(PdfText {
-        document,
-        textless_pages,
-    })
+    let index = Index::build(document.clone()).context("Invalid normalized PDF output")?;
+    Ok((
+        PdfText {
+            document,
+            textless_pages,
+        },
+        index,
+    ))
 }

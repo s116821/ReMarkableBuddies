@@ -98,6 +98,8 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     personalization: crate::config::PersonalizationSnapshot,
     handwriting: Option<crate::handwriting::runtime::Runtime>,
     handwriting_operation: Option<crate::handwriting::runtime::Capture>,
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    ordinary_pdf_cache: Option<super::resident_source::original_pdf::OrdinaryPdfCache>,
 }
 struct ModelContent<'a, M: LLMEngine>(&'a mut M);
 impl<M: LLMEngine> Drop for ModelContent<'_, M> {
@@ -161,6 +163,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             memory: None,
             handwriting: None,
             handwriting_operation: None,
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            ordinary_pdf_cache: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),

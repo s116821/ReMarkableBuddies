@@ -89,12 +89,16 @@ fn children() -> BTreeSet<u32> {
 }
 
 fn pdf_bytes(second: &str) -> Vec<u8> {
+    pdf_pages(["unrelated first page", second])
+}
+
+fn pdf_pages<'a>(text_pages: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
     let mut pdf = Document::with_version("1.5");
     let root = pdf.new_object_id();
     let font = pdf.add_object(
         dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica", "Encoding" => "WinAnsiEncoding" },
     );
-    let pages = ["unrelated first page", second]
+    let pages = text_pages
         .into_iter()
         .map(|text| {
             let content = Content {
@@ -115,9 +119,10 @@ fn pdf_bytes(second: &str) -> Vec<u8> {
             ))
         })
         .collect::<Vec<_>>();
+    let pages_count = pages.len() as i64;
     pdf.objects.insert(
         root,
-        dictionary! { "Type"=>"Pages", "Count"=>2,
+        dictionary! { "Type"=>"Pages", "Count"=>pages_count,
         "Kids"=>pages, "Resources"=>dictionary! {"Font"=>dictionary! {"F1"=>font}} }
         .into(),
     );
@@ -1190,6 +1195,19 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
     }
 
     let executable = retained_command();
+    let large_page = ".".repeat(400 * 1024);
+    let oversized = pdf_pages(
+        [large_page.as_str(); 6]
+            .into_iter()
+            .chain(["velocity marker"]),
+    );
+    crate::workflow::assert_ordinary_pdf_reuse(
+        &executable,
+        &pdf_bytes("alpha acceleration original source"),
+        &pdf_bytes("beta velocity revised source"),
+        &oversized,
+    )
+    .context("Exercise ordinary PDF source reuse with the retained binary")?;
     let fixture = Fixture::new();
     let root = fixture.0.join("original-pdf");
     let mut directories = fs::DirBuilder::new();

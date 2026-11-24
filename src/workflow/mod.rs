@@ -26,6 +26,8 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) use resident_source::original_pdf::assert_ordinary_pdf_reuse;
 #[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
 #[doc(hidden)]
 pub use resident_source::original_pdf::development_original_pdf;
