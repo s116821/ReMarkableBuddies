@@ -118,6 +118,11 @@ impl<'a> Dispatch<'a> {
         self
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn shared_source_writer_enabled(&self) -> bool {
+        self.admits(Mode::Writer, false) && self.regional_writer_model.is_some()
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn regional_writer_settings(&self) -> Result<(&Config, &str)> {
         ensure!(self.admits(Mode::Writer, false), "Writer disabled");

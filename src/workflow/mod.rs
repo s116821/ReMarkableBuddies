@@ -398,16 +398,15 @@ impl Workflow {
         &mut self,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: &str,
+        text: resident_output::ResidentOutputText<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
     ) -> Result<()> {
-        use resident_output::{ResidentOutputOutcome, ResidentOutputText};
+        use resident_output::ResidentOutputOutcome;
 
         let backend = self
             .device
             .resident_output_backend()
             .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
-        let text = ResidentOutputText::Plain(text);
         anyhow::ensure!(
             backend.supports_page_text(text, false)?,
             "Writer draft cannot be typed on the tablet"

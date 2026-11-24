@@ -109,6 +109,25 @@ impl ResidentSourceCapture {
         self.correspondence.expected.page
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn original_source_png(&self) -> &[u8] {
+        self.capture.png()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn writer_page_input(&self) -> Result<(Uuid, u32)> {
+        let facts = &self.correspondence.expected;
+        let position = facts
+            .order
+            .iter()
+            .position(|page| *page == facts.page)
+            .context("resident source absent from page order")?;
+        Ok((
+            self.correspondence.capture_operation,
+            (position + 1).try_into()?,
+        ))
+    }
+
     pub(super) fn prepare_history(
         &self,
         conversation: Uuid,

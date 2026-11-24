@@ -2165,7 +2165,51 @@ impl Ledger {
         token_count: impl Fn(&[Turn]) -> Result<usize>,
     ) -> Result<ContextView> {
         Self::context_token_limit(selection, budget)?;
+        self.model_context_from_records(
+            self.inspect(conversation, false)?,
+            selection,
+            budget,
+            token_count,
+        )
+    }
+
+    /// Admit the most recent eligible turns as one explicit chronological range.
+    /// If that range exceeds the byte or provider budget, refuse the range intact.
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn recent_model_context(
+        &self,
+        conversation: Uuid,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
+        ensure!(budget.max_turns > 0, "empty recent context budget");
         let records = self.inspect(conversation, false)?;
+        let selection = {
+            let mut recent = records.iter().rev().filter_map(|record| match record {
+                Record::Turn(turn) if ContextPurpose::Model.admits(turn) => Some(turn.sequence),
+                _ => None,
+            });
+            if let Some(newest) = recent.next() {
+                Some(TurnRange {
+                    start: recent.take(budget.max_turns - 1).last().unwrap_or(newest),
+                    end_exclusive: newest
+                        .checked_add(1)
+                        .context("recent turn range overflow")?,
+                })
+            } else {
+                None
+            }
+        };
+        self.model_context_from_records(records, selection, budget, token_count)
+    }
+
+    fn model_context_from_records(
+        &self,
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<ContextView> {
         let mut context =
             Self::context_from_records(records, selection, budget, token_count, |media| {
                 self.store
@@ -2281,15 +2325,7 @@ impl Ledger {
             .iter()
             .filter_map(|r| match r {
                 Record::Turn(t)
-                    if (t.outcome == Outcome::Completed
-                        || t.outcome == Outcome::Interpreted
-                        || (matches!(
-                            purpose,
-                            ContextPurpose::Presentation | ContextPurpose::Pair(_)
-                        ) && t.mode == Mode::Writer
-                            && t.role == Role::Assistant
-                            && t.outcome == Outcome::Generated)
-                        || matches!(purpose, ContextPurpose::Pair(draft) if t.eq(draft)))
+                    if purpose.admits(t)
                         && selection.is_none_or(|range| {
                             t.sequence >= range.start && t.sequence < range.end_exclusive
                         }) =>
@@ -2531,4 +2567,15 @@ enum ContextPurpose<'a> {
     Model,
     Presentation,
     Pair(&'a Turn),
+}
+
+impl ContextPurpose<'_> {
+    fn admits(self, turn: &Turn) -> bool {
+        matches!(turn.outcome, Outcome::Completed | Outcome::Interpreted)
+            || (matches!(self, Self::Presentation | Self::Pair(_))
+                && turn.mode == Mode::Writer
+                && turn.role == Role::Assistant
+                && turn.outcome == Outcome::Generated)
+            || matches!(self, Self::Pair(draft) if turn == draft)
+    }
 }

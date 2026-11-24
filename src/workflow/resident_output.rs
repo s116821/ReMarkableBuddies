@@ -85,6 +85,7 @@ pub enum ReaderAbout<'a> {
 #[derive(Clone, Copy)]
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
+    WriterSourceDraft(&'a str),
     Reader {
         question: &'a str,
         answer: &'a str,
@@ -203,7 +204,9 @@ pub trait ResidentRenderer {
         lease: &mut DevelopmentTargetLease<'_>,
     ) -> Result<()> {
         match text {
-            ResidentOutputText::Plain(text) => self.render(text, lease),
+            ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
+                self.render(text, lease)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,

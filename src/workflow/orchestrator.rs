@@ -13,9 +13,13 @@ use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WI
 use crate::llm::{openai::OpenAI, LLMEngine};
 use base64::{engine::general_purpose::STANDARD, Engine};
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod current_page_writer;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod ordinary_pdf;
 #[cfg(target_os = "linux")]
 mod researched;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod source_submission;
 #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
 pub(crate) use researched::fixture as researched_fixture;
 
@@ -323,8 +327,26 @@ impl<M: LLMEngine> Orchestrator<M> {
                 ),
             };
         }
-        // A queued refinement can expire or belong to another open page.
-        // Finish the acquired request before admitting a new gesture.
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if let (Some(dispatch), super::AcquiredEvidence::ResidentHistorical(capture)) =
+            (local, &acquired)
+        {
+            if self.workflow.uses_installed_reader_history()
+                && dispatch.shared_source_writer_enabled()
+            {
+                use source_submission::SourceIntent;
+                match self.classify_source_submission(capture, dispatch)? {
+                    SourceIntent::Reader => {}
+                    SourceIntent::WriterCurrentPage { request } => {
+                        return self.run_resident_current_page_writer(request, capture, dispatch);
+                    }
+                    SourceIntent::Unresolved => {
+                        self.workflow.report_failure(Failure::Selection)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
         if config.is_some_and(|settings| !settings.reader_enabled()) {
             return Ok(());
         }
@@ -565,6 +587,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             association_before.as_ref(),
             produced,
+            false,
         )
     }
 
@@ -615,7 +638,13 @@ impl<M: LLMEngine> Orchestrator<M> {
             report.status == writer::Status::Generated,
             "current-target Writer did not generate a fresh draft"
         );
-        self.present_resident_writer_draft(conversation, capture, Some(&association), produced)
+        self.present_resident_writer_draft(
+            conversation,
+            capture,
+            Some(&association),
+            produced,
+            false,
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -625,7 +654,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         capture: &crate::conversation::ResidentSourceCapture,
         association_before: Option<&crate::conversation::HistoricalPageAssociation>,
         produced: Option<crate::conversation::WriterSelection>,
+        protect_source: bool,
     ) -> Result<()> {
+        use super::resident_output::ResidentOutputText;
         use crate::{storage::Namespace, writer};
 
         let selected =
@@ -652,10 +683,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .ok_or_else(|| anyhow::anyhow!("Writer draft text unavailable"))?,
         )?;
         let text = format!("{title}\n\n{body}\n");
+        let output = if protect_source {
+            ResidentOutputText::WriterSourceDraft(&text)
+        } else {
+            ResidentOutputText::Plain(&text)
+        };
         self.workflow.place_resident_writer_draft(
             &self.ledger,
             conversation,
-            &text,
+            output,
             association.as_ref(),
         )
     }

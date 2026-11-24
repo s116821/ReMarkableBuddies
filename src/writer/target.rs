@@ -117,59 +117,6 @@ fn report(request: &Request, status: Status, failure: Option<Failure>) -> Report
     }
 }
 
-/// One model slot of the original regional parent. OpenAI clamps its owned
-/// request to this deadline; no slot can be reused after any attempted submit.
-struct ModelStage<'a, E> {
-    engine: &'a mut E,
-    deadline: Instant,
-    used: bool,
-}
-impl<E: LLMEngine> LLMEngine for ModelStage<'_, E> {
-    fn guarded_timeout(&self) -> Option<Duration> {
-        self.engine.guarded_timeout()
-    }
-    fn add_text_content(&mut self, s: &str) {
-        self.engine.add_text_content(s)
-    }
-    fn add_image_content(&mut self, s: &str) {
-        self.engine.add_image_content(s)
-    }
-    fn clear_content(&mut self) {
-        self.engine.clear_content()
-    }
-    fn execute(&mut self) -> Result<String> {
-        self.execute_with_progress(&mut || Ok(()))
-    }
-    fn execute_with_progress(
-        &mut self,
-        progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<String> {
-        ensure!(
-            !std::mem::replace(&mut self.used, true) && Instant::now() < self.deadline,
-            "regional model slot expired or consumed"
-        );
-        #[cfg(target_os = "linux")]
-        {
-            let deadline = self.deadline;
-            let original = std::cell::RefCell::new(progress);
-            self.engine.execute_with_deadline(
-                &mut || (original.borrow_mut())(),
-                &mut |submit| {
-                    ensure!(Instant::now() < deadline, "regional model handoff expired");
-                    (original.borrow_mut())()?;
-                    submit()
-                },
-                deadline,
-            )
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = progress;
-            anyhow::bail!("regional owned model adapter unavailable")
-        }
-    }
-}
-
 /// The input owner supplies one explicit operation and exact root/target, never
 /// caller-supplied OCR or a replacement operation for an uncertain earlier call.
 pub fn run<E: LLMEngine>(
@@ -322,11 +269,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         };
         let document = ledger.target_document(&target)?;
         let (normalized, _) = {
-            let mut recognition = ModelStage {
-                engine,
-                deadline: deadline - Duration::from_secs(150),
-                used: false,
-            };
+            let mut recognition = ModelStage::new(engine, deadline - Duration::from_secs(150));
             notebook::normalize_admitted(
                 document,
                 &admitted,
@@ -393,11 +336,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         // From this point its existing currentness guard owns root progression.
         let expected = frame.expected_root();
         let mut canceled = || canceled() || Instant::now() >= deadline - Duration::from_secs(60);
-        let mut generation = ModelStage {
-            engine,
-            deadline: deadline - Duration::from_secs(60),
-            used: false,
-        };
+        let mut generation = ModelStage::new(engine, deadline - Duration::from_secs(60));
         Ok(super::run_owned_source(
             ledger,
             &mut generation,

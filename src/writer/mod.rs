@@ -20,6 +20,68 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// One model call under an admitted Writer operation. OpenAI clamps its owned
+/// request to this deadline; no slot can be reused after any attempted submit.
+pub(crate) struct ModelStage<'a, E> {
+    engine: &'a mut E,
+    deadline: Instant,
+    used: bool,
+}
+impl<'a, E> ModelStage<'a, E> {
+    pub(crate) fn new(engine: &'a mut E, deadline: Instant) -> Self {
+        Self {
+            engine,
+            deadline,
+            used: false,
+        }
+    }
+}
+impl<E: LLMEngine> LLMEngine for ModelStage<'_, E> {
+    fn guarded_timeout(&self) -> Option<Duration> {
+        self.engine.guarded_timeout()
+    }
+    fn add_text_content(&mut self, s: &str) {
+        self.engine.add_text_content(s)
+    }
+    fn add_image_content(&mut self, s: &str) {
+        self.engine.add_image_content(s)
+    }
+    fn clear_content(&mut self) {
+        self.engine.clear_content()
+    }
+    fn execute(&mut self) -> Result<String> {
+        self.execute_with_progress(&mut || Ok(()))
+    }
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        ensure!(
+            !std::mem::replace(&mut self.used, true) && Instant::now() < self.deadline,
+            "Writer model slot expired or consumed"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let deadline = self.deadline;
+            let original = std::cell::RefCell::new(progress);
+            self.engine.execute_with_deadline(
+                &mut || (original.borrow_mut())(),
+                &mut |submit| {
+                    ensure!(Instant::now() < deadline, "Writer model handoff expired");
+                    (original.borrow_mut())()?;
+                    submit()
+                },
+                deadline,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = progress;
+            anyhow::bail!("Writer owned model adapter unavailable")
+        }
+    }
+}
+
 const MAX_HISTORY: usize = 16 * 1024;
 const MAX_REQUEST: usize = 4096;
 const MAX_DRAFT: usize = 24 * 1024;

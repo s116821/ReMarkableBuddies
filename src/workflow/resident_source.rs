@@ -441,6 +441,11 @@ impl ResidentSourceOwner {
                 _ => WriterAtRelease::Unobserved,
             };
             return Ok(reader
+                || (cfg!(feature = "installed-resident-output")
+                    && config.is_some_and(|settings| {
+                        super::conversation_dispatch::RuntimeRoute::for_config(settings)
+                            == super::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+                    }))
                 || matches!(
                     self.writer_at_release,
                     WriterAtRelease::Refinement(_) | WriterAtRelease::Generation(_)
@@ -960,6 +965,12 @@ impl ResidentSourceOwner {
         }
     }
     pub(super) fn deliver(&mut self, health: &mut ServiceHealth) -> Result<()> {
+        self.check_source_delivery(health)?;
+        self.deadline = None;
+        Ok(())
+    }
+
+    pub(super) fn check_source_delivery(&mut self, health: &mut ServiceHealth) -> Result<Instant> {
         self.acquisition_current(health)?;
         let deadline = self.deadline.unwrap();
         let result = self
@@ -977,8 +988,7 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         self.acquisition_current(health)?;
-        self.deadline = None;
-        Ok(())
+        Ok(deadline)
     }
     pub(super) fn finish(&mut self, health: &mut ServiceHealth) -> Result<()> {
         let result = self.progress(health);
@@ -1080,7 +1090,7 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    fn captured_page_matches(
+    pub(super) fn captured_page_matches(
         &mut self,
         health: &mut ServiceHealth,
         deadline: Instant,
@@ -1194,6 +1204,7 @@ impl ResidentSourceOwner {
         conversation: crate::storage::Uuid,
         expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
         blank_start_source: bool,
+        protect_source: bool,
         end: Instant,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::PageUse> {
@@ -1209,6 +1220,12 @@ impl ResidentSourceOwner {
             end,
             &mut || admitted_progress(end, || self.progress(health)),
         )?;
+        if protect_source {
+            ensure!(
+                role == super::resident_output::PageUse::ConfirmedNonBuddy,
+                "Writer source page cannot be used for draft placement"
+            );
+        }
         if role == super::resident_output::PageUse::LegacyBuddy {
             admitted_progress(end, || self.progress(health))?;
             before_effect()?;
@@ -1336,6 +1353,10 @@ impl ResidentSourceOwner {
             conversation,
             &original,
             blank_start_source,
+            matches!(
+                text,
+                super::resident_output::ResidentOutputText::WriterSourceDraft(_)
+            ),
             end,
             before_effect,
         )?;
@@ -1370,6 +1391,7 @@ impl ResidentSourceOwner {
                     ledger,
                     conversation,
                     &expected,
+                    false,
                     false,
                     end,
                     before_effect,
@@ -2745,6 +2767,8 @@ pub(crate) mod tests {
     }
     #[cfg(feature = "installed-resident-output")]
     mod installed_writer_memory;
+    #[cfg(feature = "installed-resident-output")]
+    mod shared_source_submission;
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
@@ -2796,7 +2820,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
-    fn writer_only_idle_ignores_an_unqueued_corner_then_accepts_blank_start() {
+    fn writer_only_can_capture_an_unqueued_corner_then_accepts_blank_start() {
         let releases = vec![
             released(Instant::now()),
             ReleasedReaderInput {
@@ -2804,7 +2828,7 @@ pub(crate) mod tests {
                 ..released(Instant::now())
             },
         ];
-        let (mut workflow, store, base, events, _notify) =
+        let (mut workflow, store, base, _events, _notify) =
             workflow("reconnect-source-handoff", releases, Duration::ZERO);
         workflow.resident_source.as_mut().unwrap().selection =
             InstalledReaderSelection::fixture_with_installed_output();
@@ -2812,8 +2836,14 @@ pub(crate) mod tests {
             "product_settings": { "reader_enabled": false, "writer_enabled": true }
         }))
         .unwrap();
-        assert!(!workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
-        assert!(events.borrow().is_empty());
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(workflow
+            .selected_resident_conversation(&source, true)
+            .unwrap()
+            .is_none());
+        workflow.finish_request().unwrap();
+
         assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
         let source = workflow.acquire_reader_evidence().unwrap();
         assert!(matches!(
@@ -3096,7 +3126,10 @@ pub(crate) mod tests {
     impl ResidentOutputBackend for RecognitionProbe {
         fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
             #[cfg(feature = "installed-resident-output")]
-            if matches!(text, ResidentOutputText::Plain(_)) {
+            if matches!(
+                text,
+                ResidentOutputText::Plain(_) | ResidentOutputText::WriterSourceDraft(_)
+            ) {
                 return Ok(
                     crate::workflow::resident_output::development::fits_test_keyboard(
                         text, new_page,
@@ -3132,7 +3165,12 @@ pub(crate) mod tests {
                 previous.is_none() || (self.successor.is_some() && previous == Some(conversation))
             );
             #[cfg(feature = "installed-resident-output")]
-            if self.writer_preview.is_some() {
+            if self.writer_preview.is_some()
+                && self
+                    .successor
+                    .as_ref()
+                    .is_none_or(|probe| probe.position.exists())
+            {
                 return Ok(PageUse::RelevantBuddy);
             }
             Ok(if self.confirmed_source {
@@ -3239,7 +3277,12 @@ pub(crate) mod tests {
                 RefusingBackend::with_resident_releases(vec![]).with_test_output(Box::new(probe)),
             );
 
-            let result = workflow.place_resident_writer_draft(&ledger, conversation, &draft, None);
+            let result = workflow.place_resident_writer_draft(
+                &ledger,
+                conversation,
+                super::super::resident_output::ResidentOutputText::Plain(&draft),
+                None,
+            );
             match role {
                 PageUse::RelevantBuddy => {
                     result.unwrap();

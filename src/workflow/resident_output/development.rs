@@ -1190,7 +1190,9 @@ impl DisplayFormat {
         admits_about: impl FnOnce(&str) -> bool,
     ) -> String {
         let (content, about) = match text {
-            ResidentOutputText::Plain(text) => (text.to_owned(), None),
+            ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
+                (text.to_owned(), None)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,
