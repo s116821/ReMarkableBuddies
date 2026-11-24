@@ -1174,6 +1174,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         Offline,
         Required,
         FileBeforeAnswer,
+        FileDuringAnswerObserve,
+        FileDuringGeneratedObserve,
+        FileDuringRefusalObserve,
         OrderBeforeVerification,
         OrderAfterAnswer,
         ConversationBeforeVerification,
@@ -1207,6 +1210,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         Case::Offline,
         Case::Required,
         Case::FileBeforeAnswer,
+        Case::FileDuringAnswerObserve,
+        Case::FileDuringGeneratedObserve,
+        Case::FileDuringRefusalObserve,
         Case::OrderBeforeVerification,
         Case::OrderAfterAnswer,
         Case::ConversationBeforeVerification,
@@ -1238,7 +1244,9 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         script.answer_refused = stable_refusal
             || matches!(
                 case,
-                Case::ProviderRefusalAfterNativeDrift | Case::ProviderRefusalAfterConversationDrift
+                Case::ProviderRefusalAfterNativeDrift
+                    | Case::ProviderRefusalAfterConversationDrift
+                    | Case::FileDuringRefusalObserve
             );
         let frames = script.frames.clone();
         let path = &path;
@@ -1248,12 +1256,20 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             root.clone(),
             executable.clone(),
             case == Case::ProviderRefusalWithTargets,
-            |ledger, order_change| {
+            |ledger, order_change, change_file_on_observe| {
                 let ledger = Ledger::new(ledger.store().clone());
                 script.hook = Some(Box::new(move |stage, pending| {
                     match (case, stage, pending) {
                         (Case::FileBeforeAnswer, 2, true) => {
                             fs::write(path, b"changed before answer handoff").unwrap();
+                        }
+                        (Case::FileDuringAnswerObserve, 2, true)
+                        | (
+                            Case::FileDuringGeneratedObserve | Case::FileDuringRefusalObserve,
+                            2,
+                            false,
+                        ) => {
+                            change_file_on_observe.set(true);
                         }
                         (Case::OrderBeforeVerification, 1, true)
                         | (
@@ -1397,7 +1413,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         assert_eq!(scope.constructions(), usize::from(required));
         let expected_calls = match case {
             Case::OrderBeforeVerification | Case::ConversationBeforeVerification => 1,
-            Case::FileBeforeAnswer => 2,
+            Case::FileBeforeAnswer | Case::FileDuringAnswerObserve => 2,
             _ => 3,
         };
         assert_eq!(frames.len(), expected_calls, "{case:?}: {result:?}");
@@ -1414,6 +1430,15 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                     cause.contains("Resident PDF source or page order changed"),
                     "{cause}"
                 );
+            }
+            if matches!(
+                case,
+                Case::FileDuringAnswerObserve
+                    | Case::FileDuringGeneratedObserve
+                    | Case::FileDuringRefusalObserve
+            ) {
+                assert_eq!(fs::read(path)?, b"changed during native Observe");
+                assert!(cause.contains("Original PDF file changed"), "{cause}");
             }
             if stable_refusal {
                 assert!(error.is::<crate::llm::ProviderRefused>(), "{cause}");

@@ -73,19 +73,6 @@ pub(super) fn classify(
     owner.read_ordinary_pdf(health, source)
 }
 
-fn require_source_current(workflow: &mut Workflow, deadline: Instant) -> Result<()> {
-    workflow.check_request_progress()?;
-    let owner = workflow
-        .resident_source
-        .as_mut()
-        .context("Resident PDF owner absent")?;
-    let health = workflow
-        .service_health
-        .as_mut()
-        .context("Resident PDF health owner absent")?;
-    owner.require_ordinary_pdf_current(health, deadline)
-}
-
 struct OriginalPdf {
     pin: RefCell<OriginalPdfPin>,
     index: RefCell<Option<PendingIndex>>,
@@ -114,6 +101,22 @@ impl OriginalPdf {
 
     fn check_file(&self) -> Result<()> {
         self.pin.borrow_mut().check(self.deadline)
+    }
+
+    fn require_current(&self, workflow: &mut Workflow) -> Result<()> {
+        workflow.check_request_progress()?;
+        let owner = workflow
+            .resident_source
+            .as_mut()
+            .context("Resident PDF owner absent")?;
+        let health = workflow
+            .service_health
+            .as_mut()
+            .context("Resident PDF health owner absent")?;
+        owner.require_ordinary_pdf_current(health, self.deadline)?;
+        // Observe can block even when it returns the original page and order.
+        // Sample both files after that wait, just before the Store boundary.
+        self.check_file()
     }
 }
 
@@ -208,7 +211,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let proposed =
             self.read_ordinary_pdf(attempt, &prepared, &pdf, &prompt, &encoded, false)?;
         if proposed.trim().eq_ignore_ascii_case("NONE") {
-            require_source_current(&mut self.workflow, pdf.deadline)?;
+            pdf.require_current(&mut self.workflow)?;
             prepared.with_current(self.ledger.store(), || Ok(()))?;
             self.workflow.report_failure(super::Failure::Selection)?;
             return attempt.outcome(
@@ -264,8 +267,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             Intent::Unclear => anyhow::bail!("PDF question web intent is unclear"),
         };
-        pdf.check_file()?;
-        require_source_current(&mut self.workflow, pdf.deadline)?;
+        pdf.require_current(&mut self.workflow)?;
         let interpreted_root = attempt.interpret_ordinary_pdf(
             &self.ledger,
             &result.question,
@@ -350,8 +352,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         };
         let submit = |call: &mut dyn FnMut() -> Result<()>| {
             progress()?;
-            pdf.check_file()?;
-            require_source_current(&mut workflow.borrow_mut(), pdf.deadline)?;
+            pdf.require_current(&mut workflow.borrow_mut())?;
             prepared.with_current(store, call)
         };
         let reply = followup_research::once(&submit, |handoff| {
@@ -431,8 +432,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && prepared.original_generation() == generation,
             "Interpreted PDF request changed"
         );
-        pdf.check_file()?;
-        require_source_current(&mut self.workflow, pdf.deadline)?;
+        pdf.require_current(&mut self.workflow)?;
         let (context, mut evidence) = ledger.persist_followup_evidence(
             crate::writer::stage(attempt.user.exchange, "reader-pdf-evidence"),
             timestamp,
@@ -451,9 +451,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             };
             let submit = |call: &mut dyn FnMut() -> Result<()>| {
                 progress()?;
-                pdf.check_file()?;
-                require_source_current(&mut workflow.borrow_mut(), pdf.deadline)?;
                 attempt.check_selected()?;
+                pdf.require_current(&mut workflow.borrow_mut())?;
                 evidence.with_current(ledger, call)
             };
             followup_research::answer(
@@ -472,14 +471,12 @@ impl<M: LLMEngine> Orchestrator<M> {
         result.answer = match answer {
             Ok(answer) => answer,
             Err(error) if error.is::<crate::llm::ProviderRefused>() => {
-                pdf.check_file()?;
-                require_source_current(&mut self.workflow, pdf.deadline)?;
                 attempt.check_selected()?;
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)?
                     .as_millis()
                     .try_into()?;
-                pdf.check_deadline()?;
+                pdf.require_current(&mut self.workflow)?;
                 attempt.user = evidence.record_provider_failure(
                     ledger,
                     crate::writer::stage(attempt.user.exchange, "reader-pdf-provider-failure"),
@@ -490,9 +487,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             Err(error) => return Err(error),
         };
-        pdf.check_file()?;
-        require_source_current(&mut self.workflow, pdf.deadline)?;
         attempt.check_selected()?;
+        pdf.require_current(&mut self.workflow)?;
         attempt.generated_from_pdf(ledger, &mut evidence, result.answer.clone())?;
         self.place_answer(attempt, result, true, &mut |ledger| {
             pdf.check_file()?;

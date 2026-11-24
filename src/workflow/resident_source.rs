@@ -1484,11 +1484,18 @@ pub(crate) mod tests {
         rc::Rc,
     };
     type Events = Rc<RefCell<Vec<&'static str>>>;
+
+    struct ObserveFileChange {
+        pdf: PathBuf,
+        armed: Rc<Cell<bool>>,
+    }
+
     struct OwnedSession {
         runtime: ResidentRuntime,
         _fixture: Fixture,
         events: Events,
         delivery_fault: bool,
+        observe_file_change: Option<ObserveFileChange>,
         #[cfg(feature = "installed-resident-output")]
         writer_slot: Option<Rc<super::super::resident_supervisor::writer_request::FixtureSlot>>,
     }
@@ -1496,6 +1503,7 @@ pub(crate) mod tests {
         health: &'a mut ServiceHealth,
         input: &'a mut RequestInput,
         policy_fault: bool,
+        observe_file_change: Option<&'a ObserveFileChange>,
     }
     impl ReadOnlyAdmission for OwnedAdmission<'_> {
         fn pulse(&mut self, deadline: Instant) -> Result<()> {
@@ -1513,6 +1521,16 @@ pub(crate) mod tests {
                 ));
             }
             Ok(())
+        }
+        fn reply_observed(&mut self) {
+            if let Some(change) = self
+                .observe_file_change
+                .filter(|change| change.armed.replace(false))
+            {
+                // The SDK returned the original native facts, but the request
+                // still owns the observation boundary until it returns.
+                std::fs::write(&change.pdf, b"changed during native Observe").unwrap();
+            }
         }
     }
     impl SourceSession for OwnedSession {
@@ -1568,6 +1586,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: self.delivery_fault,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1589,6 +1608,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1602,11 +1622,12 @@ pub(crate) mod tests {
             deadline: Instant,
         ) -> std::result::Result<Reply, RequestFailure> {
             assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(10));
-            self.events.borrow_mut().push(match &request {
-                Request::Observe => "observe",
-                Request::CaptureSource(_) => "capture",
+            let (event, observe_file_change) = match &request {
+                Request::Observe => ("observe", self.observe_file_change.as_ref()),
+                Request::CaptureSource(_) => ("capture", None),
                 _ => panic!("effect request"),
-            });
+            };
+            self.events.borrow_mut().push(event);
             let result = self.runtime.request_read_only(
                 operation,
                 request,
@@ -1615,6 +1636,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1638,6 +1660,7 @@ pub(crate) mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1690,6 +1713,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: self.events.clone(),
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }))
@@ -2093,6 +2117,7 @@ pub(crate) mod tests {
             _fixture: native,
             events: events.clone(),
             delivery_fault: false,
+            observe_file_change: None,
             writer_slot: Some(slot.clone()),
         }));
         let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
@@ -2130,7 +2155,7 @@ pub(crate) mod tests {
         root: PathBuf,
         executable: PathBuf,
         source_targets: bool,
-        model: impl FnOnce(&Ledger, PathBuf) -> M,
+        model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
         inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
     ) -> Result<(Result<()>, Vec<Record>)> {
         let mode = "reconnect-source-handoff-ordinary-pdf";
@@ -2158,6 +2183,8 @@ pub(crate) mod tests {
         native.declare_source(document, page);
         let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
         let order_change = native.ordinary_pdf_order_change();
+        let change_file_on_observe = Rc::new(Cell::new(false));
+        let pdf = root.join(format!("{document}.pdf"));
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.ordinary_pdf_fixture = Some((root, executable));
@@ -2166,6 +2193,10 @@ pub(crate) mod tests {
             _fixture: native,
             events: events.clone(),
             delivery_fault: false,
+            observe_file_change: Some(ObserveFileChange {
+                pdf,
+                armed: change_file_on_observe.clone(),
+            }),
             writer_slot: None,
         }));
         crate::storage::files::atomic(
@@ -2176,7 +2207,7 @@ pub(crate) mod tests {
         let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
         let mut reader = Orchestrator::new(
             workflow,
-            model(&ledger, order_change),
+            model(&ledger, order_change, change_file_on_observe),
             Ledger::new(store.clone()),
         );
         reader.set_local_handwriting(&dispatch)?;
@@ -2815,6 +2846,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));
@@ -3053,6 +3085,7 @@ pub(crate) mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));
