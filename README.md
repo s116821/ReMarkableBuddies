@@ -29,20 +29,19 @@ Legacy `openspec/...` references in component guides resolve there after migrati
 
 ## Using Reader on the tablet
 
-1. **Prepare Answer Page**: With the manual workflow, create a blank page immediately to the **right** of your question page before triggering.
-2. **Select Content**: Highlight the passage or draw a closed shape (circle, rectangle, etc.) around the concept you want to ask about
-3. **Write Question**: Write your question near the selected content. For example, circle `24 / 6` and write “What is the answer to this?” beside it.
-4. **Trigger**: Touch and **hold for at least 2 seconds** in the **lower-right corner**, then release
-5. **Capture**: The app takes a screenshot of your current page
-6. **Read and Verify**: A vision request identifies the selected concept, reads the question, and proposes an answer. An independent transcription pass reads the original page. If it cannot confirm the question, Reader stops before opening an answer page.
-7. **Page Check**: The manual workflow checks the immediate successor. It accepts a blank page or a recognized Reader Buddy answer page and leaves unrelated content intact.
-8. **Render**: Displays the question and answer on the answer page (with "=== Reader Buddy Answers ===" header on first use)
+On a reMarkable 2 with firmware 3.28.0.172, Buddy's complete resident
+installation includes an automatic answer-page mode. With that mode enabled,
+start with a single notebook page.
 
-The standard binary archive uses manual page preparation. On RM2 firmware
-3.28.0.172, the complete resident installation includes the native adapter and
-recovery services. With that installation Reader can start from a single page
-and create an answer page immediately after it, or reuse the page already bound
-to the conversation.
+1. Circle `24 / 6` and write “What is the answer to this?” beside it. You can also highlight a passage or draw another closed shape around your subject.
+2. Hold one finger still in the **lower-right corner** for three seconds, then release once.
+3. A successful run puts the question and the answer **4** on a new page immediately after yours. The circle and expression stay on the source page. If the conversation already has an answer page, Buddy can reuse it.
+
+Buddy captures the page and independently verifies the handwritten question
+before opening the answer page. If you installed the standalone binary archive,
+use its manual workflow. Prepare a blank page immediately after the source
+before the hold, or use an existing Reader answer page in that position.
+See [manual answer-page setup](#manual-workflow-cannot-find-an-answer-page).
 
 The circle selects the topic to explain. Answers may use surrounding page content
 and general knowledge; paper-specific values must match the visible paper. The
@@ -518,14 +517,14 @@ Reader Buddy. If the next page already contains unrelated content, add the blank
 page between the source and that page. Reader Buddy first checks whether it has
 already returned to the source. If it still needs to return, it tries one swipe.
 
-If the resident integration reports an unresolved insertion, inspect the original
-document and its page order before taking another action. The outstanding request
-remains recorded for reconciliation.
+### Nothing appears after the hold
 
-### Answer not appearing on new page
-If the answer doesn't render and no X appears:
-- Reader Buddy debug logging is enabled by default; use `--log-level info` or `RUST_LOG=info` to reduce it.
-- Check the logged answer-page classification (Blank, ExistingQA, or Invalid).
+The source page can look unchanged even when Buddy recognized the gesture and
+saved an answer. Buddy records failures in its log and leaves status marks off
+the source page.
+
+- **Automatic page insertion.** If Buddy reports an unconfirmed insertion, stop there and keep the original notebook and Buddy history. The saved page order and original request let the operator check what happened. Repeating the hold cannot confirm the earlier insertion.
+- **Manual workflow.** Check how Buddy classified the next page in its log (`Blank`, `ExistingQA` or `Invalid`). Use the manual setup above if the next page contains unrelated content.
 
 ### Debug Mode
 Enable debug dumps to troubleshoot rendering issues:
@@ -708,12 +707,6 @@ Contributions welcome! Areas for enhancement:
 - Multi-question support per trigger
 - Device testing and refinement
 - Resident page creation and firmware coverage
-
-**Recent Improvements (v0.3)**:
-- ✅ Simplified workflow - user creates answer page, app detects blank/QA pages
-- ✅ Clear failure indication - X drawn in bottom-right when no valid answer page found
-- ✅ Debug dump mode for troubleshooting
-- ✅ Answer page reuse - multiple questions from same page share one answer page
 
 **Version bumps** follow semantic squash messages as described above; branch names
 do not determine the version. Public issue/PR discussions and repository specs carry
