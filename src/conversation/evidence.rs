@@ -299,6 +299,32 @@ impl Ledger {
         Ok(capture)
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn capture_interpreted_pdf_head(
+        &self,
+        user: &Turn,
+        expected: &ExpectedHeads,
+        generation: Uuid,
+    ) -> Result<FollowupRequestHead> {
+        let [root, turn] =
+            self.store
+                .bounded_head_pair(Namespace::Conversation, user.conversation, user.id)?;
+        let root = root.context("Interpreted PDF conversation root absent")?;
+        let turn = turn.context("Interpreted PDF turn absent")?;
+        ensure!(
+            expected.0.len() == 1
+                && expected.0.contains(&root.revision_id)
+                && user.outcome == Outcome::Interpreted
+                && matches!(Self::decode(&turn)?, Record::Turn(saved) if saved == *user),
+            "Interpreted PDF user or root changed"
+        );
+        Ok(FollowupRequestHead {
+            generation,
+            root: root.revision_id,
+            user: turn.revision_id,
+        })
+    }
+
     pub(crate) fn append_followup_user(
         &self,
         operation: Uuid,

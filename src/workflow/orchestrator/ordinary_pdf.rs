@@ -382,6 +382,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         let ledger = &self.ledger;
         let conversation = attempt.user.conversation;
         let user = attempt.user.id;
+        // The live answer consumes the attachment view from the same captured
+        // evidence frame. Retain it through the existing live receiving path.
+        let head = ledger.capture_interpreted_pdf_head(&attempt.user, expected, generation)?;
         let prepared = {
             let mut progress = || {
                 pdf.check_deadline()?;
@@ -402,7 +405,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 question: &result.question,
                 progress: RefCell::new(&mut progress),
             };
-            ledger.prepare_request_evidence_with_directive(
+            ledger.prepare_declared_evidence(
                 conversation,
                 user,
                 None,
@@ -424,6 +427,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 },
                 Some(&provider),
                 |text| Ok(text.len()),
+                Some(head),
+                None,
             )?
         };
         ensure!(
