@@ -97,8 +97,6 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub product_settings: Option<Option<product::ProductConfiguration>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capacities_export: Option<capacities::ExportConnection>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub trigger_corner: Option<String>,
@@ -118,6 +116,8 @@ pub struct Config {
     pub research_policy: Option<Option<ResearchPolicy>>,
     // Append new fields to preserve legacy positional Config array prefixes.
     pub handwriting: crate::handwriting::Configuration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacities_export: Option<capacities::ExportConnection>,
     #[serde(skip)]
     pub source_snapshot: Option<SourceSnapshot>,
 }
