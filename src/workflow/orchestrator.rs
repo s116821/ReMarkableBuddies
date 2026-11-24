@@ -1271,7 +1271,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::Orchestrator;
+    use super::{Orchestrator, ReaderSubject};
     use crate::OpenAI;
 
     #[test]
