@@ -7,7 +7,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-struct NoModel;
+pub(crate) struct NoModel;
 impl LLMEngine for NoModel {
     fn add_text_content(&mut self, _: &str) {}
     fn add_image_content(&mut self, _: &str) {}
@@ -271,12 +271,13 @@ fn run_flow(
     request: crate::writer_flow::Request,
 ) -> crate::writer_flow::Report {
     use crate::{
-        note_export::mem::MemDestination,
+        note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure},
         writer_flow::{self, Failure as FlowFailure},
     };
     let result = (|| -> std::result::Result<_, FlowFailure> {
         request.preflight().map_err(|_| FlowFailure::InvalidInput)?;
-        let config = Config::load(config_path).map_err(|_| FlowFailure::Storage)?;
+        let (config, saved) =
+            Config::load_with_saved_revision(config_path).map_err(|_| FlowFailure::Storage)?;
         if !matches!(request, writer_flow::Request::ReconcileExport { .. })
             && !config.admits_writer(true)
         {
@@ -305,18 +306,42 @@ fn run_flow(
         } else {
             None
         };
-        let token = std::env::var("MEM_API_KEY").map_err(|_| FlowFailure::MissingCredentials)?;
-        let destination =
-            MemDestination::new(&token).map_err(|_| FlowFailure::MissingCredentials)?;
-        let ledger = Ledger::new(Arc::new(
-            (if request.target().is_some() {
-                Store::open_source_target_startup(&config)
-            } else {
-                Store::open(config.paths.clone())
-            })
-            .map_err(|_| FlowFailure::Storage)?
-            .with_runtime_policy(&config),
-        ));
+        let destination_failure = |failure| match failure {
+            ExportFailure::MissingCredentials
+            | ExportFailure::MissingCapacitiesCredentials
+            | ExportFailure::Authentication
+            | ExportFailure::Transport => FlowFailure::MissingCredentials,
+            ExportFailure::Unsupported => FlowFailure::Unsupported,
+            _ => FlowFailure::Storage,
+        };
+        let (ledger, destination) = match &request {
+            writer_flow::Request::ReconcileExport {
+                conversation,
+                correlation,
+            } => ConfiguredDestination::original(
+                &config,
+                saved.as_ref(),
+                *conversation,
+                *correlation,
+            )
+            .map_err(destination_failure)?,
+            _ => {
+                let mut destination =
+                    ConfiguredDestination::selected(&config, saved.as_ref(), None)
+                        .map_err(destination_failure)?;
+                let store = (if request.target().is_some() {
+                    Store::open_source_target_startup(&config)
+                } else {
+                    Store::open(config.paths.clone())
+                })
+                .map_err(|_| FlowFailure::Storage)?
+                .with_runtime_policy(&config);
+                destination
+                    .admit_actor(&store)
+                    .map_err(destination_failure)?;
+                (Ledger::new(Arc::new(store)), destination)
+            }
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -327,7 +352,7 @@ fn run_flow(
             let mut worker = tokio::task::spawn_blocking(move || {
                 if let Some((mut model, profile)) = model {
                     if owned_request.target().is_some() {
-                        return writer_flow::run_regional(
+                        return writer_flow::run_configured_regional(
                             &ledger,
                             &mut model,
                             &destination,
@@ -337,22 +362,24 @@ fn run_flow(
                             canceled,
                         );
                     }
-                    writer_flow::run(
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut model,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 } else {
-                    writer_flow::run(
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut NoModel,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 }
             });

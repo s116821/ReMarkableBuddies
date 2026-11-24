@@ -40,6 +40,12 @@ impl WriterSelection {
         self.draft.revision_id
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn same_draft_and_source(&self, current: &Self) -> bool {
+        self.draft.revision_id == current.draft.revision_id
+            && self.source.revision_id == current.source.revision_id
+    }
+
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {
         let value = Self {
             root: ExpectedHeads(BTreeSet::from([root.revision_id])),
@@ -191,11 +197,29 @@ impl WriterExportInput {
         association: &ExportAssociation,
     ) -> Result<String> {
         let draft = self.selection.draft_value()?;
+        let (correlation, effect) = if let Some(attempt) = &association.capacities {
+            association.validate_attempt()?;
+            ensure!(
+                association.id
+                    == CapacitiesAttempt::association_id(
+                        association.conversation,
+                        attempt.space,
+                        attempt.correlation
+                    ),
+                "foreign Capacities association key"
+            );
+            (attempt.correlation, attempt.id)
+        } else {
+            (
+                association.id,
+                association.attempt.as_ref().context("attempt missing")?.id,
+            )
+        };
         ensure!(
             self.grant.store == ledger.store().as_ref() as *const Store as usize
                 && self.grant.conversation == association.conversation
-                && self.grant.correlation == association.id
-                && self.grant.effect == association.attempt.as_ref().context("attempt missing")?.id
+                && self.grant.correlation == correlation
+                && self.grant.effect == effect
                 && self.grant.draft == draft.id,
             "foreign Writer flow grant"
         );

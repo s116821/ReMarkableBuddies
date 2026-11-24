@@ -1,4 +1,5 @@
 //! Deliberate host Writer/export orchestration. No device or native admission.
+use crate::note_export::dispatch::{unresolved, LegacyDestination, OwnedDestination};
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Outcome, WriterExportInput, WriterFlowAdmission},
@@ -264,6 +265,45 @@ pub(crate) fn run_with_events<E: LLMEngine>(
     canceled: watch::Receiver<bool>,
     events: &mut Events<'_>,
 ) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        request,
+        preference,
+        canceled,
+        events,
+    )
+}
+/// Writer ownership and selection guards, using Capacities' provider-assigned identity.
+pub fn run_capacities<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &note_export::capacities::CapacitiesDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        destination,
+        request,
+        preference,
+        canceled,
+        &mut |_, _| {},
+    )
+}
+
+pub(crate) fn run_destination_with_events<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+    events: &mut Events<'_>,
+) -> Report {
     run_with_configuration(
         ledger,
         engine,
@@ -284,6 +324,26 @@ pub fn run_regional<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     destination: &impl NoteDestination,
+    request: &Request,
+    config: &crate::config::Config,
+    model_profile: &str,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_configured_regional(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        request,
+        config,
+        model_profile,
+        canceled,
+    )
+}
+
+pub(crate) fn run_configured_regional<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
     request: &Request,
     config: &crate::config::Config,
     model_profile: &str,
@@ -315,7 +375,7 @@ struct FlowContext<'a, 'b> {
 fn run_with_configuration<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
-    destination: &impl NoteDestination,
+    destination: &impl OwnedDestination,
     request: &Request,
     preference: &PersonalizationSnapshot,
     canceled: watch::Receiver<bool>,
@@ -358,9 +418,8 @@ fn run_with_configuration<E: LLMEngine>(
         return result;
     }
     if matches!(request, Request::ReconcileExport { .. }) {
-        let export = runtime.block_on(note_export::reconcile_with_owner(
+        let export = runtime.block_on(destination.reconcile_owned(
             ledger,
-            destination,
             request.conversation(),
             result.correlation,
             canceled,
@@ -378,13 +437,11 @@ fn run_with_configuration<E: LLMEngine>(
             return result;
         }
     };
-    match ledger.export_association(request.conversation(), result.correlation) {
-        Ok(Some(old))
-            if old.outcome != Outcome::Completed
-                && !old.attempt.as_ref().is_some_and(|a| {
-                    a.no_send && matches!(old.outcome, Outcome::Failed | Outcome::Canceled)
-                }) =>
-        {
+    match ledger.export_association(
+        request.conversation(),
+        destination.association_id(request.conversation(), result.correlation),
+    ) {
+        Ok(Some(old)) if unresolved(&old) => {
             result.status = Status::ReconcileRequired;
             return result;
         }
@@ -394,14 +451,17 @@ fn run_with_configuration<E: LLMEngine>(
         }
         _ => {}
     }
-    let fingerprint =
-        match serde_json::to_vec(&("writer-flow-intent-v1", request, destination.backend())) {
-            Ok(value) => digest(&value),
-            Err(_) => {
-                result.failure = Some(Failure::InvalidInput);
-                return result;
-            }
-        };
+    let fingerprint = match serde_json::to_vec(&(
+        "writer-flow-intent-v1",
+        request,
+        destination.intent_binding(),
+    )) {
+        Ok(value) => digest(&value),
+        Err(_) => {
+            result.failure = Some(Failure::InvalidInput);
+            return result;
+        }
+    };
     if request.target().is_some_and(|t| t.root() != &expected)
         && !ledger
             .original_writer_flow(result.outer_operation, &fingerprint)
@@ -577,9 +637,8 @@ fn run_with_configuration<E: LLMEngine>(
             .target()
             .map(|_| started + std::time::Duration::from_secs(345)),
     };
-    let export = runtime.block_on(note_export::export_with_owner(
+    let export = runtime.block_on(destination.export_owned(
         ledger,
-        destination,
         &note,
         canceled,
         &export_owner,
@@ -602,5 +661,57 @@ fn export_status(status: ExportStatus) -> Status {
     }
 }
 
+/// Export owns a current-thread async runtime on its worker. Keep native
+/// observation on the input owner and wait for its answer before each effect.
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) fn run_guarded_draft_export(
+    ledger: &crate::conversation::Ledger,
+    destination: &impl crate::note_export::dispatch::OwnedDestination,
+    request: &crate::writer_flow::Request,
+    preference: &crate::config::PersonalizationSnapshot,
+    mut check: impl FnMut(crate::writer_flow::Phase) -> Result<()>,
+) -> crate::writer_flow::Report {
+    use crate::{
+        writer::command::NoModel,
+        writer_flow::{self, Phase},
+    };
+
+    std::thread::scope(|scope| {
+        let (calls, receive) = std::sync::mpsc::channel();
+        let (reply, responses) = std::sync::mpsc::sync_channel(0);
+        let (cancel, canceled) = tokio::sync::watch::channel(false);
+        let worker = scope.spawn(move || {
+            writer_flow::run_destination_with_events(
+                ledger,
+                &mut NoModel,
+                destination,
+                request,
+                preference,
+                canceled,
+                &mut |phase, _| {
+                    if matches!(
+                        phase,
+                        Phase::BeforeAdmission
+                            | Phase::BeforeExportAdmission
+                            | Phase::BeforeDestinationPoll
+                            | Phase::BeforeWritePoll
+                    ) && (calls.send(phase).is_err() || responses.recv() != Ok(true))
+                    {
+                        let _ = cancel.send(true);
+                    }
+                },
+            )
+        });
+        for phase in receive {
+            if reply.send(check(phase).is_ok()).is_err() {
+                break;
+            }
+        }
+        worker.join().unwrap_or_else(|_| {
+            writer_flow::Report::refused(request, writer_flow::Failure::Storage)
+        })
+    })
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -5,6 +5,197 @@ use serde::{Deserialize, Serialize};
 
 pub const EXPORT_SCHEMA: u32 = 2;
 
+pub(crate) const CAPACITIES_BACKEND: &str = "capacities";
+pub(crate) const CAPACITIES_PAGE: &str = "RootPage";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesAttempt {
+    pub evidence_version: u32,
+    pub id: Uuid,
+    pub space: Uuid,
+    pub structure: String,
+    pub correlation: Uuid,
+    pub payload_sha256: String,
+    pub body_sha256: String,
+    pub tags: BTreeSet<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<Uuid>,
+    pub candidate: Option<Uuid>,
+    pub verified_body_block: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<CapacitiesManaged>,
+}
+
+/// Version-three readable content; older evidence remains literal Markdown.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesManaged {
+    pub mapping_revision: u32,
+    pub action: ExportAction,
+    pub creation_effect: Uuid,
+    pub desired_sha256: String,
+    pub baseline: Option<CapacitiesBaseline>,
+    pub confirmed_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CapacitiesBaseline {
+    pub object: Uuid,
+    pub block: String,
+    /// Exact previously observed managed tree, including descendant IDs.
+    pub identity_sha256: String,
+}
+
+impl CapacitiesManaged {
+    fn same_plan(&self, other: &Self) -> bool {
+        self.mapping_revision == other.mapping_revision
+            && self.action == other.action
+            && self.creation_effect == other.creation_effect
+            && self.desired_sha256 == other.desired_sha256
+            && self.baseline == other.baseline
+    }
+}
+
+impl CapacitiesAttempt {
+    pub fn association_id(conversation: Uuid, space: Uuid, correlation: Uuid) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "urn:remarkable-buddies:export:capacities:v1:{space}:{conversation}:{correlation}"
+            )
+            .as_bytes(),
+        )
+    }
+
+    pub(crate) fn stage_id(effect: Uuid, stage: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("urn:remarkable-buddies:capacities-export-command:v1:{effect}:{stage}")
+                .as_bytes(),
+        )
+    }
+
+    pub(crate) fn same_plan(&self, other: &Self) -> bool {
+        self.evidence_version == other.evidence_version
+            && self.id == other.id
+            && self.space == other.space
+            && self.structure == other.structure
+            && self.correlation == other.correlation
+            && self.payload_sha256 == other.payload_sha256
+            && self.body_sha256 == other.body_sha256
+            && self.tags == other.tags
+            && self.grant_id == other.grant_id
+            && match (&self.managed, &other.managed) {
+                (Some(a), Some(b)) => a.same_plan(b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn validate(&self, association: &ExportAssociation) -> Result<()> {
+        let update = self
+            .managed
+            .as_ref()
+            .is_some_and(|m| m.action == ExportAction::Update);
+        let stage = match association.outcome {
+            Outcome::Prepared if self.candidate.is_none() || update => "prepared",
+            Outcome::ReconcileRequired if self.candidate.is_none() => "uncertain",
+            Outcome::ReconcileRequired => "candidate",
+            Outcome::Completed => "completed",
+            Outcome::Canceled if self.candidate.is_none() || update => "canceled-no-send",
+            Outcome::Failed if self.candidate.is_none() || update => "failed-no-send",
+            _ => bail!("invalid Capacities export stage"),
+        };
+        ensure!(
+            association.backend == CAPACITIES_BACKEND
+                && matches!(
+                    (self.evidence_version, self.grant_id),
+                    (1, None) | (2, Some(_)) | (3, _)
+                )
+                && self.grant_id.is_none_or(|id| !id.is_nil())
+                && association.attempt.is_none()
+                && self.structure == CAPACITIES_PAGE
+                && !association.conversation.is_nil()
+                && !self.space.is_nil()
+                && !self.correlation.is_nil()
+                && association.conversation != self.correlation
+                && !self.id.is_nil()
+                && association.id
+                    == Self::association_id(association.conversation, self.space, self.correlation)
+                && association.operation == Self::stage_id(self.id, stage)
+                && (1..=1024).contains(&association.source_scope.len())
+                && (1..=1024).contains(&association.source_revision.len())
+                && valid_digest(&self.payload_sha256)
+                && valid_digest(&self.body_sha256)
+                && self.tags.len() <= 16
+                && self.tags.iter().all(|id| !id.is_nil())
+                && self.candidate.is_none_or(|id| !id.is_nil()),
+            "invalid Capacities export scope"
+        );
+        ensure!(
+            self.managed.is_some() == (self.evidence_version == 3),
+            "invalid managed representation"
+        );
+        if let Some(managed) = &self.managed {
+            ensure!(
+                managed.mapping_revision == 1
+                    && !managed.creation_effect.is_nil()
+                    && valid_digest(&managed.desired_sha256),
+                "invalid managed content plan"
+            );
+            match (managed.action, &managed.baseline) {
+                (ExportAction::Create, None) => ensure!(
+                    managed.creation_effect == self.id,
+                    "creation marker changed"
+                ),
+                (ExportAction::Update, Some(baseline)) => ensure!(
+                    !baseline.object.is_nil()
+                        && self.candidate == Some(baseline.object)
+                        && (1..=1024).contains(&baseline.block.len())
+                        && !baseline.block.chars().any(char::is_control)
+                        && valid_digest(&baseline.identity_sha256),
+                    "invalid managed update baseline"
+                ),
+                _ => bail!("managed action lacks exact baseline"),
+            }
+            ensure!(
+                match (&managed.confirmed_sha256, &association.outcome) {
+                    (Some(hash), Outcome::Completed) => valid_digest(hash),
+                    (None, outcome) => *outcome != Outcome::Completed,
+                    _ => false,
+                },
+                "unverified managed content baseline"
+            );
+            if let Some(baseline) = &managed.baseline {
+                if association.outcome == Outcome::Completed {
+                    ensure!(
+                        self.verified_body_block.as_deref() == Some(&baseline.block),
+                        "managed group changed"
+                    );
+                }
+            }
+        }
+        if association.outcome == Outcome::Completed {
+            ensure!(
+                self.candidate.map(|id| id.to_string()) == association.native_note
+                    && self.candidate.is_some()
+                    && self.verified_body_block.as_ref().is_some_and(|id| {
+                        (1..=1024).contains(&id.len()) && !id.chars().any(char::is_control)
+                    }),
+                "unverified Capacities export completion"
+            );
+        } else {
+            ensure!(
+                association.native_note.is_none() && self.verified_body_block.is_none(),
+                "unverified Capacities export claims native binding"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExportAction {
@@ -56,6 +247,13 @@ impl ExportAttempt {
 
 impl ExportAssociation {
     pub(crate) fn validate_attempt(&self) -> Result<()> {
+        if let Some(attempt) = &self.capacities {
+            return attempt.validate(self);
+        }
+        ensure!(
+            self.backend != CAPACITIES_BACKEND,
+            "missing Capacities evidence"
+        );
         let Some(a) = &self.attempt else {
             return Ok(());
         };
@@ -142,6 +340,91 @@ impl ExportAssociation {
                 && old.source_scope == self.source_scope,
             "export immutable scope changed"
         );
+        if self.capacities.is_some() || old.capacities.is_some() {
+            let (before, after) = old
+                .capacities
+                .as_ref()
+                .zip(self.capacities.as_ref())
+                .context("Capacities schema changed")?;
+            ensure!(
+                before.correlation == after.correlation
+                    && before.space == after.space
+                    && before.structure == after.structure,
+                "Capacities destination changed"
+            );
+            if before.id == after.id {
+                ensure!(
+                    before.same_plan(after) && old.source_revision == self.source_revision,
+                    "Capacities attempt plan changed"
+                );
+                let valid = match (&old.outcome, &self.outcome) {
+                    (Outcome::Prepared, Outcome::Canceled | Outcome::Failed) => true,
+                    (Outcome::Prepared, Outcome::ReconcileRequired) => true,
+                    (Outcome::ReconcileRequired, Outcome::Completed) => {
+                        before.candidate.is_some() && before.candidate == after.candidate
+                    }
+                    _ => false,
+                };
+                ensure!(valid, "invalid Capacities export transition");
+            } else {
+                ensure!(
+                    self.outcome == Outcome::Prepared,
+                    "new Capacities attempt not prepared"
+                );
+                if let Some(after_managed) = &after.managed {
+                    if after_managed.action == ExportAction::Update {
+                        let before_managed = before
+                            .managed
+                            .as_ref()
+                            .context("legacy content cannot be converted")?;
+                        let baseline = if old.outcome == Outcome::Completed {
+                            CapacitiesBaseline {
+                                object: before.candidate.context("missing original object")?,
+                                block: before
+                                    .verified_body_block
+                                    .clone()
+                                    .context("missing original group")?,
+                                identity_sha256: before_managed
+                                    .confirmed_sha256
+                                    .clone()
+                                    .context("missing confirmed tree")?,
+                            }
+                        } else {
+                            ensure!(
+                                matches!(old.outcome, Outcome::Canceled | Outcome::Failed),
+                                "unresolved managed update"
+                            );
+                            before_managed
+                                .baseline
+                                .clone()
+                                .context("no original update baseline")?
+                        };
+                        ensure!(
+                            after_managed.baseline.as_ref() == Some(&baseline)
+                                && after_managed.creation_effect == before_managed.creation_effect
+                                && after.grant_id == before.grant_id,
+                            "managed successor lost original custody"
+                        );
+                    } else {
+                        ensure!(
+                            matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
+                                && before
+                                    .managed
+                                    .as_ref()
+                                    .is_none_or(|m| m.action == ExportAction::Create),
+                            "managed successor cannot duplicate a note"
+                        );
+                    }
+                } else {
+                    ensure!(
+                        matches!(old.outcome, Outcome::Canceled | Outcome::Failed)
+                            && before.managed.is_none(),
+                        "Capacities attempt cannot start another create"
+                    );
+                }
+            }
+            return Ok(());
+        }
         match (&old.attempt, &self.attempt) {
             (None, None) => {
                 ensure!(
@@ -220,6 +503,80 @@ impl ExportAssociation {
 }
 
 impl Ledger {
+    /// Before allocating a source-page export, find its existing local owner
+    /// across destination spaces. This lookup confers no effect authority.
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn correlated_export_owner(&self, correlation: Uuid) -> Result<Option<Uuid>> {
+        self.complete_store()?;
+        let heads =
+            self.store
+                .snapshot_heads_matching(&[Namespace::ExportAssociation], 8, |entry| {
+                    entry.record_id == correlation
+                        || entry.payload["record"]["capacities"]["correlation"]
+                            .as_str()
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                            == Some(correlation)
+                })?;
+        let mut owner = None;
+        for head in heads {
+            let Record::Export(association) = Self::decode(&head)? else {
+                bail!("invalid export ownership record");
+            };
+            ensure!(
+                owner.is_none_or(|current| current == association.conversation),
+                "source-page export has conflicting owners"
+            );
+            owner = Some(association.conversation);
+        }
+        Ok(owner)
+    }
+
+    /// Resolve the portable correlation against existing heads, including all
+    /// conflicting heads of a matching record. No active provider preference.
+    pub(crate) fn original_exports(
+        &self,
+        conversation: Uuid,
+        correlation: Uuid,
+    ) -> Result<Vec<ExportAssociation>> {
+        ensure!(
+            !conversation.is_nil() && !correlation.is_nil() && conversation != correlation,
+            "invalid export identity"
+        );
+        self.live_root(conversation, None)?;
+        let (unavailable, heads) = self.store.snapshot_heads_matching_with_status(
+            &[Namespace::ExportAssociation],
+            8,
+            |envelope| {
+                let record = &envelope.payload["record"];
+                let matches_uuid = |field: &serde_json::Value, id| {
+                    field.as_str().and_then(|s| Uuid::parse_str(s).ok()) == Some(id)
+                };
+                envelope.record_id == correlation
+                    || (matches_uuid(&record["conversation"], conversation)
+                        && matches_uuid(&record["capacities"]["correlation"], correlation))
+            },
+        )?;
+        ensure!(unavailable == 0, "incomplete export history");
+        heads
+            .iter()
+            .map(|head| {
+                let Record::Export(association) = Self::decode(head)? else {
+                    bail!("invalid original export")
+                };
+                ensure!(
+                    association.conversation == conversation
+                        && association
+                            .capacities
+                            .as_ref()
+                            .map_or(association.id, |a| a.correlation)
+                            == correlation,
+                    "foreign export association"
+                );
+                Ok(association)
+            })
+            .collect()
+    }
+
     /// Current export facts only; no dispatch or native capability is returned.
     pub fn export_association(
         &self,
@@ -261,11 +618,13 @@ impl Ledger {
         let snapshot =
             self.store
                 .snapshot_revisions_matching(&[Namespace::ExportAssociation], 8, |e| {
+                    let payload = &e.payload["record"];
                     e.record_id == correlation
-                        && e.payload["record"]["attempt"]["id"]
-                            .as_str()
-                            .and_then(|text| Uuid::parse_str(text).ok())
-                            == Some(effect)
+                        && [&payload["attempt"]["id"], &payload["capacities"]["id"]]
+                            .into_iter()
+                            .any(|id| {
+                                id.as_str().and_then(|s| Uuid::parse_str(s).ok()) == Some(effect)
+                            })
                 })?;
         if snapshot.is_empty() {
             return Ok(None);
@@ -285,11 +644,16 @@ impl Ledger {
                     first.backend == a.backend
                         && first.source_scope == a.source_scope
                         && first.source_revision == a.source_revision
-                        && first
+                        && (first
                             .attempt
                             .as_ref()
                             .zip(a.attempt.as_ref())
-                            .is_some_and(|(before, after)| before.same_plan(after)),
+                            .is_some_and(|(before, after)| before.same_plan(after))
+                            || first
+                                .capacities
+                                .as_ref()
+                                .zip(a.capacities.as_ref())
+                                .is_some_and(|(before, after)| before.same_plan(after))),
                     "historical export plan conflict"
                 );
             } else {

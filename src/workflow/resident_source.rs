@@ -2986,6 +2986,8 @@ pub(crate) mod tests {
         conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
         refuse_new_reader_text: bool,
+        #[cfg(feature = "installed-resident-output")]
+        refuse_writer_text: bool,
         successor: Option<SuccessorProbe>,
         #[cfg(feature = "installed-resident-output")]
         insertion_source: Option<ConversationId>,
@@ -3180,11 +3182,10 @@ pub(crate) mod tests {
                 text,
                 ResidentOutputText::Plain(_) | ResidentOutputText::WriterSourceDraft(_)
             ) {
-                return Ok(
-                    crate::workflow::resident_output::development::fits_test_keyboard(
+                return Ok(!self.refuse_writer_text
+                    && crate::workflow::resident_output::development::fits_test_keyboard(
                         text, new_page,
-                    ),
-                );
+                    ));
             }
             assert!(new_page && matches!(text, ResidentOutputText::Reader { .. }));
             Ok(!self.refuse_new_reader_text)

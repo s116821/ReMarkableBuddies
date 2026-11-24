@@ -1,11 +1,44 @@
 use super::*;
 use crate::conversation::{
-    BindingAcquisition, BindingReceipt, ExpectedHeads, Mode, Role, SourceObservation, Turn,
+    BindingAcquisition, BindingReceipt, ContextBudget, ExpectedHeads, Mode, Role,
+    SourceObservation, Turn,
 };
 use crate::workflow::{conversation_dispatch::Dispatch, selected_backend::RefusingBackend};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 const NOTE: &str = "Make a note from this page.";
+const SAVE: &str = "Save a note from this page.";
+const AMBIGUOUS_SAVE: &str = "Can you save it?";
+const UPDATED_SAVE: &str = "Save an updated note from this page.";
+const SEPARATE_SAVE: &str = "Save a separate note from this page.";
+const CLARIFICATION: &str = "Should I save a note from this page to your configured destination?";
+const SAVED: &str = "Saved to your configured note destination.";
+const UNCERTAIN: &str =
+    "The destination may have received the note. Check the destination before retrying.";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Save {
+    Explicit,
+    Update,
+    Separate,
+    Compact,
+    CompactUncertain,
+    Ambiguous,
+}
+impl Save {
+    fn compact(self) -> bool {
+        matches!(self, Self::Compact | Self::CompactUncertain)
+    }
+
+    fn wording(self) -> &'static str {
+        match self {
+            Self::Explicit | Self::Compact | Self::CompactUncertain => SAVE,
+            Self::Update => UPDATED_SAVE,
+            Self::Separate => SEPARATE_SAVE,
+            Self::Ambiguous => AMBIGUOUS_SAVE,
+        }
+    }
+}
 const CIRCLE_NOTE: &str = "Make a note about the circled part.";
 const REGION_TEXT: &str = "Selected equation: 24 / 6 = 4.";
 
@@ -19,9 +52,20 @@ const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
 const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
 const UNPUBLISHED: &str = "A short generated draft with no completed placement.";
 
+fn draft_at_export_display_boundary() -> String {
+    use crate::{
+        conversation_layout::CONVERSATION_TITLE, workflow::resident_output::format_exchange,
+    };
+
+    let prefix = format_exchange(SAVE, format_args!("{SAVED}\n\nPage note\n\n"));
+    let body = "x".repeat(513 - (CONVERSATION_TITLE.len() + 2) - prefix.len());
+    format!("# Page note\n\n{body}")
+}
+
 struct SubmissionModel {
     writer: bool,
     circled: Option<Circled>,
+    save: Option<Save>,
     last_visible_text: Option<String>,
     steps: Rc<Cell<usize>>,
     source: Rc<RefCell<Option<String>>>,
@@ -100,6 +144,14 @@ impl crate::LLMEngine for SubmissionModel {
                     })
                     .to_string());
                 }
+                if let Some(save) = self.save {
+                    let intent = if save == Save::Ambiguous {
+                        serde_json::json!({"intent":"clarify-export","request":save.wording()})
+                    } else {
+                        serde_json::json!({"intent":"writer-export-current-page","request":save.wording(),"separate_note":save == Save::Separate})
+                    };
+                    return Ok(intent.to_string());
+                }
                 if writer {
                     Ok(
                         serde_json::json!({"intent":"writer-current-page","request":NOTE})
@@ -144,9 +196,13 @@ impl crate::LLMEngine for SubmissionModel {
                     );
                     Ok("# Circled note\n\nThe selected equation gives four.".into())
                 } else {
-                    assert_eq!(input["request"], NOTE);
+                    assert_eq!(input["request"], self.save.map_or(NOTE, Save::wording));
                     assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
-                    Ok(DRAFT.into())
+                    match self.save {
+                        Some(Save::Update) => Ok("# Page note\n\nThe page computes four from twenty-four divided by six.".into()),
+                        Some(save) if save.compact() => Ok(draft_at_export_display_boundary()),
+                        _ => Ok(DRAFT.into()),
+                    }
                 }
             }
             (1, false) => {
@@ -254,18 +310,188 @@ fn seed_history(
 }
 
 #[test]
+fn installed_source_page_saves_reuse_the_note_after_placement_refusal() -> Result<()> {
+    let base = std::env::temp_dir().join(format!("page-save-{}", ConversationId::new_v4()));
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "paths": StorePaths {
+            data: base.join("data"),
+            cache: base.join("cache"),
+            credentials: base.join("credentials"),
+        },
+        "product_settings": {
+            "reader_enabled": true,
+            "writer_enabled": true,
+            "export_destination": "mem"
+        }
+    }))?;
+    let store = Arc::new(Store::open(config.paths.clone())?);
+    let ledger = Ledger::new(store.clone());
+    let mut dispatch =
+        Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+    let destination = Arc::new(crate::writer_flow::tests::Destination::default());
+    dispatch.test_note_destination = Some(destination.clone());
+    let document = ConversationId::new_v4();
+    let page = ConversationId::new_v4();
+    let mut primary = None;
+    let mut conversation = None;
+
+    for (index, (save, writes, notes)) in [
+        (Save::Explicit, 1, 1),
+        (Save::Update, 2, 1),
+        (Save::Separate, 3, 2),
+        (Save::Explicit, 4, 2),
+        (Save::Update, 4, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mode = "reconnect-source-handoff-text-refusal";
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![], Duration::ZERO, &store);
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let position = native.successor_position();
+        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join(format!("profile-{index}")),
+            runtime.identity(),
+        )?;
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            writer_slot: None,
+            writer_slot_fault: false,
+            refinement_slot: None,
+        }));
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(RecognitionProbe {
+                    refuse_writer_text: true,
+                    ..RecognitionProbe::default()
+                })),
+        );
+        let steps = Rc::new(Cell::new(0));
+        let model = SubmissionModel {
+            writer: true,
+            circled: None,
+            save: Some(save),
+            last_visible_text: None,
+            steps: steps.clone(),
+            source: Rc::new(RefCell::new(None)),
+            images: vec![],
+            text: vec![],
+        };
+        if index == 3 {
+            destination.lose_next_ack();
+        }
+        let before = destination.counts();
+        assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
+        let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Writer draft cannot be typed"));
+        assert_eq!(steps.get(), 3);
+        assert!(!position.exists());
+        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(destination.counts().2, writes);
+        assert_eq!(destination.remote_note_count(), notes);
+        if index == 4 {
+            assert_eq!(
+                destination.counts(),
+                before,
+                "uncertain write belongs to reconciliation"
+            );
+        }
+
+        let heads = store.snapshot_heads_matching(&[Namespace::ExportAssociation], 8, |_| true)?;
+        assert_eq!(heads.len(), notes);
+        for head in heads {
+            let Record::Export(association) = Ledger::decode(&head)? else {
+                anyhow::bail!("expected export association");
+            };
+            assert_eq!(
+                *conversation.get_or_insert(association.conversation),
+                association.conversation
+            );
+            let (id, note) =
+                primary.get_or_insert_with(|| (association.id, association.native_note.clone()));
+            if *id == association.id {
+                assert_eq!(*note, association.native_note);
+                assert_eq!(
+                    association.outcome,
+                    if index >= 3 {
+                        Outcome::ReconcileRequired
+                    } else {
+                        Outcome::Completed
+                    }
+                );
+            } else {
+                assert_ne!(*note, association.native_note);
+                assert_eq!(association.outcome, Outcome::Completed);
+            }
+        }
+        let root = store
+            .value(Namespace::Conversation, conversation.unwrap())?
+            .context("save conversation missing")?;
+        let Record::Root(root) = Ledger::decode(&root)? else {
+            anyhow::bail!("expected conversation root");
+        };
+        assert!(
+            root.binding.is_none(),
+            "test requires an unbound source for each save"
+        );
+    }
+
+    let records = ledger.inspect(conversation.unwrap(), false)?;
+    let captures: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::ResidentCapture(evidence) => Some(evidence),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(captures.len(), 5);
+    assert!(captures
+        .iter()
+        .all(|evidence| evidence.before.document == document && evidence.before.page == page));
+    assert_eq!(
+        captures
+            .iter()
+            .map(|evidence| evidence.correspondence.capture_operation)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        5
+    );
+    drop((dispatch, ledger, store));
+    std::fs::remove_dir_all(base)?;
+    Ok(())
+}
+
+#[test]
 fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<()> {
-    for (reader_enabled, writer_request, bound_history, circled) in [
-        (true, false, false, None),
-        (true, true, false, None),
-        (false, true, false, None),
-        (true, false, true, None),
-        (true, true, false, Some(Circled::Selected)),
-        (false, true, false, Some(Circled::Selected)),
-        (true, false, false, Some(Circled::MissingOutline)),
+    for (reader_enabled, writer_request, bound_history, circled, save) in [
+        (true, false, false, None, None),
+        (true, true, false, None, None),
+        (false, true, false, None, None),
+        (true, false, true, None, None),
+        (true, true, false, Some(Circled::Selected), None),
+        (false, true, false, Some(Circled::Selected), None),
+        (true, false, false, Some(Circled::MissingOutline), None),
+        (true, true, false, None, Some(Save::Explicit)),
+        (false, true, false, None, Some(Save::Ambiguous)),
+        (true, true, false, None, Some(Save::Compact)),
+        (false, true, false, None, Some(Save::CompactUncertain)),
     ] {
-        let mode = match (circled, writer_request) {
-            (Some(Circled::Selected), _) => "reconnect-source-handoff-writer-insert",
+        let compact = save.is_some_and(Save::compact);
+        let inserts = compact || circled == Some(Circled::Selected);
+        let mode = match (inserts, writer_request) {
+            (true, _) => "reconnect-source-handoff-writer-insert",
             (_, true) => "reconnect-source-handoff-text-refusal",
             _ => "reconnect-source-handoff",
         };
@@ -278,7 +504,8 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             },
             "product_settings": {
                 "reader_enabled": reader_enabled,
-                "writer_enabled": true
+                "writer_enabled": true,
+                "export_destination": if compact || save == Some(Save::Ambiguous) { "mem" } else { "disabled" }
             }
         }))?;
         let store = if circled.is_some() {
@@ -323,8 +550,8 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let output = RecognitionProbe {
             conversation: conversation.clone(),
             confirmed_source: writer_request,
-            insertion_source: (circled == Some(Circled::Selected)).then_some(page),
-            successor: (writer_request && circled.is_none()).then(|| SuccessorProbe {
+            insertion_source: inserts.then_some(page),
+            successor: (writer_request && !inserts).then(|| SuccessorProbe {
                 position: position.clone(),
                 interrupt_restore: false,
             }),
@@ -335,13 +562,19 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             RefusingBackend::with_resident_releases(vec![released(Instant::now())])
                 .with_test_output(Box::new(output)),
         );
-        let dispatch =
+        let mut dispatch =
             Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+        let destination = Arc::new(crate::writer_flow::tests::Destination::default());
+        dispatch.test_note_destination = Some(destination.clone());
+        if save == Some(Save::CompactUncertain) {
+            destination.lose_next_ack();
+        }
         let steps = Rc::new(Cell::new(0));
         let source = Rc::new(RefCell::new(None));
         let model = SubmissionModel {
             writer: writer_request,
             circled,
+            save,
             last_visible_text,
             steps: steps.clone(),
             source: source.clone(),
@@ -360,6 +593,45 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             std::fs::remove_dir_all(base)?;
             continue;
         }
+        if save == Some(Save::Ambiguous) {
+            assert_eq!(steps.get(), 1);
+            assert!(position.exists());
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[format!("Q: {AMBIGUOUS_SAVE}\n\nA: {CLARIFICATION}\n")]
+            );
+            assert_eq!(destination.counts(), (0, 0, 0));
+            let id = conversation
+                .get()
+                .context("Placement conversation absent")?;
+            drop((service, dispatch, ledger, store));
+            let reopened = Ledger::new(Arc::new(Store::open(config.paths.clone())?));
+            let history = reopened.context(
+                id,
+                &ContextBudget {
+                    max_text_bytes: 4096,
+                    max_turns: 4,
+                    provider_token_limit: Some(4096),
+                },
+                |_| Ok(40),
+            )?;
+            let [user, answer] = history.turns.as_slice() else {
+                anyhow::bail!("expected one saved clarification exchange");
+            };
+            assert_eq!(user.role, Role::User);
+            assert_eq!(user.text.as_deref(), Some(AMBIGUOUS_SAVE));
+            assert_eq!(answer.role, Role::Assistant);
+            assert_eq!(answer.outcome, Outcome::Clarification);
+            assert_eq!(answer.text.as_deref(), Some(CLARIFICATION));
+            assert_eq!(user.exchange, answer.exchange);
+            assert!(!reopened
+                .inspect(id, false)?
+                .iter()
+                .any(|record| matches!(record, Record::Export(_))));
+            drop(reopened);
+            std::fs::remove_dir_all(base)?;
+            continue;
+        }
         assert_eq!(steps.get(), 3);
         assert!(!events.borrow().contains(&"current-target-writer-received"));
         assert_eq!(
@@ -368,7 +640,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 .iter()
                 .filter(|event| **event == "insert")
                 .count(),
-            usize::from(circled == Some(Circled::Selected))
+            usize::from(inserts)
         );
         let records = ledger.inspect(
             conversation
@@ -377,7 +649,40 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             false,
         )?;
 
-        if writer_request {
+        if compact {
+            use crate::workflow::resident_output::{
+                development::fits_test_keyboard, format_exchange,
+                ResidentOutputText::WriterSourceDraft,
+            };
+
+            let draft = draft_at_export_display_boundary();
+            let draft_body = draft.strip_prefix("# ").unwrap();
+            let draft_only = format_exchange(SAVE, draft_body);
+            let complete_save = format_exchange(SAVE, format_args!("{SAVED}\n\n{draft_body}"));
+            assert!(fits_test_keyboard(WriterSourceDraft(&draft_only), true));
+            assert!(fits_test_keyboard(WriterSourceDraft(&complete_save), false));
+            assert!(!fits_test_keyboard(WriterSourceDraft(&complete_save), true));
+            let (status, outcome) = if save == Some(Save::CompactUncertain) {
+                (UNCERTAIN, Outcome::ReconcileRequired)
+            } else {
+                (SAVED, Outcome::Completed)
+            };
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[format!("{status}\n\nFull draft saved in Buddy history.\n")]
+            );
+            assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
+                if turn.outcome == Outcome::Generated && turn.text.as_deref() == Some(draft.as_str()))));
+            assert!(records
+                .iter()
+                .any(|record| matches!(record, Record::Export(export)
+                if export.outcome == outcome)));
+            assert_eq!(
+                destination.counts().2,
+                1,
+                "presentation must not resend the write"
+            );
+        } else if writer_request {
             let (exact_request, saved_draft) = if circled == Some(Circled::Selected) {
                 assert!(!position.exists(), "native insertion selected the new page");
                 assert!(records.iter().any(|record| matches!(record, Record::RegionSource(region)
@@ -385,9 +690,21 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 (CIRCLE_NOTE, "# Circled note\n\nAbout: selected equation\n\nThe selected equation gives four.")
             } else {
                 assert!(position.exists(), "draft must go onto the adjacent page");
-                (NOTE, DRAFT)
+                (
+                    if save == Some(Save::Explicit) {
+                        SAVE
+                    } else {
+                        NOTE
+                    },
+                    DRAFT,
+                )
             };
-            let response = saved_draft.strip_prefix("# ").unwrap();
+            let draft_body = saved_draft.strip_prefix("# ").unwrap();
+            let response = if save == Some(Save::Explicit) {
+                format!("Draft saved. Note export is disabled.\n\n{draft_body}")
+            } else {
+                draft_body.to_owned()
+            };
             assert_eq!(
                 written.borrow().as_slice(),
                 &[format!("Q: {exact_request}\n\nA: {response}\n")]
