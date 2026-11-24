@@ -324,7 +324,9 @@ fn interrupted_guarded_preparation_direct_retry_is_unresolved_without_http() {
         .unwrap()
         .into_iter()
         .find_map(|record| match record {
-            crate::conversation::Record::NormalizedText(source) => Some(source),
+            crate::conversation::Record::NormalizedText(source) => {
+                Some(crate::conversation::WriterSource::ordinary(*source))
+            }
             _ => None,
         })
         .unwrap();

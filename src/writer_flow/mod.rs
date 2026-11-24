@@ -688,7 +688,7 @@ pub(crate) fn run_guarded_draft_export(
                 request,
                 preference,
                 canceled,
-                &mut |phase, _| {
+                &mut move |phase, _| {
                     if matches!(
                         phase,
                         Phase::BeforeAdmission
