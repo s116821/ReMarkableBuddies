@@ -1135,6 +1135,8 @@ impl DevelopmentTargetLease<'_> {
 mod tests {
     use super::*;
     use crate::workflow::resident_runtime::tests::Fixture;
+    #[cfg(feature = "installed-resident-output")]
+    use crate::workflow::resident_supervisor::writer_request::FixtureSlot;
     use crate::workflow::{
         resident_client,
         resident_output::{
@@ -1168,6 +1170,8 @@ mod tests {
         delivery_fault: bool,
         #[cfg(feature = "installed-resident-output")]
         writer_slot_fault: bool,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot: Option<Rc<FixtureSlot>>,
     }
     struct OwnedAdmission<'a> {
         health: &'a mut ServiceHealth,
@@ -1194,12 +1198,32 @@ mod tests {
     }
     impl SourceSession for OwnedSession {
         #[cfg(feature = "installed-resident-output")]
-        fn writer_at_release(&self, _: u64) -> Result<Option<SelectedRefinement>> {
+        fn writer_at_release(&self, released: u64) -> Result<Option<SelectedRefinement>> {
             if self.writer_slot_fault {
                 self.events.borrow_mut().push("writer slot unavailable");
                 anyhow::bail!("Writer slot replaced while reading");
             }
-            Ok(None)
+            match &self.writer_slot {
+                Some(slot) => slot.at_release(released),
+                None => Ok(None),
+            }
+        }
+        #[cfg(feature = "installed-resident-output")]
+        fn writer_request_for_page(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+            selected: SelectedRefinement,
+            action: SlotAction,
+        ) -> Result<Option<crate::writer::Request>> {
+            let Some(slot) = &self.writer_slot else {
+                return Ok(None);
+            };
+            self.events.borrow_mut().push(match action {
+                SlotAction::Inspect => "writer inspect",
+                SlotAction::Claim => "writer claim",
+            });
+            slot.for_page(document, page, selected, action, 121)
         }
         fn companion_pid(&self) -> Option<u32> {
             self.runtime.fixture_companion_pid()
@@ -1340,6 +1364,8 @@ mod tests {
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }))
         }
     }
@@ -1423,6 +1449,9 @@ mod tests {
         }
     }
     #[cfg(feature = "installed-resident-output")]
+    mod installed_writer_memory;
+
+    #[cfg(feature = "installed-resident-output")]
     #[test]
     fn writer_slot_read_failure_preserves_each_enabled_corner_action() {
         let releases = vec![released(Instant::now()), released(Instant::now())];
@@ -1440,6 +1469,7 @@ mod tests {
             events: events.clone(),
             delivery_fault: false,
             writer_slot_fault: true,
+            writer_slot: None,
         }));
         for reader_enabled in [false, true] {
             let config = serde_json::from_value(serde_json::json!({
@@ -1846,6 +1876,8 @@ mod tests {
                 delivery_fault: false,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             let source = RecognitionProbe {
                 confirmed_source: true,
@@ -2084,6 +2116,8 @@ mod tests {
                 delivery_fault: false,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             owner.reconnect = true;
             let calls = Rc::new(Cell::new(0));

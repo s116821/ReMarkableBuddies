@@ -376,6 +376,61 @@ pub(super) fn discard(lease: &Lease) -> Result<()> {
     discard_locked(&locked, &adoption_name(&locked))
 }
 
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(in crate::workflow) struct FixtureSlot {
+    lease: Lease,
+    _fixture: super::tests::Fixture,
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+impl FixtureSlot {
+    pub(in crate::workflow) fn new(
+        document: Uuid,
+        page: Uuid,
+        refinement: Request,
+        published: u64,
+    ) -> Result<Self> {
+        let fixture = super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record())?;
+        lock(&lease)?;
+        Pending {
+            submission: Submission::RefineOnTablet {
+                document,
+                page,
+                refinement,
+            },
+            expires: published + LIFETIME_SECS,
+            published_by: None,
+        }
+        .publish(&lease.path.join(name(&lease)), || Ok(published))?;
+        Ok(Self {
+            lease,
+            _fixture: fixture,
+        })
+    }
+
+    pub(in crate::workflow) fn at_release(
+        &self,
+        released: u64,
+    ) -> Result<Option<SelectedRefinement>> {
+        let Some(pending) = read(&self.lease, &name(&self.lease))? else {
+            return Ok(None);
+        };
+        pending.refinement(self.lease.record().activation(), released)
+    }
+
+    pub(in crate::workflow) fn for_page(
+        &self,
+        document: Uuid,
+        page: Uuid,
+        selected: SelectedRefinement,
+        action: SlotAction,
+        now: u64,
+    ) -> Result<Option<Request>> {
+        request_locked(&self.lease, document, page, selected, action, now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
