@@ -2171,17 +2171,23 @@ pub(crate) mod tests {
             "reader": { "researched_pdf": { "research_model": "gpt-5.6-terra" } },
             "research_policy": "required"
         }))?;
-        config.validate_values()?;
-        let store = Arc::new(if source_targets {
-            Store::open_source_target_startup(&config)?
+        config
+            .validate_values()
+            .context("Validate ordinary PDF fixture configuration")?;
+        let store = if source_targets {
+            Store::open_source_target_startup(&config)
         } else {
-            Store::open(config.paths.clone())?
-        });
+            Store::open(config.paths.clone())
+        }
+        .context("Open ordinary PDF fixture Store")?;
+        let store = Arc::new(store);
         let (mut workflow, events, _notify) =
             workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
-        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let runtime = native
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .context("Start ordinary PDF fixture resident session")?;
         let order_change = native.ordinary_pdf_order_change();
         let change_file_on_observe = Rc::new(Cell::new(false));
         let pdf = root.join(format!("{document}.pdf"));
@@ -2202,15 +2208,19 @@ pub(crate) mod tests {
         crate::storage::files::atomic(
             &store.paths.credentials.join("fixture_model_key"),
             b"PRIVATE_RESEARCH_FIXTURE",
-        )?;
+        )
+        .context("Write ordinary PDF fixture model credential")?;
         let ledger = Ledger::new(store.clone());
-        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .context("Admit ordinary PDF fixture local dispatch")?;
         let mut reader = Orchestrator::new(
             workflow,
             model(&ledger, order_change, change_file_on_observe),
             Ledger::new(store.clone()),
         );
-        reader.set_local_handwriting(&dispatch)?;
+        reader
+            .set_local_handwriting(&dispatch)
+            .context("Configure ordinary PDF fixture handwriting")?;
         let result = reader.run_iteration_with_trigger(true, Some(&dispatch));
         {
             let events = events.borrow();
@@ -2226,13 +2236,15 @@ pub(crate) mod tests {
                 &[Namespace::Conversation],
                 crate::storage::MAX_ITEMS,
                 |_| true,
-            )?
+            )
+            .context("Read ordinary PDF fixture conversation heads")?
             .iter()
             .map(Ledger::decode)
-            .collect::<Result<Vec<_>>>()?;
-        inspect(&ledger, &records)?;
+            .collect::<Result<Vec<_>>>()
+            .context("Decode ordinary PDF fixture conversation records")?;
+        inspect(&ledger, &records).context("Inspect ordinary PDF fixture conversation")?;
         drop((reader, dispatch, ledger, store));
-        std::fs::remove_dir_all(base)?;
+        std::fs::remove_dir_all(base).context("Remove ordinary PDF fixture Store")?;
         Ok((result, records))
     }
 

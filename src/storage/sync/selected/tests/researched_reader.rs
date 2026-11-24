@@ -1168,6 +1168,7 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 #[ignore = "requires the retained normal binary; mandatory hosted composed-reader step"]
 fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Result<()> {
     use crate::conversation::{AttemptReason, Role};
+    use anyhow::Context;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Case {
@@ -1189,7 +1190,14 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
     let executable = retained_command();
     let fixture = Fixture::new();
     let root = fixture.0.join("original-pdf");
-    fs::DirBuilder::new().mode(0o700).create(&root)?;
+    let mut directories = fs::DirBuilder::new();
+    directories.mode(0o700);
+    directories
+        .create(&fixture.0)
+        .context("Create private ordinary PDF fixture parent")?;
+    directories
+        .create(&root)
+        .context("Create ordinary PDF fixture source directory")?;
     let document = Uuid::new_v4();
     let page = Uuid::new_v4();
     let decoy = Uuid::new_v4();
@@ -1200,11 +1208,13 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         &json!({"fileType":"pdf", "cPages":{"original":{"value":2}, "pages":[
             {"id":page, "idx":{"value":"a"}, "redir":{"value":0}}
         ]}}),
-    )?;
+    )
+    .context("Write ordinary PDF fixture page table")?;
     fs::write(
         root.join(format!("{decoy}.pdf")),
         pdf_bytes("alpha acceleration DECOY_DOCUMENT_MUST_NOT_BE_QUERIED"),
-    )?;
+    )
+    .context("Write ordinary PDF fixture decoy")?;
 
     for case in [
         Case::Offline,
@@ -1221,7 +1231,8 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         Case::ProviderRefusalAfterNativeDrift,
         Case::ProviderRefusalAfterConversationDrift,
     ] {
-        fs::write(&path, &bytes)?;
+        fs::write(&path, &bytes)
+            .with_context(|| format!("Write original PDF for ordinary fixture case {case:?}"))?;
         let events = Arc::new(Mutex::new(vec![]));
         let required = case == Case::Required;
         let peer = required.then(|| SearchPeer::new(events.clone(), None));
@@ -1375,7 +1386,8 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                 }
                 Ok(())
             },
-        )?;
+        )
+        .with_context(|| format!("Run ordinary PDF fixture case {case:?}"))?;
         let frames = frames.lock().unwrap();
         let assistants = records
             .iter()
@@ -1447,7 +1459,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             continue;
         }
 
-        result?;
+        result.with_context(|| format!("Complete ordinary PDF Reader case {case:?}"))?;
         let expected_events = if required {
             vec!["analysis", "verification", "research", "answer"]
         } else {
