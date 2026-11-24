@@ -31,6 +31,85 @@ pub struct PageImage<'a> {
     pub png: &'a [u8],
 }
 
+/// Full-page images and verified output-page identities from the source owner.
+/// The order is the native notebook order, including any Buddy pages.
+pub(crate) struct OrderedNotebookImages<'a> {
+    pub document: Uuid,
+    pub order: &'a [Uuid],
+    pub originals: &'a [(Uuid, &'a [u8])],
+    pub buddy_pages: &'a BTreeSet<Uuid>,
+}
+
+impl OrderedNotebookImages<'_> {
+    /// The source owner uses this same identity when re-observing current order.
+    pub(crate) fn order_revision(&self) -> Result<String> {
+        Ok(digest(&serde_json::to_vec(&(
+            "native-notebook-page-order-v1",
+            self.document,
+            self.order,
+            self.buddy_pages,
+        ))?))
+    }
+
+    pub(crate) fn normalize(
+        &self,
+        current_page: Uuid,
+        model_profile: &str,
+        engine: &mut dyn LLMEngine,
+        progress: &mut dyn FnMut(Progress) -> Result<()>,
+    ) -> Result<NormalizedDocument> {
+        let options = Options::default();
+        ensure!(
+            (1..=options.max_pages).contains(&self.originals.len())
+                && self.order.len() == self.originals.len() + self.buddy_pages.len()
+                && self.originals.iter().any(|(page, _)| *page == current_page),
+            "complete ordered notebook source required"
+        );
+        let mut seen = BTreeSet::new();
+        let mut originals = self.originals.iter();
+        let mut pages = Vec::with_capacity(self.originals.len());
+        for (index, &id) in self.order.iter().enumerate() {
+            ensure!(
+                !id.is_nil() && seen.insert(id),
+                "invalid notebook page order"
+            );
+            if self.buddy_pages.contains(&id) {
+                continue;
+            }
+            let &(page, png) = originals
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("original notebook page missing"))?;
+            ensure!(page == id, "original notebook page order changed");
+            pages.push(PageImage {
+                page: (index + 1).try_into()?,
+                png,
+            });
+        }
+        ensure!(
+            originals.next().is_none() && self.buddy_pages.is_subset(&seen),
+            "incomplete notebook page accounting"
+        );
+        let NotebookText {
+            mut document,
+            images,
+            ..
+        } = normalize(
+            self.document,
+            &pages,
+            model_profile,
+            engine,
+            options,
+            progress,
+        )?;
+        document.source_sha256 = digest(&serde_json::to_vec(&(
+            "native-ordered-notebook-images-v1",
+            self.order_revision()?,
+            images,
+        ))?);
+        Ok(document)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub max_pages: usize,

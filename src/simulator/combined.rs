@@ -581,6 +581,173 @@ fn maintained_combined_fixture_runs() {
     run(scenario).unwrap();
 }
 
+#[test]
+fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
+    use crate::retrieval::notebook::OrderedNotebookImages;
+    use writer::notebook::runner::Status;
+
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open_targets()?;
+    let conversation = Uuid::new_v4();
+    ledger.create(conversation, Uuid::new_v4(), 1)?;
+    let mut source = fixture_source(Uuid::new_v4());
+    let blank = Uuid::new_v4();
+    let buddy = Uuid::new_v4();
+    let last = Uuid::new_v4();
+    let order = [source.page, blank, buddy, last];
+    let buddy_pages = [buddy].into_iter().collect();
+    let first_png = fixture_png(5)?;
+    let blank_png = fixture_png(255)?;
+    let last_png = fixture_png(17)?;
+    let originals = [
+        (source.page, first_png.as_slice()),
+        (blank, blank_png.as_slice()),
+        (last, last_png.as_slice()),
+    ];
+    let images = OrderedNotebookImages {
+        document: source.document,
+        order: &order,
+        originals: &originals,
+        buddy_pages: &buddy_pages,
+    };
+    source.order_revision = Some(images.order_revision()?);
+    let config = Config::default();
+    let mut dispatch = Dispatch::local(&config, &ledger)?;
+    let mut observe = || Ok(source.clone());
+    let request = "Make a note from the whole notebook.\nKeep  the examples.";
+    let ready = scope(&ledger, conversation, &source)?;
+    let mut model = Model::default();
+
+    for wrong in [&originals[..2], &[originals[2], originals[1], originals[0]]] {
+        let images = OrderedNotebookImages {
+            document: source.document,
+            order: &order,
+            originals: wrong,
+            buddy_pages: &buddy_pages,
+        };
+        assert!(dispatch
+            .whole_notebook(
+                &ledger,
+                &mut model,
+                request,
+                &images,
+                "fixture",
+                &ready,
+                &mut observe
+            )
+            .is_err());
+        assert!(model.seen.is_empty());
+        assert_eq!(
+            ledger.expected(Namespace::Conversation, conversation)?,
+            ready.root
+        );
+    }
+
+    let transcript = json!({"pages": [
+        {"page": 1, "status": "transcribed", "text": "First-page example."},
+        {"page": 2, "status": "blank", "text": ""},
+        {"page": 4, "status": "transcribed", "text": "Last-page example."}
+    ]});
+    let unavailable = scope(&ledger, conversation, &source)?;
+    let mut unreadable = transcript.clone();
+    unreadable["pages"][2] = json!({"page":4, "status":"unreadable", "text":""});
+    model.replies.push_back(unreadable.to_string());
+    assert!(dispatch
+        .whole_notebook(
+            &ledger,
+            &mut model,
+            request,
+            &images,
+            "fixture",
+            &unavailable,
+            &mut observe
+        )
+        .is_err());
+    assert_eq!(model.seen.len(), 1);
+    assert_eq!(
+        ledger.expected(Namespace::Conversation, conversation)?,
+        unavailable.root
+    );
+    model.seen.clear();
+
+    let draft_text = "# Study note\n\nExamples from pages 1 and 4.";
+    model.replies.extend([
+        transcript.to_string(),
+        "Ordered source coverage from pages 1 and 4.".into(),
+        draft_text.into(),
+    ]);
+    let (report, output) = dispatch.whole_notebook(
+        &ledger,
+        &mut model,
+        request,
+        &images,
+        "fixture",
+        &ready,
+        &mut observe,
+    )?;
+    assert_eq!(report.status, Status::Generated);
+    assert_eq!(model.seen.len(), 3);
+    assert_eq!(
+        model.seen[0]
+            .1
+            .iter()
+            .map(|s| STANDARD.decode(s))
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        [first_png, blank_png, last_png]
+    );
+    let draft = ledger.writer_turn(
+        report
+            .draft
+            .ok_or_else(|| anyhow::anyhow!("notebook draft absent"))?,
+        conversation,
+    )?;
+    let user = ledger.writer_turn(writer::stage(ready.operation, "user"), conversation)?;
+    assert_eq!(user.text.as_deref(), Some(request));
+    let envelope = ledger
+        .store()
+        .value(Namespace::Source, draft.sources[0])?
+        .ok_or_else(|| anyhow::anyhow!("notebook archive absent"))?;
+    let Record::ArchivedNormalizedSource(archive) = Ledger::decode(&envelope)? else {
+        anyhow::bail!("notebook archive absent");
+    };
+    let normalized = archive.load(ledger.store())?;
+    assert_eq!(
+        normalized
+            .document()
+            .units
+            .iter()
+            .map(|unit| (unit.page, unit.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1), "First-page example."),
+            (Some(2), ""),
+            (Some(4), "Last-page example.")
+        ]
+    );
+    let visible = scope(&ledger, conversation, &source)?;
+    dispatch.record_output(
+        &ledger,
+        &visible,
+        &output.ok_or_else(|| anyhow::anyhow!("notebook output witness absent"))?,
+        crate::conversation::CompletionEvidence {
+            native_operation: visible.operation,
+            exact_text: draft_text.into(),
+            observation: source.clone(),
+            procedure: "simulated-notebook-writer-readback".into(),
+        },
+        &mut observe,
+    )?;
+    let visible_turn =
+        ledger.writer_turn(writer::stage(draft.id, "visible-output"), conversation)?;
+    assert_eq!(visible_turn.outcome, Outcome::Completed);
+    assert_eq!(visible_turn.text.as_deref(), Some(draft_text));
+    assert_eq!(
+        ledger.writer_turn(draft.id, conversation)?.outcome,
+        Outcome::Generated
+    );
+    Ok(())
+}
+
 fn run_notebook(scenario: &Scenario) -> Result<usize> {
     use writer::notebook::{
         command::{Generate, Refine, Request},
