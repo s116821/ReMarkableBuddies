@@ -99,7 +99,8 @@ impl InstalledReaderSelection {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(crate) fn has_installed_output(&self) -> bool {
+    /// A validated installation with the shared conversation page and Writer receiver.
+    pub fn has_installed_output(&self) -> bool {
         self.installed_output
     }
 
@@ -297,13 +298,29 @@ impl Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(crate) fn writer_at_release(
+        &self,
+    ) -> Result<Option<super::super::writer_request::SelectedRefinement>> {
+        super::super::writer_request::at_release(&self.pending.lease)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
+        selected: Option<super::super::writer_request::SelectedRefinement>,
     ) -> Result<Option<crate::writer::Request>> {
         self.pending.lease.current()?;
-        super::super::writer_request::take(self.pending.lease.record().activation(), document, page)
+        super::super::writer_request::take(
+            self.pending.lease.record().activation(),
+            document,
+            page,
+            selected,
+        )
     }
 
     /// Only the installed first-gesture caller may compose this with live source

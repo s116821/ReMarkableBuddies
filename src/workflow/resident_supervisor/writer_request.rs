@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{ErrorKind, Read},
@@ -74,6 +75,33 @@ impl LegacyAdoption {
 struct Pending {
     submission: Submission,
     expires: u64,
+}
+
+/// Identity observed when a Writer-only corner gesture is released.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedRefinement {
+    activation: Uuid,
+    slot_digest: [u8; 32],
+}
+
+impl Pending {
+    fn refinement(&self, activation: Uuid, now: u64) -> Result<Option<SelectedRefinement>> {
+        if now >= self.expires
+            || !matches!(
+                &self.submission,
+                Submission::RefineOnTablet {
+                    refinement: Request::Refine { .. },
+                    ..
+                }
+            )
+        {
+            return Ok(None);
+        }
+        Ok(Some(SelectedRefinement {
+            activation,
+            slot_digest: Sha256::digest(serde_json::to_vec(self)?).into(),
+        }))
+    }
 }
 
 impl Submission {
@@ -189,7 +217,23 @@ pub(crate) fn submit(submission: Submission) -> Result<()> {
     lease.current()
 }
 
-pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result<Option<Request>> {
+pub(crate) fn at_release(lease: &Lease) -> Result<Option<SelectedRefinement>> {
+    lease.record.group.current_caller()?;
+    // Submission replaces the complete slot atomically. Only take() consumes it.
+    let pending = read(lease, &name(lease))?;
+    lease.current()?;
+    match pending {
+        Some(slot) => slot.refinement(lease.record().activation(), boot_seconds()?),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn take(
+    activation: Uuid,
+    document: Uuid,
+    page: Uuid,
+    selected: Option<SelectedRefinement>,
+) -> Result<Option<Request>> {
     let lease = Lease::reopen(Path::new(recovery::LEASE_DIRECTORY))?;
     ensure!(
         lease.record().activation() == activation,
@@ -197,11 +241,24 @@ pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result
     );
     lease.record.group.current_caller()?;
     lock(&lease)?;
-    let name = name(&lease);
-    let Some(pending) = read(&lease, &name)? else {
+    take_locked(&lease, document, page, selected, boot_seconds()?)
+}
+
+fn take_locked(
+    lease: &Lease,
+    document: Uuid,
+    page: Uuid,
+    selected: Option<SelectedRefinement>,
+    now: u64,
+) -> Result<Option<Request>> {
+    let name = name(lease);
+    let Some(pending) = read(lease, &name)? else {
         return Ok(None);
     };
-    let expired = boot_seconds()? >= pending.expires;
+    if selected.is_some() && pending.refinement(lease.record().activation(), now)? != selected {
+        return Ok(None);
+    }
+    let expired = now >= pending.expires;
     let Submission::RefineOnTablet {
         document: expected_document,
         page: expected_page,
@@ -213,7 +270,7 @@ pub(crate) fn take(activation: uuid::Uuid, document: Uuid, page: Uuid) -> Result
     if !expired && (document != expected_document || page != expected_page) {
         return Ok(None);
     }
-    discard_locked(&lease, &name)?;
+    discard_locked(lease, &name)?;
     if expired {
         return Ok(None);
     }
@@ -280,4 +337,58 @@ pub(super) fn discard(lease: &Lease) -> Result<()> {
     );
     discard_locked(&locked, &name(&locked))?;
     discard_locked(&locked, &adoption_name(&locked))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_only_corner_consumes_only_its_live_request_and_named_page() {
+        let fixture = super::super::tests::Fixture::new();
+        let lease = Lease::publish_inner(&fixture.lease_dir(), fixture.record()).unwrap();
+        lock(&lease).unwrap();
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let operation = Uuid::new_v4();
+        let mut slot = Pending {
+            submission: Submission::RefineOnTablet {
+                document,
+                page,
+                refinement: Request::Refine {
+                    conversation: Uuid::new_v4(),
+                    operation,
+                    draft: Uuid::new_v4(),
+                    request: "Shorten the note".into(),
+                },
+            },
+            expires: 120,
+        };
+        let path = lease.path.join(name(&lease));
+        files::atomic_json(&path, &slot).unwrap();
+        let activation = lease.record().activation();
+        let selected = slot.refinement(activation, 118).unwrap().unwrap();
+        assert!(
+            take_locked(&lease, document, Uuid::new_v4(), Some(selected), 119)
+                .unwrap()
+                .is_none()
+        );
+        assert!(take_locked(&lease, document, page, Some(selected), 120)
+            .unwrap()
+            .is_none());
+        assert!(path.is_file());
+        slot.expires = 240;
+        files::atomic_json(&path, &slot).unwrap();
+        assert!(take_locked(&lease, document, page, Some(selected), 121)
+            .unwrap()
+            .is_none());
+        let fresh = slot.refinement(activation, 121).unwrap().unwrap();
+        let result = take_locked(&lease, document, page, Some(fresh), 122)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.operation(), operation);
+        assert!(take_locked(&lease, document, page, Some(fresh), 122)
+            .unwrap()
+            .is_none());
+    }
 }

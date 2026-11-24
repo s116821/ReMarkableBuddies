@@ -32,7 +32,7 @@ impl RuntimeRoute {
 }
 
 pub struct Dispatch<'a> {
-    config: &'a Config,
+    pub(super) config: &'a Config,
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
