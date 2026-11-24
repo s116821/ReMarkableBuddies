@@ -928,15 +928,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         if !(0..1024).contains(&bounds.y) || bounds.height <= 0 {
             return Ok(Some(Failure::Transcription));
         }
-        // Use the same verifier instruction with and without confirmed examples.
-        macro_rules! question_prompt {
-            ($receiver:ident.llm.add_text_content($text:literal,);) => {
-                $text
-            };
-        }
-        let prompt = question_prompt! {
-        self.llm.add_text_content(
-            "Transcribe only the handwritten question in these images of the same page. \
+        let prompt = "Transcribe only the handwritten question in these images of the same page. \
              Use the outline or highlight and placement to identify the question, which may \
              be nearby or inside the outline and may refer to the selection without repeating it. \
              Distinguish the question from selected content and surrounding notes whether they \
@@ -945,9 +937,7 @@ impl<M: LLMEngine> Orchestrator<M> {
              or expand or guess text from context. Do not answer the question. If an essential \
              handwritten word is uncertain, overstruck or unreadable, or the question is absent \
              or cannot be distinguished from the source, return only NONE. Otherwise \
-             return one line: TRANSCRIPTION: [exact handwritten text].",
-        );
-        };
+             return one line: TRANSCRIPTION: [exact handwritten text].";
         let payload = context
             .map(|c| crate::handwriting::runtime::reader_payload(prompt, true, images, c))
             .transpose()?;
@@ -1135,8 +1125,8 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// 2. Navigate right to next page
     /// 3. Compare to original to verify we actually moved
     /// 4. Check if page is valid (blank or existing QA page)
-    /// 5. If not valid or didn't move ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ verify the source and record a non-ink failure
-    /// 6. If valid ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ render Q&A on that page
+    /// 5. If not valid or didn't move â†’ verify the source and record a non-ink failure
+    /// 6. If valid â†’ render Q&A on that page
     fn render_answer(&mut self, result: &AnalysisResult) -> Result<RenderOutcome> {
         anyhow::ensure!(
             !self.workflow.is_selected(),
