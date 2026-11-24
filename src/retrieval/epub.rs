@@ -13,6 +13,8 @@ use std::{
 use zip::{CompressionMethod, ZipArchive};
 
 const ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const EXTRACTOR_REVISION: &str = "epub-xml-text-v1";
+pub(super) const MAX_SECTIONS: usize = 512;
 const XML_TOTAL: usize = 8 * 1024 * 1024;
 const UNIT_BYTES: usize = 512 * 1024;
 const TEXT_BYTES: usize = 4 * 1024 * 1024;
@@ -73,6 +75,11 @@ impl Seek for ArchiveInput<'_> {
 }
 
 fn archive_path(path: &str) -> Result<String> {
+    validate_archive_path(path)?;
+    Ok(path.to_owned())
+}
+
+pub(super) fn validate_archive_path(path: &str) -> Result<()> {
     ensure!(
         !path.is_empty()
             && path.len() <= 512
@@ -86,7 +93,7 @@ fn archive_path(path: &str) -> Result<String> {
             .all(|p| !p.is_empty() && p != "." && p != ".."),
         "Noncanonical EPUB resource path"
     );
-    Ok(path.to_owned())
+    Ok(())
 }
 
 fn reference(base: &str, href: &str) -> Result<String> {
@@ -367,7 +374,7 @@ fn spine(bytes: &[u8], package: &str) -> Result<Vec<String>> {
                     "Duplicate EPUB manifest ID"
                 );
             } else if path.len() == 3 && path[1].is(OPF, b"spine") && path[2].is(OPF, b"itemref") {
-                ensure!(order.len() < 512, "EPUB spine exceeds bound");
+                ensure!(order.len() < MAX_SECTIONS, "EPUB spine exceeds bound");
                 let value = attributes.get("linear").map_or("yes", String::as_str);
                 ensure!(
                     matches!(value, "yes" | "no"),
@@ -547,6 +554,10 @@ fn resource(
 
 /// Source is supplied by the caller; byte/I/O budgets are not a hard blocking-I/O deadline.
 pub fn normalize(document: Uuid, source: impl Read) -> Result<EpubText> {
+    normalize_with_index(document, source).map(|(text, _)| text)
+}
+
+pub(super) fn normalize_with_index(document: Uuid, source: impl Read) -> Result<(EpubText, Index)> {
     ensure!(!document.is_nil(), "Missing EPUB document identity");
     let mut bytes = Vec::new();
     source
@@ -649,12 +660,15 @@ pub fn normalize(document: Uuid, source: impl Read) -> Result<EpubText> {
         document,
         format: SourceFormat::Epub,
         source_sha256: digest(&bytes),
-        extractor_revision: "epub-xml-text-v1".to_owned(),
+        extractor_revision: EXTRACTOR_REVISION.to_owned(),
         units,
     };
-    Index::build(document.clone())?;
-    Ok(EpubText {
-        document,
-        textless_sections,
-    })
+    let index = Index::build(document.clone())?;
+    Ok((
+        EpubText {
+            document,
+            textless_sections,
+        },
+        index,
+    ))
 }

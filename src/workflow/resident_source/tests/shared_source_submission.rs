@@ -328,7 +328,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 position: position.clone(),
                 interrupt_restore: false,
             }),
-            writer_preview: writer_request.then(|| written.clone()),
+            rendered_text: writer_request.then(|| written.clone()),
             ..RecognitionProbe::default()
         };
         workflow.device = Box::new(

@@ -240,20 +240,11 @@
       "properties": {
         "researched_pdf": {
           "description": "Local opt-in for original-PDF researched Reader requests. A selection chooses the registered shared document. Ordinary local Reader uses the guarded current original page. An absent search model does not authorize web research.",
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "research_model": {
-                  "type": ["string", "null"],
-                  "minLength": 1,
-                  "maxLength": 256
-                }
-              }
-            },
-            { "type": "null" }
-          ]
+          "$ref": "#/$defs/researchedDocument"
+        },
+        "researched_epub": {
+          "description": "Local opt-in for research on the open original EPUB in ordinary Reader. Passages cite EPUB spine sections. A search model is needed for web research.",
+          "$ref": "#/$defs/researchedDocument"
         },
         "selection": {
           "anyOf": [
@@ -330,6 +321,22 @@
     }
   },
   "$defs": {
+    "researchedDocument": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "research_model": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "readerSelection": {
       "type": "object",
       "additionalProperties": false,

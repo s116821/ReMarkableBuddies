@@ -136,6 +136,7 @@ pub(crate) fn document(bytes: &[u8]) -> std::result::Result<(Config, Value), Sta
             "/memory/selection",
             "/reader/selection",
             "/reader/researched_pdf",
+            "/reader/researched_epub",
         ]
         .into_iter()
         .any(|path| {

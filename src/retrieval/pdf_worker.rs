@@ -1,5 +1,6 @@
-//! Owned, one-query PDF normalization in the installed Reader executable.
-use super::{pdf, Index, IndexKey, NormalizedDocument, Retrieved, SourceFormat, SourceUnit};
+//! Owned, one-query original-document normalization in the installed Reader executable.
+mod sections;
+use super::{epub, pdf, Index, IndexKey, NormalizedDocument, Retrieved, SourceFormat, SourceUnit};
 use crate::storage::{digest, Uuid};
 use anyhow::{bail, ensure, Context, Result};
 use nix::libc;
@@ -42,7 +43,9 @@ struct Input {
     document: Uuid,
     bytes: usize,
     sha256: String,
-    pages: u32,
+    /// PDF page count from the native redirect table. EPUB pagination is independent of the spine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pages: Option<u32>,
     extractor_revision: String,
 }
 
@@ -60,6 +63,13 @@ struct Ready {
     request: Uuid,
     key: IndexKey,
     pages: u32,
+}
+
+struct ReadyPayload {
+    ready: Ready,
+    normalized_sha256: String,
+    units: Option<Vec<u8>>,
+    sections: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -266,26 +276,40 @@ fn read_index(input: &mut impl Read) -> Result<(Uuid, u32, Index, Vec<u8>)> {
         let (source, bytes): (NormalizedInput, _) = unpack(&body)?;
         ensure!(
             !source.request.is_nil()
-                && source.key.format == SourceFormat::Pdf
-                && source.key.extractor_revision == pdf::EXTRACTOR_REVISION
                 && (1..=CACHE_BYTES).contains(&bytes.len())
-                && source.key.normalized_sha256 == digest(bytes)
-                && (1..=256).contains(&source.pages),
-            "PDF worker cached input changed"
+                && source.key.normalized_sha256 == digest(bytes),
+            "Document worker cached input changed"
         );
         let units: Vec<SourceUnit> = serde_json::from_slice(bytes)?;
         ensure!(
-            units.len() == source.pages as usize
-                && units.iter().any(|unit| !unit.text.is_empty())
-                && units
-                    .iter()
-                    .enumerate()
-                    .all(|(i, unit)| { unit.page == Some(i as u32 + 1) && unit.section.is_none() }),
-            "PDF worker cached page sequence changed"
+            units.len() == source.pages as usize && units.iter().any(|unit| !unit.text.is_empty()),
+            "Document worker cached unit count changed"
         );
+        match source.key.format {
+            SourceFormat::Pdf => ensure!(
+                source.key.extractor_revision == pdf::EXTRACTOR_REVISION
+                    && (1..=256).contains(&source.pages)
+                    && units
+                        .iter()
+                        .enumerate()
+                        .all(|(i, unit)| unit.page == Some(i as u32 + 1) && unit.section.is_none()),
+                "PDF worker cached page sequence changed"
+            ),
+            SourceFormat::Epub => ensure!(
+                source.key.extractor_revision == epub::EXTRACTOR_REVISION
+                    && (1..=epub::MAX_SECTIONS).contains(&units.len())
+                    && units.iter().all(|unit| unit.page.is_none()
+                        && unit
+                            .section
+                            .as_deref()
+                            .is_some_and(|path| epub::validate_archive_path(path).is_ok())),
+                "Invalid cached EPUB sections"
+            ),
+            _ => bail!("Unsupported cached publication"),
+        }
         let index = Index::build(NormalizedDocument {
             document: source.key.document,
-            format: SourceFormat::Pdf,
+            format: source.key.format.clone(),
             source_sha256: source.key.source_sha256.clone(),
             extractor_revision: source.key.extractor_revision.clone(),
             units,
@@ -304,20 +328,36 @@ fn read_index(input: &mut impl Read) -> Result<(Uuid, u32, Index, Vec<u8>)> {
             && !source.document.is_nil()
             && (1..=PDF_BYTES).contains(&source.bytes)
             && source.bytes == bytes.len()
-            && source.sha256 == digest(bytes)
-            && (1..=256).contains(&source.pages)
-            && source.extractor_revision == pdf::EXTRACTOR_REVISION,
-        "PDF worker original input changed"
+            && source.sha256 == digest(bytes),
+        "Document worker original input changed"
     );
-    let (normalized, index) = pdf::normalize_with_index(source.document, bytes)?;
+    let (document, index) = match (source.extractor_revision.as_str(), source.pages) {
+        (pdf::EXTRACTOR_REVISION, Some(pages @ 1..=256)) => {
+            let (text, index) = pdf::normalize_with_index(source.document, bytes)?;
+            ensure!(
+                text.document.units.len() == pages as usize,
+                "PDF worker original page count changed"
+            );
+            (text.document, index)
+        }
+        (epub::EXTRACTOR_REVISION, None) => {
+            let (text, index) = epub::normalize_with_index(source.document, bytes)?;
+            (text.document, index)
+        }
+        _ => bail!("Invalid original document declaration"),
+    };
     ensure!(
-        normalized.document.units.len() == source.pages as usize
-            && normalized.document.source_sha256 == source.sha256,
-        "PDF worker original page count or digest changed"
+        document.source_sha256 == source.sha256,
+        "Original document digest changed"
     );
     drop(original);
-    let units = serde_json::to_vec(&normalized.document.units)?;
-    Ok((source.request, source.pages, index, units))
+    let units = serde_json::to_vec(&document.units)?;
+    Ok((
+        source.request,
+        document.units.len().try_into()?,
+        index,
+        units,
+    ))
 }
 
 struct OwnedChild {
@@ -497,9 +537,10 @@ impl OwnedChild {
     fn read_ready(
         &mut self,
         deadline: Instant,
+        publication: Publication,
         retain: bool,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<(Ready, String, Option<Vec<u8>>)> {
+    ) -> Result<ReadyPayload> {
         let mut frame_header = [0; 6];
         self.read_exact(&mut frame_header, deadline, progress)?;
         let size = length(frame_header, READY, READY_BYTES)?;
@@ -513,25 +554,42 @@ impl OwnedChild {
         );
         let mut header = vec![0; header_size];
         self.read_exact(&mut header, deadline, progress)?;
+        let ready: Ready = serde_json::from_slice(&header)?;
+        ensure!(
+            ready.key.format == publication.format() && publication.accepts_units(ready.pages),
+            "Document worker returned an invalid format or unit count"
+        );
         let mut remaining = size - 4 - header_size;
         let mut units = (retain && remaining <= CACHE_BYTES).then(|| Vec::with_capacity(remaining));
         let mut hasher = Sha256::new();
-        let mut chunk = [0; CHUNK_BYTES];
-        while remaining > 0 {
-            let limit = remaining.min(CHUNK_BYTES);
+        let mut next = |chunk: &mut [u8]| -> Result<usize> {
+            let limit = remaining.min(chunk.len());
+            if limit == 0 {
+                return Ok(0);
+            }
             let count = self.read_some(&mut chunk[..limit], deadline, progress)?;
-            ensure!(count > 0, "PDF worker ready payload truncated");
+            ensure!(count > 0, "Document worker ready payload truncated");
             hasher.update(&chunk[..count]);
             if let Some(units) = &mut units {
                 units.extend_from_slice(&chunk[..count]);
             }
             remaining -= count;
-        }
-        Ok((
-            serde_json::from_slice(&header)?,
-            format!("{:x}", hasher.finalize()),
+            Ok(count)
+        };
+        let sections = match publication {
+            Publication::Epub => Some(sections::from_units(ready.pages, next)?),
+            Publication::Pdf { .. } => {
+                let mut chunk = [0; CHUNK_BYTES];
+                while next(&mut chunk)? != 0 {}
+                None
+            }
+        };
+        Ok(ReadyPayload {
+            ready,
+            normalized_sha256: format!("{:x}", hasher.finalize()),
             units,
-        ))
+            sections,
+        })
     }
 
     fn finish(
@@ -648,11 +706,40 @@ pub(crate) struct CachedNormalization {
     units: Vec<u8>,
 }
 
-pub(crate) struct PdfInput<'a> {
+#[derive(Clone, Copy)]
+pub(crate) enum Publication {
+    Pdf { pages: u32 },
+    Epub,
+}
+
+impl Publication {
+    fn format(self) -> SourceFormat {
+        match self {
+            Self::Pdf { .. } => SourceFormat::Pdf,
+            Self::Epub => SourceFormat::Epub,
+        }
+    }
+
+    fn revision(self) -> &'static str {
+        match self {
+            Self::Pdf { .. } => pdf::EXTRACTOR_REVISION,
+            Self::Epub => epub::EXTRACTOR_REVISION,
+        }
+    }
+
+    fn accepts_units(self, count: u32) -> bool {
+        match self {
+            Self::Pdf { pages } => (1..=256).contains(&pages) && count == pages,
+            Self::Epub => (1..=epub::MAX_SECTIONS).contains(&(count as usize)),
+        }
+    }
+}
+
+pub(crate) struct OriginalInput<'a> {
     pub document: Uuid,
     pub bytes: &'a [u8],
     pub sha256: String,
-    pub pages: u32,
+    pub publication: Publication,
 }
 
 /// One PDF worker. Its accepted input and index are fixed until the one query.
@@ -661,6 +748,7 @@ pub struct PendingIndex {
     request: Uuid,
     key: IndexKey,
     pages: u32,
+    sections: Option<Vec<String>>,
     expires: Instant,
     #[cfg(all(test, feature = "installed-resident-output"))]
     reused_normalization: bool,
@@ -680,11 +768,11 @@ impl PendingIndex {
     ) -> Result<Self> {
         Self::start_worker(
             executable,
-            PdfInput {
+            OriginalInput {
                 document,
                 bytes: pdf_bytes,
                 sha256: original_sha256,
-                pages,
+                publication: Publication::Pdf { pages },
             },
             (ready_by, expires),
             None,
@@ -697,7 +785,7 @@ impl PendingIndex {
     #[cfg(feature = "installed-resident-output")]
     pub(crate) fn start_ordinary(
         executable: &Path,
-        original: PdfInput<'_>,
+        original: OriginalInput<'_>,
         deadlines: (Instant, Instant),
         cached: Option<CachedNormalization>,
         progress: &mut dyn FnMut() -> Result<()>,
@@ -707,12 +795,12 @@ impl PendingIndex {
 
     fn start_worker(
         executable: &Path,
-        PdfInput {
+        OriginalInput {
             document,
             bytes,
             sha256,
-            pages,
-        }: PdfInput<'_>,
+            publication,
+        }: OriginalInput<'_>,
         (ready_by, expires): (Instant, Instant),
         cached: Option<CachedNormalization>,
         retain: bool,
@@ -721,7 +809,7 @@ impl PendingIndex {
         ensure!(
             !document.is_nil()
                 && (1..=PDF_BYTES).contains(&bytes.len())
-                && (1..=256).contains(&pages)
+                && !matches!(publication, Publication::Pdf { pages } if !(1..=256).contains(&pages))
                 && crate::storage::valid_digest(&sha256)
                 && ready_by <= expires,
             "Invalid admitted PDF worker input"
@@ -731,16 +819,16 @@ impl PendingIndex {
         let request = Uuid::new_v4();
         let cached = cached.filter(|value| {
             value.key.document == document
-                && value.key.format == SourceFormat::Pdf
+                && value.key.format == publication.format()
                 && value.key.source_sha256 == sha256
-                && value.key.extractor_revision == pdf::EXTRACTOR_REVISION
-                && value.pages == pages
+                && value.key.extractor_revision == publication.revision()
+                && publication.accepts_units(value.pages)
         });
         let (kind, body) = if let Some(value) = &cached {
             let input = NormalizedInput {
                 request,
                 key: value.key.clone(),
-                pages,
+                pages: value.pages,
             };
             (
                 NORMALIZED_INPUT,
@@ -752,32 +840,44 @@ impl PendingIndex {
                 document,
                 bytes: bytes.len(),
                 sha256: sha256.clone(),
-                pages,
-                extractor_revision: pdf::EXTRACTOR_REVISION.into(),
+                pages: match publication {
+                    Publication::Pdf { pages } => Some(pages),
+                    Publication::Epub => None,
+                },
+                extractor_revision: publication.revision().into(),
             };
             (INPUT, packet(&input, bytes, PDF_BYTES + HEADER_BYTES + 4)?)
         };
         let mut worker = OwnedChild::spawn(executable)?;
         worker.write(kind, &body, ready_by, &mut || progress.poll())?;
         drop(body);
-        let (ready, normalized_sha256, units) =
-            worker.read_ready(ready_by, retain && cached.is_none(), &mut || {
-                progress.poll()
-            })?;
+        let ReadyPayload {
+            ready,
+            normalized_sha256,
+            units,
+            sections,
+        } = worker.read_ready(
+            ready_by,
+            publication,
+            retain && cached.is_none(),
+            &mut || progress.poll(),
+        )?;
         let key = IndexKey {
             document,
-            format: SourceFormat::Pdf,
+            format: publication.format(),
             source_sha256: sha256,
-            extractor_revision: pdf::EXTRACTOR_REVISION.into(),
+            extractor_revision: publication.revision().into(),
             normalized_sha256,
         };
         ensure!(
             ready.request == request
-                && ready.pages == pages
                 && ready.key == key
-                && cached.as_ref().is_none_or(|cached| cached.key == key),
-            "PDF worker returned a different index identity"
+                && cached
+                    .as_ref()
+                    .is_none_or(|cached| cached.key == key && cached.pages == ready.pages),
+            "Document worker returned a different index identity"
         );
+        let pages = ready.pages;
         check(ready_by, &mut || progress.force())?;
         let cached = cached.or_else(|| {
             units.map(|units| CachedNormalization {
@@ -791,6 +891,7 @@ impl PendingIndex {
             request,
             key,
             pages,
+            sections,
             expires,
             #[cfg(all(test, feature = "installed-resident-output"))]
             reused_normalization: kind == NORMALIZED_INPUT,
@@ -849,11 +950,19 @@ impl PendingIndex {
                 && output.result.passages.len() <= max_passages
                 && output.result.passages.iter().all(|passage| {
                     passage.unit < self.pages as usize
-                        && passage.page == Some(passage.unit as u32 + 1)
-                        && passage.section.is_none()
+                        && match &self.sections {
+                            Some(sections) => {
+                                passage.page.is_none()
+                                    && passage.section.as_ref() == sections.get(passage.unit)
+                            }
+                            None => {
+                                passage.page == Some(passage.unit as u32 + 1)
+                                    && passage.section.is_none()
+                            }
+                        }
                 })
                 && serde_json::to_vec(&output.result)?.len() <= max_bytes,
-            "PDF worker returned invalid passage provenance"
+            "Document worker returned invalid passage provenance"
         );
         self.worker.finish(deadline, &mut || progress.poll())?;
         check(deadline, &mut || progress.force())?;

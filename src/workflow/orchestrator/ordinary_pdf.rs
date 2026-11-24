@@ -1,4 +1,4 @@
-//! Ordinary installed Reader on a verified original PDF page.
+//! Ordinary installed Reader on a verified original PDF or EPUB.
 use super::{
     encode_model_images,
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
@@ -14,13 +14,16 @@ use crate::{
         ContextBudget,
     },
     llm::LLMEngine,
-    retrieval::{pdf_worker::PendingIndex, IndexKey, Provider, Retrieved},
+    retrieval::{
+        pdf_worker::{PendingIndex, Publication},
+        IndexKey, Provider, Retrieved,
+    },
     storage::{captured::Captured, Namespace},
     workflow::{
         conversation_dispatch::{followup_research, Dispatch},
         reader_intent::{self, Intent},
         resident_source::original_pdf::{
-            CapturedOriginalPdf, ObservedOriginalPdf, OrdinaryPdfSource, OriginalPdfPin,
+            CapturedOriginalBook, ObservedOriginalBook, OrdinaryBookSource, OriginalFilePin,
         },
         AcquiredEvidence,
     },
@@ -31,62 +34,71 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryPdfSource>>);
+type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryBookSource>>);
 
 pub(super) fn acquire(
     workflow: &mut Workflow,
     local: Option<&Dispatch<'_>>,
 ) -> Result<Acquisition> {
-    if workflow.uses_installed_reader_history()
-        && local.is_some_and(|dispatch| {
-            dispatch.config.reader_enabled() && dispatch.config.reader.researched_pdf.is_some()
-        })
-    {
+    if let Some(dispatch) = local.filter(|dispatch| {
+        let reader = &dispatch.config.reader;
+        workflow.uses_installed_reader_history()
+            && dispatch.config.reader_enabled()
+            && (reader.researched_pdf.is_some() || reader.researched_epub.is_some())
+    }) {
         let owner = workflow
             .resident_source
             .as_mut()
-            .context("Resident PDF owner absent")?;
+            .context("Resident Reader owner absent")?;
         let health = workflow
             .service_health
             .as_mut()
-            .context("Resident PDF health owner absent")?;
-        let (capture, pdf) = owner.acquire_ordinary_pdf(health)?;
-        return Ok((AcquiredEvidence::ResidentHistorical(Box::new(capture)), pdf));
+            .context("Resident Reader health owner absent")?;
+        let reader = &dispatch.config.reader;
+        let (capture, book) = owner.acquire_ordinary_book(
+            health,
+            reader.researched_pdf.is_some(),
+            reader.researched_epub.is_some(),
+        )?;
+        return Ok((
+            AcquiredEvidence::ResidentHistorical(Box::new(capture)),
+            book,
+        ));
     }
     Ok((workflow.acquire_reader_evidence()?, Ok(None)))
 }
 
 pub(super) fn classify(
     workflow: &mut Workflow,
-    source: Option<OrdinaryPdfSource>,
-) -> Result<Option<ObservedOriginalPdf>> {
+    source: Option<OrdinaryBookSource>,
+) -> Result<Option<ObservedOriginalBook>> {
     let Some(source) = source else {
         return Ok(None);
     };
     let owner = workflow
         .resident_source
         .as_mut()
-        .context("Resident PDF owner absent")?;
+        .context("Resident Reader owner absent")?;
     let health = workflow
         .service_health
         .as_mut()
-        .context("Resident PDF health owner absent")?;
-    owner.read_ordinary_pdf(health, source)
+        .context("Resident Reader health owner absent")?;
+    owner.read_ordinary_book(health, source)
 }
 
-struct OriginalPdf {
-    pin: RefCell<OriginalPdfPin>,
+struct OriginalBook {
+    pin: RefCell<OriginalFilePin>,
     index: RefCell<Option<PendingIndex>>,
     key: IndexKey,
     deadline: Instant,
 }
 
-impl OriginalPdf {
-    fn new(pdf: CapturedOriginalPdf, deadline: Instant) -> Self {
-        let key = pdf.index.key().clone();
+impl OriginalBook {
+    fn new(book: CapturedOriginalBook, deadline: Instant) -> Self {
+        let key = book.index.key().clone();
         Self {
-            pin: RefCell::new(pdf.pin),
-            index: RefCell::new(Some(pdf.index)),
+            pin: RefCell::new(book.pin),
+            index: RefCell::new(Some(book.index)),
             key,
             deadline,
         }
@@ -95,7 +107,7 @@ impl OriginalPdf {
     fn check_deadline(&self) -> Result<()> {
         ensure!(
             Instant::now() < self.deadline,
-            "Original PDF request expired"
+            "Original document request expired"
         );
         Ok(())
     }
@@ -109,12 +121,12 @@ impl OriginalPdf {
         let owner = workflow
             .resident_source
             .as_mut()
-            .context("Resident PDF owner absent")?;
+            .context("Resident Reader owner absent")?;
         let health = workflow
             .service_health
             .as_mut()
-            .context("Resident PDF health owner absent")?;
-        owner.require_ordinary_pdf_current(health, self.deadline)?;
+            .context("Resident Reader health owner absent")?;
+        owner.require_ordinary_book_current(health, self.deadline)?;
         // Observe can block even when it returns the original page and order.
         // Sample both files after that wait, just before the Store boundary.
         self.check_file()
@@ -122,7 +134,7 @@ impl OriginalPdf {
 }
 
 struct ExactQuery<'a> {
-    pdf: &'a OriginalPdf,
+    book: &'a OriginalBook,
     question: &'a str,
     progress: RefCell<&'a mut dyn FnMut() -> Result<()>>,
 }
@@ -137,67 +149,67 @@ impl Provider for ExactQuery<'_> {
         neighbors: bool,
     ) -> Result<Retrieved> {
         ensure!(
-            expected == &self.pdf.key && question == self.question,
-            "Original PDF query changed"
+            expected == &self.book.key && question == self.question,
+            "Original document query changed"
         );
-        self.pdf.check_file()?;
+        self.book.check_file()?;
         let mut progress = self.progress.borrow_mut();
         progress()?;
         let index = self
-            .pdf
+            .book
             .index
             .borrow_mut()
             .take()
-            .context("Original PDF index already used")?;
+            .context("Original document index already used")?;
         let passages = index.query(
             expected,
             question,
             max_passages,
             max_bytes,
             neighbors,
-            self.pdf.deadline,
+            self.book.deadline,
             &mut **progress,
         )?;
-        self.pdf.check_file()?;
+        self.book.check_file()?;
         Ok(passages)
     }
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
-    pub(super) fn run_ordinary_pdf(
+    pub(super) fn run_ordinary_book(
         &mut self,
         attempt: &mut Attempt,
-        observed: ObservedOriginalPdf,
+        observed: ObservedOriginalBook,
         dispatch: &Dispatch<'_>,
     ) -> Result<()> {
-        // A refused or interrupted PDF request consumes the retained slot.
-        let retained = self.ordinary_pdf_cache.take();
+        // A refused or interrupted book request consumes the retained slot.
+        let retained = self.ordinary_book_cache.take();
         dispatch.require_ledger(&self.ledger)?;
         let prepared = attempt.capture_pdf_reading(&self.ledger)?;
         let config = dispatch.config;
-        let declaration = config
-            .reader
-            .researched_pdf
-            .as_ref()
-            .context("Ordinary PDF opt-in absent")?;
+        let declaration = match observed.publication() {
+            Publication::Pdf { .. } => config.reader.researched_pdf.as_ref(),
+            Publication::Epub => config.reader.researched_epub.as_ref(),
+        }
+        .context("Ordinary document research is disabled for this format")?;
         let policy = config.research_policy_snapshot()?.policy();
         let images = self.prepare_model_images(attempt)?;
         let owner = self
             .workflow
             .resident_source
             .as_mut()
-            .context("Resident PDF owner absent")?;
+            .context("Resident Reader owner absent")?;
         let health = self
             .workflow
             .service_health
             .as_mut()
-            .context("Resident PDF health owner absent")?;
-        let deadline = owner.ordinary_pdf_deadline()?;
+            .context("Resident Reader health owner absent")?;
+        let deadline = owner.ordinary_book_deadline()?;
         let (captured, cache) =
-            owner.complete_ordinary_pdf(health, observed, deadline, retained)?;
+            owner.complete_ordinary_book(health, observed, deadline, retained)?;
         #[cfg(test)]
         super::researched_fixture::record_ordinary_pdf_worker(&captured.index);
-        let pdf = OriginalPdf::new(captured, deadline);
+        let book = OriginalBook::new(captured, deadline);
         let encoded = encode_model_images(images);
         let prompt = format!(
             "{}\n{INTENT_INSTRUCTIONS}\nTranscribe and locate the request only. Use ANSWER: Deferred as the format placeholder. The actual answer is generated later from verified context.",
@@ -211,9 +223,10 @@ impl<M: LLMEngine> Orchestrator<M> {
         } else {
             format!("{prompt}\n{SOURCE_SUBJECT_PROMPT}")
         };
-        let proposed = self.read_ordinary_pdf(attempt, &prepared, &pdf, &prompt, encoded, false)?;
+        let proposed =
+            self.read_ordinary_book(attempt, &prepared, &book, &prompt, encoded, false)?;
         if proposed.trim().eq_ignore_ascii_case("NONE") {
-            pdf.require_current(&mut self.workflow)?;
+            book.require_current(&mut self.workflow)?;
             prepared.with_current(self.ledger.store(), || Ok(()))?;
             self.workflow.report_failure(super::Failure::Selection)?;
             return attempt.outcome(
@@ -224,26 +237,26 @@ impl<M: LLMEngine> Orchestrator<M> {
             );
         }
         let separator =
-            Self::analysis_separator(&proposed).context("PDF question header absent")?;
+            Self::analysis_separator(&proposed).context("Reader question header absent")?;
         let analysis = reader_intent::parse_ordinary_pdf_header(&proposed[..separator])?;
         let mut result = Self::parse_analysis_response(&proposed)
-            .context("PDF question or selection unavailable")?;
+            .context("Reader question or selection unavailable")?;
         let bounds = result
             ._question_box
             .as_ref()
-            .context("PDF question bounds unavailable")?;
+            .context("Reader question bounds unavailable")?;
         ensure!(
             (0..1024).contains(&bounds.y) && bounds.height > 0,
-            "PDF question bounds invalid"
+            "Reader question bounds invalid"
         );
 
         // The independent reader receives the acknowledged images again and
         // none of the first reply, geometry or web-intent claims.
         let verification = encode_model_images(attempt.images(&self.ledger)?);
-        let verified = self.read_ordinary_pdf(
+        let verified = self.read_ordinary_book(
             attempt,
             &prepared,
-            &pdf,
+            &book,
             &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
             verification,
             true,
@@ -254,7 +267,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         ensure!(
             agreement.question() == result.question,
-            "Verified PDF question changed"
+            "Verified Reader question changed"
         );
         let directive = match agreement.intent() {
             Intent::NoInternet => {
@@ -263,9 +276,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             Intent::NoRestriction => {
                 crate::conversation::receiving::memory::research::ResearchDirective::UsePolicy
             }
-            Intent::Unclear => anyhow::bail!("PDF question web intent is unclear"),
+            Intent::Unclear => anyhow::bail!("Reader question web intent is unclear"),
         };
-        pdf.require_current(&mut self.workflow)?;
+        book.require_current(&mut self.workflow)?;
         let head = attempt.interpret_ordinary_pdf(
             &self.ledger,
             &result.question,
@@ -289,16 +302,24 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .map(OrdinarySearch::for_installed_pdf),
             deadline,
         };
-        self.answer_ordinary_pdf(attempt, &pdf, dispatch, policy, research, &mut result, head)?;
-        self.ordinary_pdf_cache = cache;
+        self.answer_ordinary_book(
+            attempt,
+            &book,
+            dispatch,
+            policy,
+            research,
+            &mut result,
+            head,
+        )?;
+        self.ordinary_book_cache = cache;
         Ok(())
     }
 
-    fn read_ordinary_pdf(
+    fn read_ordinary_book(
         &mut self,
         attempt: &Attempt,
         prepared: &Captured,
-        pdf: &OriginalPdf,
+        book: &OriginalBook,
         prompt: &str,
         images: Vec<String>,
         verification: bool,
@@ -334,36 +355,36 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .add_text_content(crate::conversation::target::GEOMETRY_CONTRACT);
         }
         if !verification {
-            pdf.check_file()?;
+            book.check_file()?;
             self.workflow.deliver_reader_acquisition()?;
         }
         let workflow = RefCell::new(&mut self.workflow);
         let store = self.ledger.store();
         let progress = || {
-            pdf.check_deadline()?;
+            book.check_deadline()?;
             attempt.model_progress()?;
             workflow.borrow_mut().check_request_progress()?;
             prepared.with_current(store, || Ok(()))
         };
         let submit = |call: &mut dyn FnMut() -> Result<()>| {
             progress()?;
-            pdf.require_current(&mut workflow.borrow_mut())?;
+            book.require_current(&mut workflow.borrow_mut())?;
             prepared.with_current(store, call)
         };
         let reply = followup_research::once(&submit, |handoff| {
             model
                 .0
-                .execute_with_deadline(&mut || progress(), handoff, pdf.deadline)
+                .execute_with_deadline(&mut || progress(), handoff, book.deadline)
         })?;
         progress()?;
         Ok(reply)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn answer_ordinary_pdf(
+    fn answer_ordinary_book(
         &mut self,
         attempt: &mut Attempt,
-        pdf: &OriginalPdf,
+        book: &OriginalBook,
         dispatch: &Dispatch<'_>,
         policy: crate::conversation::receiving::memory::research::ResearchPolicy,
         research: followup_research::ResearchRequest<'_>,
@@ -381,7 +402,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let generation = head.generation();
         let prepared = {
             let mut progress = || {
-                pdf.check_deadline()?;
+                book.check_deadline()?;
                 attempt.model_progress()?;
                 self.workflow.check_request_progress()?;
                 let (live_generation, heads) = ledger
@@ -390,12 +411,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                 ensure!(
                     live_generation == generation
                         && matches!(heads.as_slice(), [head] if expected.0.contains(&head.revision_id)),
-                    "PDF conversation changed during retrieval"
+                    "Reader conversation changed during retrieval"
                 );
                 Ok(())
             };
             let provider = ExactQuery {
-                pdf,
+                book,
                 question: &result.question,
                 progress: RefCell::new(&mut progress),
             };
@@ -406,7 +427,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 SourceDirective::Explicit(RequestSource::Original {
                     origin_turn: user,
                     source_record: attempt.retained_source(),
-                    expected: pdf.key.clone(),
+                    expected: book.key.clone(),
                 }),
                 ReceivingBudget {
                     context: ContextBudget {
@@ -429,9 +450,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             prepared.context().request() == &attempt.user
                 && prepared.original_root() == expected
                 && prepared.original_generation() == generation,
-            "Interpreted PDF request changed"
+            "Interpreted book request changed"
         );
-        pdf.require_current(&mut self.workflow)?;
+        book.require_current(&mut self.workflow)?;
         let (context, mut evidence) = ledger.persist_followup_evidence(
             crate::writer::stage(attempt.user.exchange, "reader-pdf-evidence"),
             timestamp,
@@ -441,7 +462,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let answer = {
             let workflow = RefCell::new(&mut self.workflow);
             let progress = || {
-                pdf.check_deadline()?;
+                book.check_deadline()?;
                 workflow.borrow_mut().check_request_progress()
             };
             let check = || {
@@ -451,7 +472,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             let submit = |call: &mut dyn FnMut() -> Result<()>| {
                 progress()?;
                 attempt.check_selected()?;
-                pdf.require_current(&mut workflow.borrow_mut())?;
+                book.require_current(&mut workflow.borrow_mut())?;
                 evidence.with_current(ledger, call)
             };
             followup_research::answer(
@@ -475,7 +496,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .duration_since(UNIX_EPOCH)?
                     .as_millis()
                     .try_into()?;
-                pdf.require_current(&mut self.workflow)?;
+                book.require_current(&mut self.workflow)?;
                 attempt.user = evidence.record_provider_failure(
                     ledger,
                     crate::writer::stage(attempt.user.exchange, "reader-pdf-provider-failure"),
@@ -487,10 +508,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             Err(error) => return Err(error),
         };
         attempt.check_selected()?;
-        pdf.require_current(&mut self.workflow)?;
+        book.require_current(&mut self.workflow)?;
         attempt.generated_from_pdf(ledger, &mut evidence, result.answer.clone())?;
         self.place_answer(attempt, result, true, &mut |ledger| {
-            pdf.check_file()?;
+            book.check_file()?;
             evidence.with_current(ledger, || Ok(()))
         })
     }

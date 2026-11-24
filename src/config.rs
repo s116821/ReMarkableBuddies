@@ -194,6 +194,11 @@ impl Config {
             "Ordinary researched PDF requires the local Reader route"
         );
         ensure!(
+            self.reader.researched_epub.is_none()
+                || (self.reader.selection.is_none() && !self.sync.enabled),
+            "Researched EPUB requires the ordinary local Reader route"
+        );
+        ensure!(
             !(self.reader.selection.is_some() && self.sync.enabled),
             "selected Reader requires the separately qualified selected sync worker"
         );

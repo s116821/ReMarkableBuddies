@@ -113,7 +113,7 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     handwriting: Option<crate::handwriting::runtime::Runtime>,
     handwriting_operation: Option<crate::handwriting::runtime::Capture>,
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    ordinary_pdf_cache: Option<super::resident_source::original_pdf::OrdinaryPdfCache>,
+    ordinary_book_cache: Option<super::resident_source::original_pdf::OrdinaryBookCache>,
 }
 struct ModelContent<'a, M: LLMEngine>(&'a mut M);
 impl<M: LLMEngine> Drop for ModelContent<'_, M> {
@@ -178,7 +178,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             handwriting: None,
             handwriting_operation: None,
             #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-            ordinary_pdf_cache: None,
+            ordinary_book_cache: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),
@@ -291,7 +291,7 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // Step 2: Capture screenshot (of current/question page)
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let (acquired, observed_pdf) = ordinary_pdf::acquire(&mut self.workflow, local)?;
+        let (acquired, observed_book) = ordinary_pdf::acquire(&mut self.workflow, local)?;
         #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let acquired = self.workflow.acquire_reader_evidence()?;
         #[cfg(target_os = "linux")]
@@ -357,14 +357,14 @@ impl<M: LLMEngine> Orchestrator<M> {
             return Ok(());
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let observed_pdf = ordinary_pdf::classify(&mut self.workflow, observed_pdf?)?;
+        let observed_book = ordinary_pdf::classify(&mut self.workflow, observed_book?)?;
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        let result = match observed_pdf {
-            Some(pdf) => self.run_ordinary_pdf(
+        let result = match observed_book {
+            Some(book) => self.run_ordinary_book(
                 &mut attempt,
-                pdf,
-                local.ok_or_else(|| anyhow::anyhow!("Ordinary PDF dispatch absent"))?,
+                book,
+                local.ok_or_else(|| anyhow::anyhow!("Ordinary Reader dispatch absent"))?,
             ),
             None => self.run_prepared(&mut attempt),
         };
