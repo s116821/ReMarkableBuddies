@@ -102,7 +102,7 @@ pub(crate) fn run(
         let release = {
             let owner = workflow.resident_source.as_mut().unwrap();
             let health = workflow.service_health.as_mut().unwrap();
-            RequestInput::wait_released_reader(corner.clone(), false, &mut || {
+            RequestInput::wait_released_reader(corner.clone(), false, false, &mut || {
                 owner.progress(health)
             })?
         };

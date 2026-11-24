@@ -311,7 +311,7 @@ impl Session {
     pub(crate) fn writer_at_release(
         &self,
         released_boot_second: u64,
-    ) -> Result<Option<super::super::writer_request::SelectedRefinement>> {
+    ) -> Result<super::super::writer_request::WriterAtRelease> {
         super::super::writer_request::at_release(&self.pending.lease, released_boot_second)
     }
 
@@ -323,9 +323,15 @@ impl Session {
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
+        selected: Option<&super::super::writer_request::GenerationPin>,
     ) -> Result<Option<super::super::writer_request::InstalledRequest>> {
         self.pending.lease.current()?;
-        super::super::writer_request::take(self.pending.lease.record().activation(), document, page)
+        super::super::writer_request::take(
+            self.pending.lease.record().activation(),
+            document,
+            page,
+            selected,
+        )
     }
 
     #[cfg(all(

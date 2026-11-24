@@ -102,6 +102,19 @@ pub(crate) struct SelectedRefinement {
     slot_digest: [u8; 32],
 }
 
+pub(crate) struct GenerationPin {
+    activation: Uuid,
+    digest: String,
+}
+
+pub(crate) enum WriterAtRelease {
+    Unobserved,
+    Empty,
+    Unavailable,
+    Refinement(SelectedRefinement),
+    Generation(GenerationPin),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlotAction {
     Inspect,
@@ -295,21 +308,37 @@ pub(crate) fn submit(
     lease.current()
 }
 
-pub(crate) fn at_release(
-    lease: &Lease,
-    released_boot_second: u64,
-) -> Result<Option<SelectedRefinement>> {
+pub(crate) fn at_release(lease: &Lease, released_boot_second: u64) -> Result<WriterAtRelease> {
     lease.record.group.current_caller()?;
-    // The current draft and its page binding are verified before a claim.
+    observe_slot(lease, released_boot_second)
+}
+
+fn observe_slot(lease: &Lease, released_boot_second: u64) -> Result<WriterAtRelease> {
     let pending = read(lease, &name(lease))?;
     lease.current()?;
-    let now = boot_seconds()?;
-    match pending {
-        Some(slot) if released_boot_second <= now && now < slot.expires => {
-            slot.refinement(lease.record().activation(), released_boot_second)
-        }
-        _ => Ok(None),
+    let Some(pending) = pending else {
+        return Ok(WriterAtRelease::Empty);
+    };
+    let activation = lease.record().activation();
+    if matches!(
+        pending.submission,
+        Submission::GenerateRegionOnTablet { .. }
+            | Submission::GenerateCurrentTargetOnTablet { .. }
+    ) {
+        // Preserve explicit intent even if expired. The receiver refuses a stale
+        // or wrong-mode request instead of reinterpreting the gesture as Reader.
+        return Ok(WriterAtRelease::Generation(GenerationPin {
+            activation,
+            digest: pending.digest,
+        }));
     }
+    let now = boot_seconds()?;
+    if released_boot_second > now || now >= pending.expires {
+        return Ok(WriterAtRelease::Empty);
+    }
+    Ok(pending
+        .refinement(activation, released_boot_second)?
+        .map_or(WriterAtRelease::Empty, WriterAtRelease::Refinement))
 }
 
 pub(crate) fn request_for_page(
@@ -566,16 +595,32 @@ pub(crate) fn take(
     activation: uuid::Uuid,
     document: Uuid,
     page: Uuid,
+    selected: Option<&GenerationPin>,
 ) -> Result<Option<InstalledRequest>> {
     let lease = caller(activation)?;
-    take_locked(&lease, document, page)
+    take_locked(&lease, document, page, selected)
 }
 
 // The installed caller owns the existing slot lock. Keep this read/dispatch
 // common to production and real-file ingress fixtures.
-fn take_locked(lease: &Lease, document: Uuid, page: Uuid) -> Result<Option<InstalledRequest>> {
+fn take_locked(
+    lease: &Lease,
+    document: Uuid,
+    page: Uuid,
+    selected: Option<&GenerationPin>,
+) -> Result<Option<InstalledRequest>> {
     let name = name(lease);
-    let Some(pending) = read(lease, &name)? else {
+    let pending = read(lease, &name)?;
+    if let Some(pin) = selected {
+        ensure!(
+            pin.activation == lease.record().activation()
+                && pending
+                    .as_ref()
+                    .is_some_and(|slot| slot.digest == pin.digest),
+            "Writer generation request changed after release"
+        );
+    }
+    let Some(pending) = pending else {
         return Ok(None);
     };
     // Only the request selected at finger release may refine the current draft.
@@ -734,10 +779,17 @@ impl FixtureSlot {
         &self,
         document: Uuid,
         page: Uuid,
+        selected: Option<&GenerationPin>,
     ) -> Result<Option<InstalledRequest>> {
         let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap())?;
         lock(&lease)?;
-        take_locked(&lease, document, page)
+        take_locked(&lease, document, page, selected)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn at_release(&self, released: u64) -> Result<WriterAtRelease> {
+        let lease = Lease::reopen(self.pin.fixture_path.as_ref().unwrap())?;
+        observe_slot(&lease, released)
     }
 
     pub(crate) fn pending(&self) -> bool {
@@ -897,7 +949,7 @@ mod tests {
         document: Uuid,
         page: Uuid,
     ) -> Result<Option<InstalledRequest>> {
-        slot.take_on_page(document, page)
+        slot.take_on_page(document, page, None)
     }
     fn expire(slot: &FixtureSlot) {
         let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap()).unwrap();
@@ -938,6 +990,34 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn a_replaced_generation_request_survives_the_previous_release() -> Result<()> {
+        let request = request();
+        let slot = FixtureSlot::current_target(request.clone());
+        let lease = Lease::reopen(slot.pin.fixture_path.as_ref().unwrap())?;
+        let name = name(&lease);
+        let path = lease.path.join(&name);
+        let WriterAtRelease::Generation(selected) = observe_slot(&lease, boot_seconds()?)? else {
+            anyhow::bail!("expected current-target Writer");
+        };
+        let mut replacement = read(&lease, &name)?.unwrap();
+        let Submission::GenerateCurrentTargetOnTablet { operation, .. } =
+            &mut replacement.submission
+        else {
+            anyhow::bail!("expected queued generation");
+        };
+        *operation = Uuid::new_v4();
+        files::atomic_json(&path, &replacement)?;
+        let bytes = fs::read(&path)?;
+        let error = slot
+            .take_on_page(request.document, request.page, Some(&selected))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("changed after release"));
+        assert_eq!(fs::read(path)?, bytes);
+        Ok(())
     }
 
     #[test]

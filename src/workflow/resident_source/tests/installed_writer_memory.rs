@@ -36,10 +36,11 @@ fn installed_writer_claims_and_queries_memory_for_the_current_draft() -> Result<
         }
     }
 
-    let mode = "reconnect-source-handoff";
-    let releases = vec![released(Instant::now()), released(Instant::now())];
+    let mode = "reconnect-source-handoff-ordinary-pdf";
+    let releases = (0..3).map(|_| released(Instant::now())).collect();
     let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
     let fixture = Fixture::new();
+    let order_change = fixture.ordinary_pdf_order_change();
     let mut runtime = fixture.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
     let Reply::Observed(facts) = runtime
         .connection()?
@@ -211,6 +212,22 @@ fn installed_writer_claims_and_queries_memory_for_the_current_draft() -> Result<
     );
 
     installed.set_subject_memory(Some(memory.clone()));
+    events.borrow_mut().push("change order on Writer inspect");
+    let error = installed.run_iteration().unwrap_err();
+    assert!(format!("{error:#}").contains("Writer source page or page order changed"));
+    assert_eq!(slot.at_release(120)?, Some(pending));
+    assert!(!events.borrow().contains(&"writer claim"));
+    assert!(calls.borrow().is_empty());
+    assert_eq!(memory.query_count(), 0);
+    assert_eq!(
+        ledger.expected(Namespace::Conversation, conversation)?,
+        expected
+    );
+    events
+        .borrow_mut()
+        .retain(|event| *event != "change order on Writer inspect");
+    std::fs::remove_file(order_change)?;
+
     // This fixture stops at placement. The real Writer receiver has already
     // saved the generated draft when the absent output backend is reported.
     let error = installed.run_iteration().unwrap_err();

@@ -494,6 +494,21 @@ impl<M: LLMEngine> Orchestrator<M> {
         );
         if require_current_draft {
             self.workflow.check_request_progress()?;
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            let resident = {
+                let resident =
+                    self.workflow.resident_source.as_mut().ok_or_else(|| {
+                        anyhow::anyhow!("installed Writer page owner unavailable")
+                    })?;
+                let health = self.workflow.service_health.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("installed Writer service health unavailable")
+                })?;
+                resident.require_writer_page_current(health)?;
+                resident
+            };
             anyhow::ensure!(
                 self.ledger
                     .expected(Namespace::Conversation, *conversation)?
@@ -504,21 +519,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
             ))]
-            {
-                let resident =
-                    self.workflow.resident_source.as_ref().ok_or_else(|| {
-                        anyhow::anyhow!("installed Writer page owner unavailable")
-                    })?;
-                anyhow::ensure!(
-                    resident
-                        .installed_writer_for_page(
-                            capture,
-                            super::resident_supervisor::writer_request::SlotAction::Claim
-                        )?
-                        .is_some(),
-                    "Writer request changed or expired before claiming the current draft"
-                );
-            }
+            anyhow::ensure!(
+                resident
+                    .installed_writer_for_page(
+                        capture,
+                        super::resident_supervisor::writer_request::SlotAction::Claim
+                    )?
+                    .is_some(),
+                "Writer request changed or expired before claiming the current draft"
+            );
             info!(
                 "Installed Writer refinement accepted: {}",
                 request.operation()
