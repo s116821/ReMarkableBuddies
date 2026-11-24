@@ -28,6 +28,7 @@ struct Session {
     reference: Vec<Contact>,
     current: Vec<Contact>,
     since: Duration,
+    reader_held_in_corner: bool,
     invalidated: bool,
     blocked: bool,
     qualified: Option<Interaction>,
@@ -72,11 +73,7 @@ impl ContactReducer {
                 // Native corner menus act on release. Dispatching earlier lets
                 // the release reopen a menu after Reader has dismissed it.
                 if !session.blocked
-                    && session.reference.len() == 1
-                    && session.current.len() == 1
-                    && self
-                        .corner
-                        .contains(session.current[0].x, session.current[0].y)
+                    && session.reader_held_in_corner
                     && now.saturating_sub(session.since) >= HOLD
                 {
                     return vec![Interaction::Reader];
@@ -98,15 +95,21 @@ impl ContactReducer {
             }
             return events;
         }
+        let reader_in_corner = matches!(
+            contacts.as_slice(),
+            [contact] if self.corner.contains(contact.x, contact.y)
+        );
         let session = self.session.get_or_insert_with(|| Session {
             reference: contacts.clone(),
             current: contacts.clone(),
             since: now,
+            reader_held_in_corner: reader_in_corner,
             invalidated: false,
             blocked: false,
             qualified: None,
             releasing: None,
         });
+        session.reader_held_in_corner &= reader_in_corner;
         let same_id = |a: &Contact, b: &Contact| a.slot == b.slot && a.tracking == b.tracking;
         let contains = |list: &[Contact], item: &Contact| list.iter().any(|old| same_id(old, item));
         let moved = contacts.iter().any(|contact| {
@@ -318,6 +321,40 @@ mod tests {
         reducer.cancel();
         assert!(reducer.frame(&[], ms(14000)).is_empty());
     }
+    #[test]
+    fn reader_hold_stays_in_the_corner_for_every_complete_frame() {
+        let mut reducer = ContactReducer::new(TriggerCorner::LowerRight);
+        let inside = Contact {
+            slot: 0,
+            tracking: 1,
+            x: 704,
+            y: 970,
+        };
+        // Both coordinate changes are smaller than the stationary jitter allowance.
+        let outside = Contact { x: 700, ..inside };
+        let inside_jitter = Contact { x: 702, ..inside };
+
+        assert!(reducer.frame(&[inside], ms(0)).is_empty());
+        assert_eq!(
+            reducer.frame(&[outside], ms(500)),
+            vec![Interaction::Invalidated]
+        );
+        assert!(reducer.frame(&[inside], ms(1000)).is_empty());
+        assert!(reducer.frame(&[], ms(2200)).is_empty());
+
+        assert!(reducer.frame(&[outside], ms(3000)).is_empty());
+        assert_eq!(
+            reducer.frame(&[inside], ms(4800)),
+            vec![Interaction::Invalidated]
+        );
+        assert!(reducer.frame(&[], ms(5100)).is_empty());
+
+        assert!(reducer.frame(&[inside], ms(6000)).is_empty());
+        assert!(reducer.frame(&[inside_jitter], ms(6100)).is_empty());
+        assert_eq!(reducer.frame(&[], ms(8000)), vec![Interaction::Reader]);
+        assert!(reducer.frame(&[], ms(8100)).is_empty());
+    }
+
     #[test]
     fn prolonged_partial_release_and_event_loss_never_mutate() {
         let mut reducer = ContactReducer::new(TriggerCorner::LowerLeft);

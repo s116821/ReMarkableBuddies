@@ -1,5 +1,18 @@
 # Hardware fixtures
 
+For an end-to-end tablet test, start with [the installed Buddy service](../../README.md#testing).
+An existing handwriting sample can supply the page. A person operates the normal
+trigger and confirms the answer shown by Buddy.
+
+## Reference document
+
+Gundlach and Merkowitz’s paper, [Measurement of Newton's Constant Using a Torsion Balance with Angular Acceleration Feedback](https://arxiv.org/pdf/gr-qc/0006043v2),
+is a four-page PDF. Its SHA-256 is
+`332446943966f6c3111a09c2df05673a94282ea247bf78c946f2c6e6d479e1f6`.
+Preserve the original PDF bytes and page order when testing annotations.
+
+## Diagnostic fixtures and earlier results
+
 `hardware_probe tap-echo X Y` requires the nondefault
 `development-input-diagnostics` feature and Linux. It accepts integer interior
 virtual coordinates (0 < X < 768, 0 < Y < 1024), RM2 and the exact existing
@@ -18,10 +31,10 @@ procedures and evidence only; they are not normal Reader acceptance gates or
 authorization to draw new marks. The current hardware probe refuses retired marker
 commands; use preserved source/evidence for historical analysis. See [retirement findings](../legacy-status-indicator-findings.md).
 
-Use the repository's reader-buddy-testing skill before running these fixtures on
-an authorized development tablet. JSON stroke fixtures and their Python generators
-exercise known question, shorthand, ambiguous-ink, and missing-question cases with
-`examples/hardware_probe.rs`. They are synthetic input, not a human handwriting study.
+The JSON stroke fixtures and their Python generators cover known questions,
+shorthand, ambiguous ink and missing questions. Their scripted inputs support
+diagnosis and off-tablet regression work. The original probe results below
+describe the operations that produced them.
 
 `hardware_probe tap-only X Y` is an explicit development input-only command using
 the same virtual coordinates and100ms tap as `tap`. It returns after successful
@@ -31,14 +44,9 @@ document opening; input I/O remains externally bounded with no internal absolute
 deadline or guaranteed release after termination. Central change: `isolate-development-tap`.
 Inspect current UI state and adapt coordinates before replay; do not run blindly.
 
-The reference document is Gundlach and Merkowitz,
-[Measurement of Newton's Constant Using a Torsion Balance with Angular Acceleration Feedback](https://arxiv.org/pdf/gr-qc/0006043v2).
-Its four-page PDF SHA-256 is
-`332446943966f6c3111a09c2df05673a94282ea247bf78c946f2c6e6d479e1f6`.
-Prepare a native blank notes page after the question page. Preserve original PDF
-bytes/page order, clear only test ink between cases, and inspect the answer page
-after every accepted or rejected question. A drawn X alone cannot prove no answer
-was written; capture both state and sanitized logs.
+Earlier standalone PDF runs supplied a blank notes page after the question page.
+Inspect the answer page after each accepted or rejected question and preserve
+the result with the relevant sanitized log.
 
 PR #10 contains [accepted-question evidence](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876142),
 [rejection evidence](https://github.com/s116821/ReMarkableBuddies/pull/10#issuecomment-5687876336),
