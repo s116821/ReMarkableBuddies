@@ -7,13 +7,14 @@ use super::{
 use crate::{
     config::researched_reader::OrdinarySearch,
     conversation::{
+        evidence::FollowupRequestHead,
         receiving::{ReceivingBudget, RequestSource},
         resolution::SourceDirective,
         ContextBudget,
     },
     llm::LLMEngine,
     retrieval::{pdf_worker::PendingIndex, IndexKey, Provider, Retrieved},
-    storage::{captured::Captured, Namespace, Uuid},
+    storage::{captured::Captured, Namespace},
     workflow::{
         conversation_dispatch::{followup_research, Dispatch},
         reader_intent::{self, Intent},
@@ -268,13 +269,15 @@ impl<M: LLMEngine> Orchestrator<M> {
             Intent::Unclear => anyhow::bail!("PDF question web intent is unclear"),
         };
         pdf.require_current(&mut self.workflow)?;
-        let interpreted_root = attempt.interpret_ordinary_pdf(
+        let head = attempt.interpret_ordinary_pdf(
             &self.ledger,
             &result.question,
             result.target.as_ref(),
             &result.selection,
             &prepared,
         )?;
+        #[cfg(test)]
+        super::researched_fixture::after_ordinary_pdf_interpret(&self.ledger, &attempt.user)?;
         if attempt.source_target_enabled() {
             result.about = Some(match result.target.as_ref() {
                 Some(candidate) => candidate.about()?,
@@ -289,15 +292,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .map(OrdinarySearch::for_installed_pdf),
             deadline,
         };
-        self.answer_ordinary_pdf(
-            attempt,
-            &pdf,
-            dispatch,
-            policy,
-            research,
-            &mut result,
-            (&interpreted_root, prepared.generation),
-        )
+        self.answer_ordinary_pdf(attempt, &pdf, dispatch, policy, research, &mut result, head)
     }
 
     fn read_ordinary_pdf(
@@ -373,7 +368,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         policy: crate::conversation::receiving::memory::research::ResearchPolicy,
         research: followup_research::ResearchRequest<'_>,
         result: &mut AnalysisResult,
-        (expected, generation): (&crate::conversation::ExpectedHeads, Uuid),
+        head: FollowupRequestHead,
     ) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -382,9 +377,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         let ledger = &self.ledger;
         let conversation = attempt.user.conversation;
         let user = attempt.user.id;
-        // The live answer consumes the attachment view from the same captured
-        // evidence frame. Retain it through the existing live receiving path.
-        let head = ledger.capture_interpreted_pdf_head(&attempt.user, expected, generation)?;
+        let expected = head.expected_root();
+        let generation = head.generation();
         let prepared = {
             let mut progress = || {
                 pdf.check_deadline()?;
@@ -433,7 +427,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         };
         ensure!(
             prepared.context().request() == &attempt.user
-                && &prepared.original_root() == expected
+                && prepared.original_root() == expected
                 && prepared.original_generation() == generation,
             "Interpreted PDF request changed"
         );
@@ -443,7 +437,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             timestamp,
             prepared,
         )?;
-        attempt.advance_pdf_evidence(ledger, expected, evidence.root())?;
+        attempt.advance_pdf_evidence(ledger, &expected, evidence.root())?;
         let answer = {
             let workflow = RefCell::new(&mut self.workflow);
             let progress = || {

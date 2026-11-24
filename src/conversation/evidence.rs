@@ -135,6 +135,34 @@ pub(crate) struct FollowupRequestHead {
     user: Uuid,
 }
 
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+impl FollowupRequestHead {
+    pub(crate) fn from_pdf_interpretation(
+        receipt: &WriteResult,
+        published: &[Envelope],
+        user: Uuid,
+        generation: Uuid,
+    ) -> Result<Self> {
+        let turn = published
+            .iter()
+            .find(|record| record.namespace == Namespace::Conversation && record.record_id == user)
+            .context("Interpreted PDF turn missing from publication")?;
+        Ok(Self {
+            generation,
+            root: receipt.historical.applied_root_revision,
+            user: turn.revision_id,
+        })
+    }
+
+    pub(crate) fn expected_root(&self) -> ExpectedHeads {
+        ExpectedHeads(BTreeSet::from([self.root]))
+    }
+
+    pub(crate) fn generation(&self) -> Uuid {
+        self.generation
+    }
+}
+
 impl FollowupEvidence {
     pub(crate) fn with_current<T>(
         &self,
@@ -297,32 +325,6 @@ impl Ledger {
         );
         capture.with_current(&self.store, || Ok(()))?;
         Ok(capture)
-    }
-
-    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    pub(crate) fn capture_interpreted_pdf_head(
-        &self,
-        user: &Turn,
-        expected: &ExpectedHeads,
-        generation: Uuid,
-    ) -> Result<FollowupRequestHead> {
-        let [root, turn] =
-            self.store
-                .bounded_head_pair(Namespace::Conversation, user.conversation, user.id)?;
-        let root = root.context("Interpreted PDF conversation root absent")?;
-        let turn = turn.context("Interpreted PDF turn absent")?;
-        ensure!(
-            expected.0.len() == 1
-                && expected.0.contains(&root.revision_id)
-                && user.outcome == Outcome::Interpreted
-                && matches!(Self::decode(&turn)?, Record::Turn(saved) if saved == *user),
-            "Interpreted PDF user or root changed"
-        );
-        Ok(FollowupRequestHead {
-            generation,
-            root: root.revision_id,
-            user: turn.revision_id,
-        })
     }
 
     pub(crate) fn append_followup_user(

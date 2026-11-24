@@ -15,6 +15,8 @@ struct State {
     constructions: usize,
     lose_generated_ack: bool,
     generation: Option<GenerationWitness>,
+    #[cfg(feature = "installed-resident-output")]
+    replace_interpreted_pdf_turn: bool,
 }
 
 thread_local! {
@@ -29,6 +31,8 @@ impl Scope {
             constructions: 0,
             lose_generated_ack,
             generation: None,
+            #[cfg(feature = "installed-resident-output")]
+            replace_interpreted_pdf_turn: false,
         }));
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
@@ -45,6 +49,11 @@ impl Scope {
     pub(crate) fn generation(&self) -> Option<GenerationWitness> {
         self.0.borrow().generation.clone()
     }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn replace_interpreted_pdf_turn(&self) {
+        self.0.borrow_mut().replace_interpreted_pdf_turn = true;
+    }
 }
 impl Drop for Scope {
     fn drop(&mut self) {
@@ -52,6 +61,37 @@ impl Drop for Scope {
             active.borrow_mut().take();
         });
     }
+}
+
+/// Change only the interpreted turn's storage revision after the real commit.
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) fn after_ordinary_pdf_interpret(
+    ledger: &crate::conversation::Ledger,
+    user: &crate::conversation::Turn,
+) -> Result<()> {
+    use crate::storage::{Namespace, Uuid};
+
+    let replace = ACTIVE.with(|active| {
+        active.borrow().as_ref().is_some_and(|state| {
+            std::mem::take(&mut state.borrow_mut().replace_interpreted_pdf_turn)
+        })
+    });
+    if replace {
+        let store = ledger.store();
+        let original = store.conditional_snapshot(Namespace::Conversation, user.conversation)?;
+        let mut successor = store
+            .value(Namespace::Conversation, user.id)?
+            .context("Fixture interpreted PDF turn absent")?;
+        successor.parents = [successor.revision_id].into();
+        successor.revision_id = Uuid::new_v4();
+        successor.operation_id = Uuid::new_v4();
+        store.commit(vec![successor], Default::default())?;
+        assert_eq!(
+            store.conditional_snapshot(Namespace::Conversation, user.conversation)?,
+            original
+        );
+    }
+    Ok(())
 }
 
 /// Called only after the real destination/model admission and selected stage

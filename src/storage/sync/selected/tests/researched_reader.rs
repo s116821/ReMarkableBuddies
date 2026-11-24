@@ -1181,6 +1181,8 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         OrderBeforeVerification,
         OrderAfterAnswer,
         ConversationBeforeVerification,
+        IdenticalTurnSuccessor,
+        IdenticalTurnSuccessorWithTargets,
         ProviderRefusal,
         ProviderRefusalWithTargets,
         ProviderRefusalAfterNativeDrift,
@@ -1226,6 +1228,8 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         Case::OrderBeforeVerification,
         Case::OrderAfterAnswer,
         Case::ConversationBeforeVerification,
+        Case::IdenticalTurnSuccessor,
+        Case::IdenticalTurnSuccessorWithTargets,
         Case::ProviderRefusal,
         Case::ProviderRefusalWithTargets,
         Case::ProviderRefusalAfterNativeDrift,
@@ -1238,6 +1242,13 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
         let peer = required.then(|| SearchPeer::new(events.clone(), None));
         let scope =
             researched_fixture::Scope::new(peer.as_ref().map(|peer| peer.endpoint.clone()), false);
+        let replace_interpreted_turn = matches!(
+            case,
+            Case::IdenticalTurnSuccessor | Case::IdenticalTurnSuccessorWithTargets
+        );
+        if replace_interpreted_turn {
+            scope.replace_interpreted_pdf_turn();
+        }
         let mut script = Scripted::new(
             if required {
                 Reading::Clear
@@ -1266,7 +1277,10 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             page,
             root.clone(),
             executable.clone(),
-            case == Case::ProviderRefusalWithTargets,
+            matches!(
+                case,
+                Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets
+            ),
             |ledger, order_change, change_file_on_observe| {
                 let ledger = Ledger::new(ledger.store().clone());
                 script.hook = Some(Box::new(move |stage, pending| {
@@ -1419,13 +1433,16 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                 .iter()
                 .filter(|r| matches!(r, Record::RequestEvidence(_)))
                 .count(),
-            usize::from(interpreted),
+            usize::from(interpreted && !replace_interpreted_turn),
             "{case:?}",
         );
         assert_eq!(scope.constructions(), usize::from(required));
         let expected_calls = match case {
             Case::OrderBeforeVerification | Case::ConversationBeforeVerification => 1,
-            Case::FileBeforeAnswer | Case::FileDuringAnswerObserve => 2,
+            Case::FileBeforeAnswer
+            | Case::FileDuringAnswerObserve
+            | Case::IdenticalTurnSuccessor
+            | Case::IdenticalTurnSuccessorWithTargets => 2,
             _ => 3,
         };
         assert_eq!(frames.len(), expected_calls, "{case:?}: {result:?}");
@@ -1451,6 +1468,12 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             ) {
                 assert_eq!(fs::read(path)?, b"changed during native Observe");
                 assert!(cause.contains("Original PDF file changed"), "{cause}");
+            }
+            if replace_interpreted_turn {
+                assert!(
+                    cause.contains("Reader follow-up changed before source preparation"),
+                    "{cause}"
+                );
             }
             if stable_refusal {
                 assert!(error.is::<crate::llm::ProviderRefused>(), "{cause}");

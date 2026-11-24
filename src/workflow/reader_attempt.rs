@@ -950,7 +950,7 @@ impl Attempt {
         candidate: Option<&crate::conversation::target::Candidate>,
         selection: &crate::analysis::ReaderSelection,
         prepared: &crate::storage::captured::Captured,
-    ) -> Result<ExpectedHeads> {
+    ) -> Result<crate::conversation::evidence::FollowupRequestHead> {
         let mut user = self.user.clone();
         user.text = Some(text.into());
         user.outcome = Outcome::Interpreted;
@@ -969,7 +969,7 @@ impl Attempt {
             .prepared_pdf_root
             .context("Ordinary PDF prepared root absent")?;
         let expected_root = ExpectedHeads([root].into_iter().collect());
-        let receipt = if let Some(frame) = self.target_frame.as_mut() {
+        let (receipt, published) = if let Some(frame) = self.target_frame.as_mut() {
             anyhow::ensure!(
                 frame.expected_root() == expected_root,
                 "Prepared PDF target root changed"
@@ -994,12 +994,14 @@ impl Attempt {
                 prepared,
             )?
         };
+        let head = crate::conversation::evidence::FollowupRequestHead::from_pdf_interpretation(
+            &receipt,
+            &published,
+            user.id,
+            prepared.generation,
+        )?;
         self.user = user;
-        Ok(ExpectedHeads(
-            [receipt.historical.applied_root_revision]
-                .into_iter()
-                .collect(),
-        ))
+        Ok(head)
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
