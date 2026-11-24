@@ -5,6 +5,13 @@ pub(super) mod original_pdf;
 
 #[cfg(test)]
 use super::resident_runtime::ReadOnlyAdmission;
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+use super::resident_supervisor::writer_request::{
+    GenerationPin, SelectedRefinement, SlotAction, WriterAtRelease,
+};
 use super::{
     resident_request::{FailureKind, RequestFailure},
     resident_runtime::{ReadOnlyRequest as Request, ResidentRuntime},
@@ -73,10 +80,31 @@ trait SourceSession {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    fn writer_at_release(&self, _released_boot_second: u64) -> Result<WriterAtRelease> {
+        Ok(WriterAtRelease::Empty)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn writer_request_for_page(
+        &self,
+        _document: crate::storage::Uuid,
+        _page: crate::storage::Uuid,
+        _selected: SelectedRefinement,
+        _action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        Ok(None)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         _document: crate::storage::Uuid,
         _page: crate::storage::Uuid,
+        _selected: Option<&GenerationPin>,
     ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
         Ok(None)
     }
@@ -125,6 +153,13 @@ trait SourceSession {
     }
 }
 impl SourceSession for Session {
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn writer_at_release(&self, released_boot_second: u64) -> Result<WriterAtRelease> {
+        Session::writer_at_release(self, released_boot_second)
+    }
     fn pulse(&mut self, health: &mut ServiceHealth) -> Result<()> {
         self.source_pulse(health)
     }
@@ -143,12 +178,26 @@ impl SourceSession for Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    fn writer_request_for_page(
+        &self,
+        document: crate::storage::Uuid,
+        page: crate::storage::Uuid,
+        selected: SelectedRefinement,
+        action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        Session::writer_request_for_page(self, document, page, selected, action)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
+        selected: Option<&GenerationPin>,
     ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
-        Session::take_writer_request(self, document, page)
+        Session::take_writer_request(self, document, page, selected)
     }
     #[cfg(all(
         feature = "development-resident-bootstrap",
@@ -230,6 +279,11 @@ pub(super) struct ResidentSourceOwner {
     session: Option<Box<dyn SourceSession>>,
     input: Option<RequestInput>,
     gesture: Option<ResidentGesture>,
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    writer_at_release: WriterAtRelease,
     deadline: Option<Instant>,
     reconnect: bool,
     canceled: bool,
@@ -252,6 +306,11 @@ impl ResidentSourceOwner {
             session: None,
             input: None,
             gesture: None,
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            writer_at_release: WriterAtRelease::Unobserved,
             deadline: None,
             reconnect: false,
             canceled: false,
@@ -360,6 +419,36 @@ impl ResidentSourceOwner {
         self.gesture == Some(ResidentGesture::BlankStart)
     }
 
+    pub(super) fn admits_release(
+        &mut self,
+        released: &ReleasedReaderInput,
+        config: Option<&crate::config::Config>,
+    ) -> Result<bool> {
+        let reader = config.is_none_or(|settings| settings.reader_enabled());
+        let writer = config.is_none_or(|settings| settings.admits_writer(false));
+        if released.gesture == ResidentGesture::BlankStart {
+            return Ok(reader || writer);
+        }
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if writer && self.selection.has_installed_output() {
+            // A failed read cannot carry over a previously observed request.
+            self.writer_at_release = WriterAtRelease::Unavailable;
+            self.writer_at_release = match (&self.session, released.released_boot_second) {
+                (Some(session), Some(second)) => session.writer_at_release(second)?,
+                _ => WriterAtRelease::Unobserved,
+            };
+            return Ok(reader
+                || matches!(
+                    self.writer_at_release,
+                    WriterAtRelease::Refinement(_) | WriterAtRelease::Generation(_)
+                ));
+        }
+        Ok(reader)
+    }
+
     #[cfg(feature = "installed-resident-output")]
     pub(super) fn installed_output_selected(&self) -> bool {
         self.selection.has_installed_output()
@@ -380,6 +469,27 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(super) fn installed_writer_for_page(
+        &self,
+        capture: &ResidentSourceCapture,
+        action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        let WriterAtRelease::Refinement(selected) = self.writer_at_release else {
+            return Ok(None);
+        };
+        if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
+            return Ok(None);
+        }
+        let session = self
+            .session
+            .as_ref()
+            .context("resident Writer session absent")?;
+        session.writer_request_for_page(capture.document(), capture.page(), selected, action)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn take_installed_writer(
         &self,
         capture: &ResidentSourceCapture,
@@ -387,6 +497,12 @@ impl ResidentSourceOwner {
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
+        let selected = match &self.writer_at_release {
+            WriterAtRelease::Generation(pin) => Some(pin),
+            // A first Reader gesture can start the session that owns the slot.
+            WriterAtRelease::Unobserved => None,
+            _ => return Ok(None),
+        };
         use super::{
             resident_output::SelectedConversationRequest,
             resident_supervisor::writer_request::InstalledRequest,
@@ -397,14 +513,8 @@ impl ResidentSourceOwner {
             .as_ref()
             .context("resident Writer session absent")?;
         Ok(session
-            .take_writer_request(capture.document(), capture.page())?
+            .take_writer_request(capture.document(), capture.page(), selected)?
             .map(|request| match request {
-                InstalledRequest::Refine(request) => {
-                    SelectedConversationRequest::WriterRefinement {
-                        request,
-                        require_current_draft: true,
-                    }
-                }
                 InstalledRequest::GenerateRegion(_) => {
                     SelectedConversationRequest::UnsupportedRegionalWriter
                 }
@@ -879,6 +989,13 @@ impl ResidentSourceOwner {
         }
         self.input = None;
         self.gesture = None;
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        {
+            self.writer_at_release = WriterAtRelease::Unobserved;
+        }
         self.deadline = None;
         self.captured_source = None;
         self.canceled = false;
@@ -939,10 +1056,39 @@ impl ResidentSourceOwner {
         health: &mut ServiceHealth,
         deadline: Instant,
     ) -> Result<()> {
+        ensure!(
+            self.captured_page_matches(health, deadline)?,
+            "Resident PDF source or page order changed"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn require_writer_page_current(&mut self, health: &mut ServiceHealth) -> Result<()> {
+        let deadline = self.deadline.context("Writer source deadline absent")?;
+        ensure!(
+            self.captured_page_matches(health, deadline)?,
+            "Writer source page or page order changed before claiming the draft"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn captured_page_matches(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+    ) -> Result<bool> {
         let original = self
             .captured_source
             .clone()
-            .context("Resident PDF capture facts absent")?;
+            .context("Resident capture facts absent")?;
         self.reconnect_for_observation(health, deadline)?;
         let current = self.output_observe(health, deadline)?;
         // Provider and indexing work can outlast an idle client connection.
@@ -952,11 +1098,7 @@ impl ResidentSourceOwner {
             .context("resident Session absent")?
             .finish();
         self.reconnect = true;
-        ensure!(
-            current == original,
-            "Resident PDF source or page order changed"
-        );
-        Ok(())
+        Ok(current == original)
     }
 
     fn reconnect_for_observation(
@@ -1143,7 +1285,8 @@ impl ResidentSourceOwner {
         };
         // One original output deadline. Provider work cannot refresh this window;
         // later stages only clamp it, and synchronous work is checked on return.
-        let end = Instant::now() + Duration::from_secs(90);
+        let placement_started = Instant::now();
+        let end = placement_started + Duration::from_secs(90);
         self.selection.current(end)?;
         admitted_progress(end, || self.progress(health))?;
         let original = self
@@ -1339,6 +1482,7 @@ impl ResidentSourceOwner {
         if text.is_empty() && !newly_created {
             return Ok(Outcome::ReusedWithoutWrite);
         }
+        let target_ready = Instant::now();
         // Fresh full service/broker admission plus a second exact Observe before
         // requesting a live render lease. Historical Insert/PNG are not that lease.
         let delivery =
@@ -1385,7 +1529,15 @@ impl ResidentSourceOwner {
             end,
             steps: 0,
         };
+        let render_started = Instant::now();
         renderer.render_output(text, &mut lease)?;
+        let render_finished = Instant::now();
+        log::info!(
+            "Resident page text input finished: placement_ms={} render_setup_ms={} text_input_ms={}",
+            target_ready.duration_since(placement_started).as_millis(),
+            render_started.duration_since(target_ready).as_millis(),
+            render_finished.duration_since(render_started).as_millis(),
+        );
         lease.current()?;
         let rendered_target = lease.target.clone();
         let rendered_runtime = lease.runtime.clone();
@@ -1393,7 +1545,10 @@ impl ResidentSourceOwner {
         drop(renderer);
         let rendered = self.output_capture(health, &rendered_target, end)?;
         backend.record_rendered(&rendered_runtime, &rendered_target, &rendered)?;
-        log::info!("Resident answer submitted; persistence remains unverified");
+        log::info!(
+            "Resident answer submitted; persistence remains unverified; post_render_ms={}",
+            render_finished.elapsed().as_millis(),
+        );
         Ok(Outcome::SubmittedUnverified)
     }
 }
@@ -1459,6 +1614,8 @@ impl DevelopmentTargetLease<'_> {
 pub(crate) mod tests {
     use super::*;
     use crate::workflow::resident_runtime::tests::Fixture;
+    #[cfg(feature = "installed-resident-output")]
+    use crate::workflow::resident_supervisor::writer_request::RefinementFixtureSlot;
     use crate::workflow::{
         resident_client,
         resident_output::{
@@ -1499,6 +1656,10 @@ pub(crate) mod tests {
         observe_file_change: Option<ObserveFileChange>,
         #[cfg(feature = "installed-resident-output")]
         writer_slot: Option<Rc<super::super::resident_supervisor::writer_request::FixtureSlot>>,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot_fault: bool,
+        #[cfg(feature = "installed-resident-output")]
+        refinement_slot: Option<Rc<RefinementFixtureSlot>>,
     }
     struct OwnedAdmission<'a> {
         health: &'a mut ServiceHealth,
@@ -1536,17 +1697,63 @@ pub(crate) mod tests {
     }
     impl SourceSession for OwnedSession {
         #[cfg(feature = "installed-resident-output")]
+        fn writer_at_release(&self, released: u64) -> Result<WriterAtRelease> {
+            if self.writer_slot_fault {
+                self.events.borrow_mut().push("writer slot unavailable");
+                anyhow::bail!("Writer slot replaced while reading");
+            }
+            if let Some(slot) = &self.writer_slot {
+                return slot.at_release(released);
+            }
+            let selected = self
+                .refinement_slot
+                .as_ref()
+                .map(|slot| slot.at_release(released))
+                .transpose()?
+                .flatten();
+            Ok(selected.map_or(WriterAtRelease::Empty, WriterAtRelease::Refinement))
+        }
+        #[cfg(feature = "installed-resident-output")]
+        fn writer_request_for_page(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+            selected: SelectedRefinement,
+            action: SlotAction,
+        ) -> Result<Option<crate::writer::Request>> {
+            let Some(slot) = &self.refinement_slot else {
+                return Ok(None);
+            };
+            if action == SlotAction::Inspect
+                && self
+                    .events
+                    .borrow()
+                    .contains(&"change order on Writer inspect")
+            {
+                std::fs::write(
+                    self._fixture.ordinary_pdf_order_change(),
+                    ConversationId::new_v4().to_string(),
+                )?;
+            }
+            self.events.borrow_mut().push(match action {
+                SlotAction::Inspect => "writer inspect",
+                SlotAction::Claim => "writer claim",
+            });
+            slot.for_page(document, page, selected, action, 121)
+        }
+        #[cfg(feature = "installed-resident-output")]
         fn take_writer_request(
             &self,
             document: ConversationId,
             page: ConversationId,
+            selected: Option<&GenerationPin>,
         ) -> Result<Option<super::super::resident_supervisor::writer_request::InstalledRequest>>
         {
             use super::super::resident_supervisor::writer_request::{
                 InstalledRequest, RegionalRequest,
             };
             if let Some(slot) = &self.writer_slot {
-                return slot.take_on_page(document, page);
+                return slot.take_on_page(document, page, selected);
             }
             let mut events = self.events.borrow_mut();
             let Some(index) = events
@@ -1716,6 +1923,10 @@ pub(crate) mod tests {
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
                 observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
+                #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }))
         }
@@ -1728,6 +1939,7 @@ pub(crate) mod tests {
     fn released(at: Instant) -> ReleasedReaderInput {
         ReleasedReaderInput {
             released_at: at,
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: quiet_guard(),
         }
@@ -1854,7 +2066,7 @@ pub(crate) mod tests {
         };
         let mut reader = Orchestrator::new(workflow, provider, ledger);
         let error = reader
-            .run_iteration_with_trigger(true, Some(&dispatch))
+            .run_iteration_with_trigger(true, Some(&dispatch), Some(dispatch.config))
             .unwrap_err();
         assert!(
             error.to_string().contains("requires a bound conversation"),
@@ -1874,7 +2086,7 @@ pub(crate) mod tests {
 
     #[cfg(feature = "installed-resident-output")]
     #[test]
-    fn ordinary_installed_current_target_places_the_masked_regional_draft() {
+    fn writer_only_installed_current_target_places_the_masked_regional_draft() {
         use super::super::resident_supervisor::writer_request::{FixtureSlot, RegionalRequest};
         use crate::conversation::{
             resident_capture::tests::capture_for,
@@ -1953,14 +2165,15 @@ pub(crate) mod tests {
             "resident-current-target-{}",
             ConversationId::new_v4(),
         )));
-        let config = crate::config::Config {
-            paths: StorePaths {
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
                 data: base.0.join("data"),
                 cache: base.0.join("cache"),
                 credentials: base.0.join("credentials"),
             },
-            ..Default::default()
-        };
+            "product_settings": {"reader_enabled": false, "writer_enabled": true}
+        }))
+        .unwrap();
         let store = Arc::new(Store::open_source_target_startup(&config).unwrap());
         let ledger = Ledger::new(store.clone());
         let document = ConversationId::new_v4();
@@ -2119,6 +2332,8 @@ pub(crate) mod tests {
             events: events.clone(),
             delivery_fault: false,
             observe_file_change: None,
+            refinement_slot: None,
+            writer_slot_fault: false,
             writer_slot: Some(slot.clone()),
         }));
         let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
@@ -2126,9 +2341,10 @@ pub(crate) mod tests {
             .with_regional_writer_model("fixture".into());
         let provider = RegionalModel::default();
         let calls = provider.calls.clone();
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
         let mut reader = Orchestrator::new(workflow, provider, Ledger::new(store.clone()));
         reader
-            .run_iteration_with_trigger(true, Some(&dispatch))
+            .run_iteration_with_trigger(false, Some(&dispatch), Some(dispatch.config))
             .unwrap();
 
         assert_eq!(calls.get(), 2);
@@ -2218,6 +2434,8 @@ pub(crate) mod tests {
                 pdf,
                 armed: change_file_on_observe.clone(),
             }),
+            refinement_slot: None,
+            writer_slot_fault: false,
             writer_slot: None,
         }));
         crate::storage::files::atomic(
@@ -2241,7 +2459,11 @@ pub(crate) mod tests {
             if let Some(before_round) = &mut rounds.before_round {
                 before_round(ordinal, &order_change)?;
             }
-            results.push(reader.run_iteration_with_trigger(true, Some(&dispatch)));
+            results.push(reader.run_iteration_with_trigger(
+                true,
+                Some(&dispatch),
+                Some(dispatch.config),
+            ));
             let mut events = events.borrow_mut();
             let acquisition: &[&str] = if ordinal == 0 {
                 &["observe", "capture"]
@@ -2517,6 +2739,90 @@ pub(crate) mod tests {
             })
         }
     }
+    #[cfg(feature = "installed-resident-output")]
+    mod installed_writer_memory;
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_slot_read_failure_preserves_each_enabled_corner_action() {
+        let releases = vec![released(Instant::now()), released(Instant::now())];
+        let mode = "reconnect-source-handoff";
+        let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
+        let fixture = Fixture::new();
+        let runtime = fixture
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .unwrap();
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: fixture,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            refinement_slot: None,
+            writer_slot_fault: true,
+            writer_slot: None,
+        }));
+        for reader_enabled in [false, true] {
+            let config = serde_json::from_value(serde_json::json!({
+                "product_settings": {"reader_enabled": reader_enabled, "writer_enabled": true}
+            }))
+            .unwrap();
+            assert_eq!(
+                workflow.wait_for_idle_batch(None, Some(&config)).unwrap(),
+                reader_enabled
+            );
+        }
+        assert_eq!(
+            &*events.borrow(),
+            &["writer slot unavailable", "writer slot unavailable"]
+        );
+        events.borrow_mut().push("current-target-writer-queued");
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(workflow
+            .selected_resident_conversation(&source, true)
+            .unwrap()
+            .is_none());
+        assert!(events.borrow().contains(&"current-target-writer-queued"));
+        workflow.finish_request().unwrap();
+        drop((source, workflow, store));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_only_idle_ignores_an_unqueued_corner_then_accepts_blank_start() {
+        let releases = vec![
+            released(Instant::now()),
+            ReleasedReaderInput {
+                gesture: ResidentGesture::BlankStart,
+                ..released(Instant::now())
+            },
+        ];
+        let (mut workflow, store, base, events, _notify) =
+            workflow("reconnect-source-handoff", releases, Duration::ZERO);
+        workflow.resident_source.as_mut().unwrap().selection =
+            InstalledReaderSelection::fixture_with_installed_output();
+        let config = serde_json::from_value(serde_json::json!({
+            "product_settings": { "reader_enabled": false, "writer_enabled": true }
+        }))
+        .unwrap();
+        assert!(!workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        assert!(events.borrow().is_empty());
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(matches!(
+            workflow
+                .selected_resident_conversation(&source, true)
+                .unwrap(),
+            Some(super::super::resident_output::SelectedConversationRequest::BlankStart(None))
+        ));
+        workflow.finish_request().unwrap();
+        drop((source, workflow, store));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn selected_workflow_two_requests_reuse_actual_peer_and_deliver_only_stored_provider_images() {
         let (workflow, store, base, events, _notify) = workflow(
@@ -2888,6 +3194,10 @@ pub(crate) mod tests {
                 delivery_fault: false,
                 observe_file_change: None,
                 #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
+                #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));
             let source = RecognitionProbe {
@@ -3126,6 +3436,10 @@ pub(crate) mod tests {
                 events: events.clone(),
                 delivery_fault: false,
                 observe_file_change: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
                 #[cfg(feature = "installed-resident-output")]
                 writer_slot: None,
             }));
@@ -3368,6 +3682,7 @@ pub(crate) mod tests {
         polls.extend((0..4096).map(|_| Ok(vec![])));
         let first = ReleasedReaderInput {
             released_at: Instant::now(),
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: RequestInput::scripted(polls),
         };

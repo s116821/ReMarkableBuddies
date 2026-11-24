@@ -1,5 +1,6 @@
 //! Ordinary installed Reader on a verified original PDF page.
 use super::{
+    encode_model_images,
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
     AnalysisResult, Attempt, ModelContent, Orchestrator, Workflow, ANALYSIS_PROMPT,
     SOURCE_SUBJECT_PROMPT,
@@ -25,7 +26,6 @@ use crate::{
     },
 };
 use anyhow::{ensure, Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     cell::RefCell,
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -198,10 +198,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         #[cfg(test)]
         super::researched_fixture::record_ordinary_pdf_worker(&captured.index);
         let pdf = OriginalPdf::new(captured, deadline);
-        let encoded = images
-            .iter()
-            .map(|image| STANDARD.encode(image))
-            .collect::<Vec<_>>();
+        let encoded = encode_model_images(images);
         let prompt = format!(
             "{}\n{INTENT_INSTRUCTIONS}\nTranscribe and locate the request only. Use ANSWER: Deferred as the format placeholder. The actual answer is generated later from verified context.",
             ANALYSIS_PROMPT.replace(
@@ -214,8 +211,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         } else {
             format!("{prompt}\n{SOURCE_SUBJECT_PROMPT}")
         };
-        let proposed =
-            self.read_ordinary_pdf(attempt, &prepared, &pdf, &prompt, &encoded, false)?;
+        let proposed = self.read_ordinary_pdf(attempt, &prepared, &pdf, &prompt, encoded, false)?;
         if proposed.trim().eq_ignore_ascii_case("NONE") {
             pdf.require_current(&mut self.workflow)?;
             prepared.with_current(self.ledger.store(), || Ok(()))?;
@@ -230,7 +226,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let separator =
             Self::analysis_separator(&proposed).context("PDF question header absent")?;
         let analysis = reader_intent::parse_ordinary_pdf_header(&proposed[..separator])?;
-        let mut result = Self::parse_analysis_response(&proposed, images[0].clone())
+        let mut result = Self::parse_analysis_response(&proposed)
             .context("PDF question or selection unavailable")?;
         let bounds = result
             ._question_box
@@ -243,17 +239,13 @@ impl<M: LLMEngine> Orchestrator<M> {
 
         // The independent reader receives the acknowledged images again and
         // none of the first reply, geometry or web-intent claims.
-        let verification = attempt
-            .images(&self.ledger)?
-            .iter()
-            .map(|image| STANDARD.encode(image))
-            .collect::<Vec<_>>();
+        let verification = encode_model_images(attempt.images(&self.ledger)?);
         let verified = self.read_ordinary_pdf(
             attempt,
             &prepared,
             &pdf,
             &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
-            &verification,
+            verification,
             true,
         )?;
         let agreement = reader_intent::agree(
@@ -308,7 +300,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         prepared: &Captured,
         pdf: &OriginalPdf,
         prompt: &str,
-        images: &[String],
+        images: Vec<String>,
         verification: bool,
     ) -> Result<String> {
         let context = self
@@ -320,7 +312,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 crate::handwriting::runtime::researched_reader_payload(
                     prompt,
                     verification,
-                    images,
+                    &images,
                     context,
                 )
             })
@@ -331,10 +323,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             crate::handwriting::runtime::send_parts(model.0, &parts);
         } else {
             model.0.add_text_content(prompt);
-            for image in images {
+            for image in &images {
                 model.0.add_image_content(image);
             }
         }
+        drop(images);
         if !verification && attempt.source_target_enabled() {
             model
                 .0

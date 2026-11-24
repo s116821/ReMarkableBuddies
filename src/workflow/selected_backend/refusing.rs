@@ -111,6 +111,7 @@ impl DeviceBackend for RefusingBackend {
     #[cfg(all(test, target_os = "linux"))]
     fn wait_for_resident_reader(
         &mut self,
+        _timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<crate::device::request_input::ReleasedReaderInput> {
         progress()?;

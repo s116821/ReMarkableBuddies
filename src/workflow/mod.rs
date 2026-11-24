@@ -346,6 +346,7 @@ impl Workflow {
     pub(super) fn selected_resident_conversation(
         &mut self,
         acquired: &AcquiredEvidence,
+        writer_enabled: bool,
     ) -> Result<Option<resident_output::SelectedConversationRequest>> {
         if self
             .resident_source
@@ -356,6 +357,9 @@ impl Workflow {
                 resident_output::SelectedConversationRequest::BlankStart(None),
             ));
         }
+        if !writer_enabled {
+            return Ok(None);
+        }
         #[cfg(all(
             feature = "development-resident-bootstrap",
             feature = "development-input-diagnostics"
@@ -363,6 +367,17 @@ impl Workflow {
         if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) =
             (&self.resident_source, acquired)
         {
+            if let Some(request) = owner.installed_writer_for_page(
+                capture,
+                resident_supervisor::writer_request::SlotAction::Inspect,
+            )? {
+                return Ok(Some(
+                    resident_output::SelectedConversationRequest::WriterRefinement {
+                        request,
+                        require_current_draft: true,
+                    },
+                ));
+            }
             if let Some(request) = owner.take_installed_writer(capture)? {
                 return Ok(Some(request));
             }
@@ -777,6 +792,15 @@ impl Workflow {
     }
 
     fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
+        while !self.wait_for_idle_batch(deadline, None)? {}
+        Ok(())
+    }
+
+    pub(super) fn wait_for_idle_batch(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+        config: Option<&crate::config::Config>,
+    ) -> Result<bool> {
         #[cfg(target_os = "linux")]
         if self.resident_source.is_some() {
             anyhow::ensure!(
@@ -784,53 +808,45 @@ impl Workflow {
                 "Bounded legacy observation cannot select resident source"
             );
             self.invalidate_history();
-            loop {
-                anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
-                let health = self.service_health.as_mut().expect("selected health owner");
-                let owner = self.resident_source.as_mut().unwrap();
-                let released = match self
-                    .device
-                    .wait_for_resident_reader(&mut || owner.progress(health))
-                {
-                    Ok(released) => released,
-                    Err(error) => {
-                        owner.fail_idle(health);
-                        return Err(error);
-                    }
-                };
-                let result = owner.begin(released, health);
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(error) if owner.fatal() => return Err(error),
-                    Err(error) => {
-                        log::info!("Resident source handoff ended without acquisition: {error:#}");
-                        let _ = owner.finish(health);
-                        if owner.fatal() {
-                            return Err(error);
-                        }
+            anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
+            let health = self.service_health.as_mut().expect("selected health owner");
+            let owner = self.resident_source.as_mut().unwrap();
+            let writer_enabled = config.is_none_or(|settings| settings.admits_writer(false));
+            let released = match self
+                .device
+                .wait_for_resident_reader(writer_enabled, &mut || owner.progress(health))
+            {
+                Ok(released) => released,
+                Err(error) => {
+                    owner.fail_idle(health);
+                    return Err(error);
+                }
+            };
+            match owner.admits_release(&released, config) {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(error) => {
+                    owner.progress(health)?;
+                    log::warn!(
+                        "Could not select a pending Writer request for this gesture: {error:#}"
+                    );
+                    if config.is_some_and(|settings| !settings.reader_enabled()) {
+                        return Ok(false);
                     }
                 }
             }
-        }
-        while !self.wait_for_idle_batch(deadline, |_| true)? {}
-        Ok(())
-    }
-
-    pub(super) fn wait_for_idle_batch(
-        &mut self,
-        deadline: Option<std::time::Instant>,
-        admit_reader: impl FnOnce(&[crate::device::interaction::Interaction]) -> bool,
-    ) -> Result<bool> {
-        // Preserve the installed resident owner: its input/health handoff must
-        // never pass through the legacy device wait/preparation path.
-        #[cfg(target_os = "linux")]
-        if self.resident_source.is_some() {
-            anyhow::ensure!(
-                admit_reader(&[crate::device::interaction::Interaction::Reader]),
-                "Resident Reader dispatch disabled"
-            );
-            self.wait_for_reader_until(deadline)?;
-            return Ok(true);
+            return match owner.begin(released, health) {
+                Ok(()) => Ok(true),
+                Err(error) if owner.fatal() => Err(error),
+                Err(error) => {
+                    log::info!("Resident source handoff ended without acquisition: {error:#}");
+                    let _ = owner.finish(health);
+                    if owner.fatal() {
+                        return Err(error);
+                    }
+                    Ok(false)
+                }
+            };
         }
 
         use crate::device::interaction::Interaction;
@@ -857,7 +873,10 @@ impl Workflow {
         }
         if events.contains(&Interaction::Reader) {
             self.invalidate_history();
-            let admitted = admit_reader(&events);
+            let admitted = config.is_none_or(|settings| {
+                conversation_dispatch::RuntimeRoute::for_config(settings)
+                    .reader_trigger(settings, &events)
+            });
             if admitted {
                 self.prepare_reader_trigger()?;
             }

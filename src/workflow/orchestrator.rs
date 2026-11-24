@@ -1,11 +1,13 @@
 use anyhow::Result;
 use log::{debug, error, info};
 
+use super::conversation_dispatch::Dispatch;
 use super::reader_attempt::Attempt;
 use super::{indicator::Failure, AnswerPageType, ReturnOutcome, Workflow};
 use crate::analysis::{
     BoundingBox, ReaderSelection, ReaderSourceSubject, ReaderSubject, SelectionCenter,
 };
+use crate::config::Config;
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -77,7 +79,6 @@ struct AnalysisResult {
     answer: String,
     _question_box: Option<BoundingBox>,
     selection: ReaderSelection,
-    _screenshot_data: Vec<u8>, // PNG data for downstream processing (reserved for future use)
     target: Option<crate::conversation::target::Candidate>,
     about: Option<String>,
 }
@@ -86,6 +87,13 @@ struct MarkedFragment {
     text: String,
     region: [i32; 4],
     target: Option<crate::conversation::target::Candidate>,
+}
+
+fn encode_model_images(images: Vec<Vec<u8>>) -> Vec<String> {
+    images
+        .into_iter()
+        .map(|image| STANDARD.encode(image))
+        .collect()
 }
 
 /// High-level orchestrator for the complete workflow
@@ -212,13 +220,14 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
         let _run = crate::measurement::Run::new();
-        self.run_iteration_with_trigger(self.trigger_enabled, None)
+        self.run_iteration_with_trigger(self.trigger_enabled, None, None)
     }
 
     pub(super) fn run_iteration_with_trigger(
         &mut self,
         wait_for_trigger: bool,
-        local: Option<&super::conversation_dispatch::Dispatch<'_>>,
+        local: Option<&Dispatch<'_>>,
+        config: Option<&Config>,
     ) -> Result<()> {
         anyhow::ensure!(
             self.handwriting_operation.is_none(),
@@ -227,7 +236,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let result = (|| -> Result<()> {
             let _timing = crate::measurement::Span::new("reader.iteration");
             self.workflow.begin_iteration()?;
-            let result = self.run_iteration_inner(wait_for_trigger, local);
+            let result = self.run_iteration_inner(wait_for_trigger, local, config);
             // A failed input guard or service health cannot be cleared by cleanup.
             if self.workflow.runtime_failed() {
                 return result.and(Err(anyhow::anyhow!(
@@ -251,7 +260,8 @@ impl<M: LLMEngine> Orchestrator<M> {
     fn run_iteration_inner(
         &mut self,
         wait_for_trigger: bool,
-        local: Option<&super::conversation_dispatch::Dispatch<'_>>,
+        local: Option<&Dispatch<'_>>,
+        config: Option<&Config>,
     ) -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         let _ = local;
@@ -279,11 +289,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let acquired = self.workflow.acquire_reader_evidence()?;
         #[cfg(target_os = "linux")]
-        if let Some(request) = self.workflow.selected_resident_conversation(&acquired)? {
+        if let Some(request) = self.workflow.selected_resident_conversation(
+            &acquired,
+            config.is_none_or(|settings| settings.admits_writer(false)),
+        )? {
             use super::resident_output::SelectedConversationRequest;
             let super::AcquiredEvidence::ResidentHistorical(capture) = acquired else {
                 anyhow::bail!("selected conversation requires the retained native source");
             };
+            let writer_memory =
+                request.installed_writer_memory(self.ledger.store(), self.memory.as_ref())?;
             return match request {
                 SelectedConversationRequest::UnsupportedRegionalWriter => {
                     anyhow::bail!("fresh regional Writer requires the selected receiver")
@@ -300,8 +315,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                 SelectedConversationRequest::WriterRefinement {
                     request,
                     require_current_draft,
-                } => self.run_resident_writer_refinement(&request, &capture, require_current_draft),
+                } => self.run_resident_writer_refinement(
+                    &request,
+                    &capture,
+                    require_current_draft,
+                    writer_memory.as_deref(),
+                ),
             };
+        }
+        // A queued refinement can expire or belong to another open page.
+        // Finish the acquired request before admitting a new gesture.
+        if config.is_some_and(|settings| !settings.reader_enabled()) {
+            return Ok(());
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let observed_pdf = ordinary_pdf::classify(&mut self.workflow, observed_pdf?)?;
@@ -419,6 +444,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         request: &crate::writer::Request,
         capture: &crate::conversation::ResidentSourceCapture,
         require_current_draft: bool,
+        memory: Option<&dyn crate::memory::Provider>,
     ) -> Result<()> {
         use crate::{storage::Namespace, writer};
 
@@ -473,17 +499,53 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Writer target belongs to a different conversation"
         );
         if require_current_draft {
+            self.workflow.check_request_progress()?;
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            let resident = {
+                let resident =
+                    self.workflow.resident_source.as_mut().ok_or_else(|| {
+                        anyhow::anyhow!("installed Writer page owner unavailable")
+                    })?;
+                let health = self.workflow.service_health.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("installed Writer service health unavailable")
+                })?;
+                resident.require_writer_page_current(health)?;
+                resident
+            };
+            anyhow::ensure!(
+                self.ledger
+                    .expected(Namespace::Conversation, *conversation)?
+                    == expected,
+                "Writer conversation changed before claiming the current draft"
+            );
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            anyhow::ensure!(
+                resident
+                    .installed_writer_for_page(
+                        capture,
+                        super::resident_supervisor::writer_request::SlotAction::Claim
+                    )?
+                    .is_some(),
+                "Writer request changed or expired before claiming the current draft"
+            );
             info!(
                 "Installed Writer refinement accepted: {}",
                 request.operation()
             );
         }
         let mut produced = None;
-        let report = writer::run_owned(
+        let report = writer::run_owned_with_memory(
             &self.ledger,
             &mut self.llm,
             request,
             &self.personalization,
+            memory,
             &mut || self.workflow.check_request_progress().is_err(),
             writer::OwnedRun {
                 owner: &owner,
@@ -680,9 +742,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     fn run_prepared(&mut self, attempt: &mut Attempt) -> Result<()> {
         let personalization = self.personalization.clone();
         let images = self.prepare_model_images(attempt)?;
-        let screenshot_png_data = images[0].clone();
-        let encoded: Vec<String> = images.iter().map(|bytes| STANDARD.encode(bytes)).collect();
-        let screenshot_base64 = &encoded[0];
+        let encoded = encode_model_images(images);
         let confirmed_context = self
             .handwriting_operation
             .as_ref()
@@ -693,13 +753,8 @@ impl<M: LLMEngine> Orchestrator<M> {
         // - Detect outlined or highlighted region
         // - Extract question text
         // - Generate answer
-        let (result, marked) = self.analyze_and_answer(
-            attempt,
-            screenshot_base64,
-            screenshot_png_data,
-            &encoded[1..],
-            confirmed_context.as_deref(),
-        )?;
+        let (result, marked) =
+            self.analyze_and_answer(attempt, encoded, confirmed_context.as_deref())?;
 
         match result {
             None => {
@@ -738,11 +793,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             }
             Some(mut result) => {
                 // Re-read the acknowledged stored batch; never query the device again.
-                let verification: Vec<String> = attempt
-                    .images(&self.ledger)?
-                    .iter()
-                    .map(|bytes| STANDARD.encode(bytes))
-                    .collect();
+                let verification = encode_model_images(attempt.images(&self.ledger)?);
                 if let Some(failure) = self.verify_question(
                     attempt,
                     &result,
@@ -826,6 +877,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     memory_view = enriched?;
                     info!("Got verified Q&A with optional subject memory");
                 }
+                drop(verification);
                 let memory = self.memory.clone();
                 let mut prepared = None;
                 let mut publication_called = false;
@@ -1141,9 +1193,7 @@ impl<M: LLMEngine> Orchestrator<M> {
     fn analyze_and_answer(
         &mut self,
         attempt: &Attempt,
-        screenshot_base64: &str,
-        screenshot_png_data: Vec<u8>,
-        details: &[String],
+        images: Vec<String>,
         context: Option<&crate::handwriting::ConfirmedContext>,
     ) -> Result<(Option<AnalysisResult>, Option<MarkedFragment>)> {
         #[cfg(any(target_os = "linux", test))]
@@ -1161,10 +1211,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         };
         let payload = context
             .map(|context| {
-                let targets = std::iter::once(screenshot_base64.to_owned())
-                    .chain(details.iter().cloned())
-                    .collect::<Vec<_>>();
-                crate::handwriting::runtime::reader_payload(&prompt, false, &targets, context)
+                crate::handwriting::runtime::reader_payload(&prompt, false, &images, context)
             })
             .transpose()?;
         let owned = ModelContent(&mut self.llm);
@@ -1173,11 +1220,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             crate::handwriting::runtime::send_parts(owned.0, &parts);
         } else {
             owned.0.add_text_content(&prompt);
-            owned.0.add_image_content(screenshot_base64);
-            for detail in details {
-                owned.0.add_image_content(detail);
+            for image in &images {
+                owned.0.add_image_content(image);
             }
         }
+        drop(images);
 
         if attempt.source_target_enabled() {
             owned
@@ -1215,10 +1262,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         } else {
             Self::parse_marked_fragment(&response)
         };
-        Ok((
-            Self::parse_analysis_response(&response, screenshot_png_data),
-            marked,
-        ))
+        Ok((Self::parse_analysis_response(&response), marked))
     }
 
     fn analysis_separator(response: &str) -> Option<usize> {
@@ -1286,10 +1330,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         crate::conversation::target::parse_candidate(raw)
     }
 
-    fn parse_analysis_response(
-        response: &str,
-        screenshot_png_data: Vec<u8>,
-    ) -> Option<AnalysisResult> {
+    fn parse_analysis_response(response: &str) -> Option<AnalysisResult> {
         // Parse the response
         if response.trim().to_uppercase().starts_with("NONE") {
             return None;
@@ -1357,7 +1398,6 @@ impl<M: LLMEngine> Orchestrator<M> {
                 center: selection_center,
                 subject,
             },
-            _screenshot_data: screenshot_png_data,
             target: {
                 let mut fields = header
                     .lines()
@@ -1725,41 +1765,37 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     /// Run the main loop
     pub fn run_loop(&mut self) -> Result<()> {
-        self.run_loop_with_dispatch(None)
+        self.run_loop_with_settings(None, None)
     }
 
-    pub fn run_local_loop(
-        &mut self,
-        dispatch: super::conversation_dispatch::Dispatch<'_>,
-    ) -> Result<()> {
+    pub fn run_local_loop(&mut self, dispatch: Dispatch<'_>) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
         self.set_local_handwriting(&dispatch)?;
-        self.run_loop_with_dispatch(Some(dispatch))
+        self.run_loop_with_settings(Some(&dispatch), Some(dispatch.config))
     }
 
-    fn run_loop_with_dispatch(
+    pub fn run_reader_loop(&mut self, config: &Config) -> Result<()> {
+        anyhow::ensure!(
+            config.reader_enabled(),
+            "Reader route requires the Reader module"
+        );
+        self.run_loop_with_settings(None, Some(config))
+    }
+
+    fn run_loop_with_settings(
         &mut self,
-        dispatch: Option<super::conversation_dispatch::Dispatch<'_>>,
+        dispatch: Option<&Dispatch<'_>>,
+        config: Option<&Config>,
     ) -> Result<()> {
         info!("Starting Reader Buddy main loop");
 
         loop {
             let _run = crate::measurement::Run::new();
-            if self.trigger_enabled {
-                // History remains owned until another Reader trigger or an
-                // invalidating input. Do not begin an iteration while idle.
-                if let Some(dispatch) = &dispatch {
-                    if !self
-                        .workflow
-                        .wait_for_idle_batch(None, |events| dispatch.reader_trigger(events))?
-                    {
-                        continue;
-                    }
-                } else {
-                    self.workflow.wait_for_reader()?;
-                }
+            // History remains owned until another trigger or invalidating input.
+            if self.trigger_enabled && !self.workflow.wait_for_idle_batch(None, config)? {
+                continue;
             }
-            match self.run_iteration_with_trigger(false, dispatch.as_ref()) {
+            match self.run_iteration_with_trigger(false, dispatch, config) {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
@@ -1785,7 +1821,7 @@ mod tests {
         let marked = Orchestrator::<OpenAI>::parse_marked_fragment(response).unwrap();
         assert_eq!(marked.text, "G? unc. here");
         assert_eq!(marked.region, [12, 24, 48, 16]);
-        assert!(Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).is_none());
+        assert!(Orchestrator::<OpenAI>::parse_analysis_response(response).is_none());
         for (old, new) in [
             ("present", "absent"), // Printed punctuation alone remains absent.
             ("present", "unclear"),
@@ -1810,15 +1846,13 @@ mod tests {
     fn source_target_header_preserves_subject_dashes_and_refuses_duplicate_candidates() {
         let candidate = serde_json::json!({"subject":"A---B relation","geometry":{"components":[[[0,0],[1000000,0],[1000000,1000000],[0,1000000]]]},"understanding":{"status":"interpreted"}});
         let response=format!("QUESTION: Why?\nQUESTION_BOX: 1,2,3,4\nSELECTION_CENTER: 100,100\nTARGET_JSON: {candidate}\n---\nANSWER: Because.");
-        let result = Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(&response).unwrap();
         assert_eq!(result.target.unwrap().subject, "A---B relation");
         let duplicate = response.replace("\n---", &format!("\nTARGET_JSON: {candidate}\n---"));
-        assert!(
-            Orchestrator::<OpenAI>::parse_analysis_response(&duplicate, vec![])
-                .unwrap()
-                .target
-                .is_none()
-        );
+        assert!(Orchestrator::<OpenAI>::parse_analysis_response(&duplicate)
+            .unwrap()
+            .target
+            .is_none());
     }
     #[test]
     fn independent_transcription_requires_the_same_words() {
@@ -1873,14 +1907,14 @@ mod tests {
             "QUESTION: readable?\n---\nAn unlabelled answer",
             "QUESTION_BOX: 1,2,3,4\n---\nANSWER: 4",
         ] {
-            assert!(Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).is_none());
+            assert!(Orchestrator::<OpenAI>::parse_analysis_response(response).is_none());
         }
     }
 
     #[test]
     fn valid_indented_response_preserves_question_and_complete_answer() {
         let response = "  QUESTION: G unc.?\n  QUESTION_BOX: 1,2,3,4\n  SELECTION_CENTER: 384,512\n---\n  ANSWER: G = (6.674215 +/- 0.000092) * 10^-11 m^3 kg^-1 s^-2.\n---\nExtra answer line.";
-        let result = Orchestrator::<OpenAI>::parse_analysis_response(response, vec![]).unwrap();
+        let result = Orchestrator::<OpenAI>::parse_analysis_response(response).unwrap();
         assert_eq!(result.question, "G unc.?");
         assert!(result.answer.ends_with("---\nExtra answer line."));
         assert!(result._question_box.is_some());
@@ -1892,7 +1926,7 @@ mod tests {
         let first = "QUESTION: why?\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230";
         let parse = |field| {
             let response = format!("{first}\n{field}\n---\nANSWER: The result is 4.");
-            Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap()
+            Orchestrator::<OpenAI>::parse_analysis_response(&response).unwrap()
         };
         let result = parse("SELECTION_SUBJECT: 24 / 6");
         assert_eq!(result.question, "why?");
@@ -1939,8 +1973,7 @@ mod tests {
             ),
         ] {
             let response = format!("{header}{field}---\nANSWER: {answer}");
-            let result =
-                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            let result = Orchestrator::<OpenAI>::parse_analysis_response(&response).unwrap();
             assert_eq!(result.question, "why?");
             assert_eq!(result.answer, answer);
             assert_eq!(
@@ -1967,8 +2000,7 @@ mod tests {
                 literal,
             ),
         ] {
-            let result =
-                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).unwrap();
+            let result = Orchestrator::<OpenAI>::parse_analysis_response(&response).unwrap();
             assert_eq!(result.question, question);
             assert_eq!(result.answer, "Four.");
         }
@@ -1992,7 +2024,7 @@ mod tests {
                 "QUESTION: G unc.?\nQUESTION_BOX: 130,35,200,50\n{center}\n---\nANSWER: About 14 ppm."
             );
             assert!(
-                Orchestrator::<OpenAI>::parse_analysis_response(&response, vec![]).is_none(),
+                Orchestrator::<OpenAI>::parse_analysis_response(&response).is_none(),
                 "{center}"
             );
         }
