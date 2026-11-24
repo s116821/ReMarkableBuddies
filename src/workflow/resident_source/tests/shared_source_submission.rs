@@ -237,7 +237,10 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             None
         };
         let owner = workflow.resident_source.as_mut().unwrap();
-        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?;
         owner.session = Some(Box::new(OwnedSession {
             runtime,
             _fixture: native,
