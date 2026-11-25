@@ -108,7 +108,9 @@ inserted_target = None
 
 def current_source_facts():
     if inserted_target is not None:
-        return source_document + inserted_target + struct.pack(">H", 2) + source_page + inserted_target
+        successor_index = source_order.index(source_page) + 1
+        order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
+        return source_document + inserted_target + struct.pack(">H", len(order)) + b"".join(order)
     if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages") and (root.parent / "successor-position").is_file():
         return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"

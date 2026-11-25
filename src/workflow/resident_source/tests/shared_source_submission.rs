@@ -15,6 +15,12 @@ const CLARIFICATION: &str = "Should I save a note from this page to your configu
 const SAVED: &str = "Saved to your configured note destination.";
 const UNCERTAIN: &str =
     "The destination may have received the note. Check the destination before retrying.";
+const SAVE_NOTEBOOK: &str = "Save a note from this entire notebook.";
+const SEPARATE_NOTEBOOK: &str = "Save a separate note from this entire notebook.";
+
+fn complete_notebook_draft(revision: &str) -> String {
+    format!("# Notebook note\n\nThe first and last pages each give an example. {revision}")
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Save {
@@ -142,9 +148,9 @@ impl crate::LLMEngine for SubmissionModel {
         self.steps.set(step + 1);
         if let Submission::SaveNotebook(save) = self.submission {
             let request = if save == Save::Separate {
-                "Save a separate note from this entire notebook."
+                SEPARATE_NOTEBOOK
             } else {
-                "Save a note from this entire notebook."
+                SAVE_NOTEBOOK
             };
             return match step {
                 0 => {
@@ -180,9 +186,8 @@ impl crate::LLMEngine for SubmissionModel {
                 }
                 3 => {
                     assert!(self.images.is_empty());
-                    Ok(format!(
-                        "# Notebook note\n\nThe first and last pages each give an example. {}",
-                        self.last_visible_text.as_deref().unwrap()
+                    Ok(complete_notebook_draft(
+                        self.last_visible_text.as_deref().unwrap(),
                     ))
                 }
                 _ => panic!("unexpected whole-notebook Writer stage"),
@@ -460,11 +465,10 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
         templates.join("Blank.svg"),
         br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><rect width="100%" height="100%" fill="#fff"/></svg>"##,
     )?;
+    let original_scene = include_bytes!("../../../../tests/fixtures/notebook-ink/pens-small.rm");
+    let changed_scene = include_bytes!("../../../../tests/fixtures/native-history/applied.rm");
     for page in pages {
-        private_write(
-            saved_pages.join(format!("{page}.rm")),
-            include_bytes!("../../../../tests/fixtures/notebook-ink/pens-small.rm"),
-        )?;
+        private_write(saved_pages.join(format!("{page}.rm")), original_scene)?;
     }
 
     let config: crate::config::Config = serde_json::from_value(serde_json::json!({
@@ -487,21 +491,42 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
     let destination = Arc::new(crate::writer_flow::tests::Destination::default());
     dispatch.test_note_destination = Some(destination.clone());
 
-    for (index, (save, writes, notes)) in [
-        (Save::Explicit, 1, 1),
-        (Save::Update, 2, 1),
-        (Save::Separate, 3, 2),
-        (Save::Explicit, 4, 2),
-        (Save::Update, 4, 2),
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ResultPath {
+        RefusedDisplay,
+        LostAcknowledgment,
+        ChangedOriginal,
+        Displayed,
+    }
+    use ResultPath::*;
+
+    for (index, (save, path, writes, notes)) in [
+        (Save::Explicit, RefusedDisplay, 1, 1),
+        (Save::Update, RefusedDisplay, 2, 1),
+        (Save::Separate, RefusedDisplay, 3, 2),
+        (Save::Explicit, LostAcknowledgment, 4, 2),
+        (Save::Update, RefusedDisplay, 4, 2),
+        (Save::Separate, ChangedOriginal, 4, 2),
+        (Save::Separate, Displayed, 5, 3),
     ]
     .into_iter()
     .enumerate()
     {
-        let mode = "reconnect-source-handoff-text-refusal";
+        let mode = if path == Displayed {
+            "reconnect-source-handoff-writer-insert"
+        } else {
+            "reconnect-source-handoff-text-refusal"
+        };
         let (mut workflow, events, _notify) =
             workflow_with_store(mode, vec![], Duration::ZERO, &store);
         let native = Fixture::new();
-        native.declare_source(document, pages[index % 2]);
+        // The fixture can insert directly after the last original without navigating.
+        let current = if path == Displayed {
+            pages[1]
+        } else {
+            pages[index % 2]
+        };
+        native.declare_source(document, current);
         native.declare_source_order(&pages);
         let position = native.successor_position();
         let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
@@ -520,24 +545,42 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
             writer_slot_fault: false,
             refinement_slot: None,
         }));
+        let conversation = Rc::new(Cell::new(None));
+        let written = Rc::new(RefCell::new(Vec::new()));
         workflow.device = Box::new(
             RefusingBackend::with_resident_releases(vec![released(Instant::now())])
                 .with_test_output(Box::new(RecognitionProbe {
-                    refuse_writer_text: true,
+                    conversation: conversation.clone(),
+                    confirmed_source: path == Displayed,
+                    refuse_writer_text: matches!(path, RefusedDisplay | LostAcknowledgment),
+                    insertion_source: (path == Displayed).then_some(current),
+                    rendered_text: Some(written.clone()),
                     ..RecognitionProbe::default()
                 })),
         );
         let steps = Rc::new(Cell::new(0));
+        let revision = format!("Draft revision {}.", index + 1);
+        let draft = complete_notebook_draft(&revision);
         let model = SubmissionModel {
             submission: Submission::SaveNotebook(save),
-            last_visible_text: Some(format!("Draft revision {}.", index + 1)),
+            last_visible_text: Some(revision),
             steps: steps.clone(),
             source: Rc::new(RefCell::new(None)),
             images: vec![],
             text: vec![],
         };
-        if index == 3 {
+        let before = destination.counts();
+        let off_screen = saved_pages.join(format!("{}.rm", pages[(index + 1) % 2]));
+        if path == LostAcknowledgment {
             destination.lose_next_ack();
+        }
+        if path == ChangedOriginal {
+            let off_screen = off_screen.clone();
+            destination.on_next_discovery(move || {
+                // Change a different original after the draft is saved, leaving
+                // its identity and the native page order intact.
+                fs::write(off_screen, changed_scene).unwrap();
+            });
         }
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -545,14 +588,62 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
             super::original_pdf::saved_notebook::with_fixture_paths(&root, &templates, || {
                 service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))
             });
-        let refusal = result.unwrap_err();
-        assert!(
-            refusal.to_string().contains("Writer draft cannot be typed"),
-            "{refusal:#}"
-        );
+        if path == Displayed {
+            result?;
+            let response = format!("{SAVED}\n\n{}", draft.strip_prefix("# ").unwrap());
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[crate::workflow::resident_output::format_exchange(
+                    SEPARATE_NOTEBOOK,
+                    response,
+                )]
+            );
+        } else {
+            let refusal = result.unwrap_err();
+            if path == ChangedOriginal {
+                assert_eq!(
+                    refusal.to_string(),
+                    "saved notebook changed before placement"
+                );
+                assert_eq!(destination.counts().1, before.1 + 1);
+                assert_eq!(fs::read(&off_screen)?, changed_scene);
+                fs::write(&off_screen, original_scene)?;
+            } else {
+                assert!(
+                    refusal.to_string().contains("Writer draft cannot be typed"),
+                    "{refusal:#}"
+                );
+            }
+            assert!(written.borrow().is_empty());
+        }
+        let drafts = store.snapshot_heads_matching(&[Namespace::Conversation], 8, |entry| {
+            entry.payload["record"]["text"].as_str() == Some(&draft)
+        })?;
+        let [head] = drafts.as_slice() else {
+            anyhow::bail!("expected exactly one retained draft");
+        };
+        let Record::Turn(turn) = Ledger::decode(head)? else {
+            anyhow::bail!("expected a retained Writer draft");
+        };
+        assert_eq!(turn.mode, Mode::Writer);
+        assert_eq!(turn.outcome, Outcome::Generated);
+        if matches!(path, ChangedOriginal | Displayed) {
+            let correlation = crate::writer::stage(turn.exchange, "separate-whole-notebook-note");
+            let export = ledger
+                .export_association(turn.conversation, correlation)?
+                .context("expected a journal entry for this draft's export")?;
+            if path == Displayed {
+                assert_eq!(conversation.get(), Some(turn.conversation));
+                assert_eq!(export.outcome, Outcome::Completed);
+                assert!(export.native_note.is_some());
+            } else {
+                assert_eq!(export.outcome, Outcome::Canceled);
+                assert!(export.attempt.is_some_and(|attempt| attempt.no_send));
+            }
+        }
         assert_eq!(steps.get(), 4);
         assert!(!position.exists());
-        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(events.borrow().contains(&"insert"), path == Displayed);
         assert_eq!(destination.counts().2, writes);
         assert_eq!(destination.remote_note_count(), notes);
     }

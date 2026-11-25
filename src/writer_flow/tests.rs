@@ -192,6 +192,10 @@ impl Destination {
         self.0.lock().unwrap().lose_ack = true;
     }
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn on_next_discovery(&self, hook: impl FnOnce() + Send + 'static) {
+        self.0.lock().unwrap().discovery_hook = Some(Box::new(hook));
+    }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn remote_note_count(&self) -> usize {
         self.0.lock().unwrap().notes.len()
     }
