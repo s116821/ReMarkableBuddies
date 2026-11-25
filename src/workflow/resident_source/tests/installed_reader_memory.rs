@@ -610,7 +610,7 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         .document()
         .units
         .iter()
-        .any(|unit| { unit.page == Some(2) && unit.text.contains("Last page.") }));
+        .any(|unit| { unit.page == Some(1) && unit.text.contains("First page.") }));
 
     use crate::workflow::selected_backend::RefusingBackend;
     use std::{
@@ -638,7 +638,10 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
     let (mut workflow, events, _) =
         workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, store);
     let native = Fixture::new();
-    native.declare_source(document, pages[0]);
+    // Start from the last original so the fixture can open an adjacent Buddy
+    // page without simulating navigation across an existing right neighbor.
+    let source_page = *pages.last().context("Expected a source page")?;
+    native.declare_source(document, source_page);
     native.declare_source_order(pages);
     let (opened, _) = native.opened_page_probe();
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
@@ -661,7 +664,7 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
     let facts = ReaderFacts::new(
         remarkable_open_sdk::PageKey {
             document: sdk_id(document),
-            page: sdk_id(pages[0]),
+            page: sdk_id(source_page),
         },
         pages.iter().copied().map(sdk_id).collect(),
     )
@@ -689,7 +692,7 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         parts: vec![],
         images: vec![],
         calls: calls.clone(),
-        question: "What does the last page say?",
+        question: "What does the first page say?",
         intent: json!({"version":1,"intent":"no-restriction"}),
         case: Case::Disabled,
     };
@@ -718,12 +721,12 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
     assert_eq!(request["source"]["kind"], "captured-page");
     assert_eq!(
         request["source"]["source_record"]["record"]["before"]["page"],
-        json!(pages[0])
+        json!(source_page)
     );
     assert!(request["retrieval"].is_null());
     assert!(!answer.1.is_empty());
     assert!(answer.1.iter().all(|image| verification.1.contains(image)));
-    assert!(answer.0.iter().all(|part| !part.contains("Last page.")));
+    assert!(answer.0.iter().all(|part| !part.contains("First page.")));
     assert!(answer
         .0
         .iter()
