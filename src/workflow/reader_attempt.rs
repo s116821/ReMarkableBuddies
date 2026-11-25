@@ -973,8 +973,9 @@ impl Attempt {
         ledger: &Ledger,
         text: &str,
         candidate: Option<&crate::conversation::target::Candidate>,
-        selection: &crate::analysis::ReaderSelection,
+        selection: Option<&crate::analysis::ReaderSelection>,
         prepared: &crate::storage::captured::Captured,
+        marked_region: Option<[i32; 4]>,
     ) -> Result<crate::conversation::evidence::FollowupRequestHead> {
         let mut user = self.user.clone();
         user.text = Some(text.into());
@@ -990,6 +991,11 @@ impl Attempt {
             .1
             .revision;
         let expected_user = ExpectedHeads([user_revision].into_iter().collect());
+        let marked = marked_region
+            .map(|region| {
+                ledger.prepare_installed_marked_question(&user, prepared, self.evidence, region)
+            })
+            .transpose()?;
         let root = self
             .prepared_pdf_root
             .context("Ordinary PDF prepared root absent")?;
@@ -1006,8 +1012,9 @@ impl Attempt {
                 user.clone(),
                 frame,
                 candidate.unwrap_or(&unresolved),
-                Some(selection.center),
+                selection.map(|selection| selection.center),
                 Some(prepared),
+                marked,
             )?
         } else {
             ledger.interpret_captured_pdf(
@@ -1017,6 +1024,7 @@ impl Attempt {
                 self.evidence,
                 selection,
                 prepared,
+                marked,
             )?
         };
         let head = crate::conversation::evidence::FollowupRequestHead::from_pdf_interpretation(

@@ -11,6 +11,7 @@ use std::{
 };
 
 const QUESTION: &str = "Which compass should I use?";
+const MARKED: &str = "G? unc. here";
 const NOTEBOOK: &str = "The brass compass is for this notebook.";
 const OTHER: &str = "The plastic compass is for the other notebook.";
 const GLOBAL: &str = "Check the compass before departure.";
@@ -22,6 +23,21 @@ enum Case {
     Disabled,
     Unavailable,
     StaleRequest,
+    MarkedOnly,
+    MarkedUnavailable,
+}
+
+impl Case {
+    fn has_mark(self) -> bool {
+        matches!(
+            self,
+            Self::Required | Self::MarkedOnly | Self::MarkedUnavailable
+        )
+    }
+
+    fn question_only(self) -> bool {
+        matches!(self, Self::MarkedOnly | Self::MarkedUnavailable)
+    }
 }
 
 type ModelFrames = Vec<(Vec<String>, Vec<String>)>;
@@ -83,10 +99,25 @@ impl crate::LLMEngine for ReaderModel {
                 self.question
             ),
             2 if legacy_verification => format!("TRANSCRIPTION: {}", self.question),
-            1 => format!(
-                "QUESTION: {}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: compass\nREQUEST_WEB_JSON: {}\n---\nANSWER: Deferred",
-                self.question, self.intent
-            ),
+            1 if self.case == Case::MarkedOnly => {
+                assert!(self.parts[0].contains("HANDWRITTEN_QUESTION_MARK:"));
+                format!(
+                    "QUESTION: {}\nQUESTION_BOX: 130,35,200,50\nHANDWRITTEN_QUESTION_MARK: present\n---\nANSWER: NONE",
+                    self.question
+                )
+            }
+            1 => {
+                let mark = if self.case.has_mark() {
+                    assert!(self.parts[0].contains("HANDWRITTEN_QUESTION_MARK:"));
+                    "\nHANDWRITTEN_QUESTION_MARK: present"
+                } else {
+                    ""
+                };
+                format!(
+                    "QUESTION: {}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: compass\nREQUEST_WEB_JSON: {}{mark}\n---\nANSWER: Deferred",
+                    self.question, self.intent
+                )
+            }
             2 => json!({"version":1, "transcription":self.question, "request_web":self.intent}).to_string(),
             3 if self.case == Case::Required => json!({
                 "status":"answered", "text":format!("{NOTEBOOK} [R1]"), "citations":["R1"]
@@ -176,6 +207,8 @@ fn installed_reader_uses_only_its_notebook_and_global_memory_after_transcription
         Case::Disabled,
         Case::Unavailable,
         Case::StaleRequest,
+        Case::MarkedOnly,
+        Case::MarkedUnavailable,
     ] {
         check_captured_page(case)
             .with_context(|| format!("Captured notebook Reader case {case:?}"))?;
@@ -375,12 +408,17 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
 
 fn check_captured_page(case: Case) -> Result<()> {
     use crate::conversation::Role;
-    let mode = "reconnect-source-handoff";
+    let mode = if case.question_only() {
+        "reconnect-source-handoff-writer-insert"
+    } else {
+        "reconnect-source-handoff"
+    };
     let (mut workflow, store, base, events, _notify) =
         workflow(mode, vec![released(Instant::now())], Duration::ZERO);
     let document = ConversationId::new_v4();
+    let page = ConversationId::new_v4();
     let native = Fixture::new();
-    native.declare_source(document, ConversationId::new_v4());
+    native.declare_source(document, page);
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
     let owner = workflow.resident_source.as_mut().unwrap();
     owner.selection = InstalledReaderSelection::fixture_with_installed_output();
@@ -395,6 +433,19 @@ fn check_captured_page(case: Case) -> Result<()> {
         refinement_slot: None,
     }));
 
+    let rendered_text = Rc::new(RefCell::new(vec![]));
+    if case.question_only() {
+        use crate::workflow::selected_backend::RefusingBackend;
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(RecognitionProbe {
+                    confirmed_source: true,
+                    insertion_source: Some(page),
+                    rendered_text: Some(rendered_text.clone()),
+                    ..RecognitionProbe::default()
+                })),
+        );
+    }
     let profile = ConversationId::new_v4();
     seed_memory(&store, profile, document)?;
     let mut config = crate::config::Config {
@@ -427,7 +478,12 @@ fn check_captured_page(case: Case) -> Result<()> {
             json!({"version":1, "intent":"no-internet", "quote":"Skip the internet"}),
         )
     } else {
-        (QUESTION, json!({"version":1, "intent":"no-restriction"}))
+        let question = if case.question_only() {
+            MARKED
+        } else {
+            QUESTION
+        };
+        (question, json!({"version":1, "intent":"no-restriction"}))
     };
     let calls = Rc::new(RefCell::new(vec![]));
     let model = ReaderModel {
@@ -442,10 +498,13 @@ fn check_captured_page(case: Case) -> Result<()> {
     let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
     let result = reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config));
-    let refused = matches!(case, Case::Unavailable | Case::StaleRequest);
+    let refused = matches!(
+        case,
+        Case::Unavailable | Case::MarkedUnavailable | Case::StaleRequest
+    );
     if refused {
         let error = result.expect_err("Expected refusal before answering");
-        if case == Case::Unavailable {
+        if matches!(case, Case::Unavailable | Case::MarkedUnavailable) {
             assert!(
                 error.is::<crate::conversation::receiving::memory::research::ResearchRefusal>(),
                 "{case:?}: {error:#}"
@@ -466,13 +525,19 @@ fn check_captured_page(case: Case) -> Result<()> {
         .transpose()?;
     assert_eq!(fixture.constructions(), usize::from(case == Case::Required));
     let calls = calls.borrow();
-    assert_eq!(calls.len(), if refused { 2 } else { 3 });
-    for (parts, _) in &calls[..2] {
+    let readings = if case == Case::MarkedOnly { 1 } else { 2 };
+    assert_eq!(
+        calls.len(),
+        readings + usize::from(!refused && !case.question_only())
+    );
+    for (parts, _) in &calls[..readings] {
         assert!(parts.iter().all(|part| ![NOTEBOOK, OTHER, GLOBAL]
             .iter()
             .any(|fact| part.contains(*fact))));
     }
-    assert_eq!(calls[0].1, calls[1].1);
+    if readings == 2 {
+        assert_eq!(calls[0].1, calls[1].1);
+    }
     if let Some((parts, images)) = calls.get(2) {
         assert!(!images.is_empty());
         let answer: Value = serde_json::from_str(&parts[1])?;
@@ -525,7 +590,36 @@ fn check_captured_page(case: Case) -> Result<()> {
         Record::Turn(t) if t.role == Role::Assistant => t.text.as_deref(),
         _ => None,
     });
-    if refused {
+    let marks = turns
+        .iter()
+        .filter_map(|record| match record {
+            Record::Receipt(receipt) => receipt.marked_question.as_deref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(marks.len(), usize::from(case.has_mark()));
+    if let Some(mark) = marks.first() {
+        let mark = serde_json::to_value(mark)?;
+        assert_eq!(mark["capture"]["record"], json!(capture.id));
+        assert_eq!(mark["interpreted_turn"]["record"], json!(capture.turn));
+        assert_eq!(mark["source"]["document"], json!(document));
+        assert_eq!(mark["source"]["page"], json!(page));
+        assert_eq!(mark["region"], json!([130, 35, 200, 50]));
+        assert_eq!(mark["overview"]["sha256"], capture.images[0].media.sha256);
+    }
+
+    if case.question_only() {
+        assert!(assistant.is_none());
+        assert_eq!(*rendered_text.borrow(), [format!("Q: {MARKED}\n")]);
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| **event == "insert")
+                .count(),
+            1
+        );
+    } else if refused {
         assert!(assistant.is_none());
         assert!(!events.borrow().contains(&"insert"));
         if case == Case::Unavailable {

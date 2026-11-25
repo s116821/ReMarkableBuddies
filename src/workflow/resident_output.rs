@@ -86,12 +86,17 @@ pub enum ReaderAbout<'a> {
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
     WriterSourceDraft(&'a str),
+    ReaderQuestion(&'a str),
     Reader {
         question: &'a str,
         answer: &'a str,
         center: crate::analysis::SelectionCenter,
         about: Option<ReaderAbout<'a>>,
     },
+}
+
+pub(super) fn format_question(question: &str) -> String {
+    format!("Q: {question}\n")
 }
 
 pub(super) fn format_exchange(request: &str, response: impl std::fmt::Display) -> String {
@@ -210,6 +215,9 @@ pub trait ResidentRenderer {
         match text {
             ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
                 self.render(text, lease)
+            }
+            ResidentOutputText::ReaderQuestion(question) => {
+                self.render(&format_question(question), lease)
             }
             ResidentOutputText::Reader {
                 question,

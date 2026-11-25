@@ -1373,6 +1373,7 @@ impl ResidentSourceOwner {
         let reader_boot = matches!(
             text,
             super::resident_output::ResidentOutputText::Reader { .. }
+                | super::resident_output::ResidentOutputText::ReaderQuestion(_)
         )
         .then_some(runtime.boot);
         if let Some(target) = unsettled_output_insertion(ledger, &fresh, conversation, reader_boot)?

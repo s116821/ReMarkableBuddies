@@ -25,7 +25,7 @@ pub struct MarkedQuestion {
     region: [i32; 4],
 }
 
-pub(super) struct PreparedMark {
+pub(crate) struct PreparedMark {
     capture: RecordRef,
     source: SourceObservation,
     overview: Media,
@@ -486,31 +486,55 @@ pub(crate) fn modeled_source(
     }
 }
 
-fn capture_overview(capture: Record, user: &Turn, source: &SourceObservation) -> Result<Media> {
-    let Record::Capture(capture) = capture else {
-        anyhow::bail!("capture cannot establish marked question source identity");
+fn capture_overview(capture: Record, user: &Turn) -> Result<(SourceObservation, Media)> {
+    let (id, turn, conversation, source, overview) = match capture {
+        Record::Capture(capture) => {
+            let overview = capture
+                .facts
+                .images
+                .first()
+                .context("captured overview absent")?;
+            ensure!(
+                overview.role == super::capture_facts::Role::Overview
+                    && overview.dimensions == [768, 1024]
+                    && overview.full_frame_of(&capture.facts.native_parent),
+                "marked question modeled overview differs"
+            );
+            (
+                capture.id,
+                capture.turn,
+                capture.conversation,
+                modeled_source(&capture.facts),
+                overview.media(),
+            )
+        }
+        Record::ResidentCapture(capture) => {
+            capture.validate()?;
+            let overview = capture.images.first().context("resident overview absent")?;
+            let [width, height] = capture.original_dimensions;
+            ensure!(
+                overview.provider_ordinal == 0
+                    && overview.dimensions == [768, 1024]
+                    && overview.parent_crop == [0, 0, width, height],
+                "marked question resident overview differs"
+            );
+            (
+                capture.id,
+                capture.turn,
+                capture.conversation,
+                capture
+                    .correspondence
+                    .source_observation(&capture.procedure),
+                overview.media.clone(),
+            )
+        }
+        _ => anyhow::bail!("capture cannot establish marked question source identity"),
     };
     ensure!(
-        user.id == capture.turn
-            && user.conversation == capture.conversation
-            && user.sources.contains(&capture.id),
+        user.id == turn && user.conversation == conversation && user.sources.contains(&id),
         "marked question capture link differs"
     );
-    ensure!(
-        modeled_source(&capture.facts) == *source,
-        "marked question capture source differs"
-    );
-    let overview = capture
-        .facts
-        .images
-        .first()
-        .context("captured overview absent")?;
-    ensure!(
-        overview.role == super::capture_facts::Role::Overview
-            && overview.dimensions == [768, 1024]
-            && overview.full_frame_of(&capture.facts.native_parent)
-    );
-    Ok(overview.media())
+    Ok((source, overview))
 }
 
 fn checked_overview(ledger: &Ledger, overview: &Media) -> Result<()> {
@@ -543,12 +567,51 @@ impl Ledger {
         region: [i32; 4],
         target: Option<(&super::target_source::SourceFrame, &target::Candidate)>,
     ) -> Result<(super::WriteResult, FreshMarkedQuestion)> {
-        self.complete_store()?;
         ensure!(!operation.is_nil(), "marked question operation absent");
+        let (expected_turn, mark) =
+            self.prepare_marked_question(&turn, captured, capture, region, Some(source))?;
+        let (result, fresh) = self.advance_with_capture(
+            operation,
+            expected_root,
+            expected_turn,
+            turn,
+            None,
+            target,
+            None,
+            Some(captured),
+            Some(mark),
+            None,
+        )?;
+        Ok((
+            result,
+            fresh.context("fresh marked question continuation absent")?,
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn prepare_installed_marked_question(
+        &self,
+        turn: &Turn,
+        captured: &Captured,
+        capture: Uuid,
+        region: [i32; 4],
+    ) -> Result<PreparedMark> {
+        self.prepare_marked_question(turn, captured, capture, region, None)
+            .map(|(_, mark)| mark)
+    }
+
+    fn prepare_marked_question(
+        &self,
+        turn: &Turn,
+        captured: &Captured,
+        capture: Uuid,
+        region: [i32; 4],
+        expected_source: Option<&SourceObservation>,
+    ) -> Result<(ExpectedHeads, PreparedMark)> {
+        self.complete_store()?;
         let mode = self.store.sync_mode_snapshot()?;
         let ordinary = self.store.ordinary_mode_lease(&mode.token)?;
         checked_region(region)?;
-        Self::validate_observation(source)?;
         ensure!(
             turn.role == Role::User
                 && turn.mode == Mode::Reader
@@ -587,7 +650,12 @@ impl Ledger {
                 envelope.namespace == Namespace::Source && envelope.record_id == capture
             })
             .context("marked question capture absent")?;
-        let overview = capture_overview(Self::decode(evidence)?, &turn, source)?;
+        let (source, overview) = capture_overview(Self::decode(evidence)?, turn)?;
+        Self::validate_observation(&source)?;
+        ensure!(
+            expected_source.is_none_or(|expected| expected == &source),
+            "marked question capture source differs"
+        );
         ensure!(
             evidence.media_descriptors.contains(&overview),
             "marked question overview absent from capture media"
@@ -595,28 +663,15 @@ impl Ledger {
         checked_overview(self, &overview)?;
         let mark = PreparedMark {
             capture: reference.clone(),
-            source: source.clone(),
+            source,
             overview,
             region,
             ordinary,
         };
         // Keep the prepared turn's exact capture relation and CAS its revision.
-        let expected_turn = ExpectedHeads([original.revision_id].into_iter().collect());
-        let (result, fresh) = self.advance_with_capture(
-            operation,
-            expected_root,
-            expected_turn,
-            turn,
-            None,
-            target,
-            None,
-            Some(captured),
-            Some(mark),
-            None,
-        )?;
         Ok((
-            result,
-            fresh.context("fresh marked question continuation absent")?,
+            ExpectedHeads([original.revision_id].into_iter().collect()),
+            mark,
         ))
     }
 
@@ -652,9 +707,18 @@ impl Ledger {
                     .is_some_and(|text| !text.trim().is_empty()),
             "invalid marked question user"
         );
+        let capture = self.store.resolve_record(&mark.capture, budget)?;
+        let capture_record = Self::decode(&capture)?;
+        // An installed interpretation can also advance its resident capture
+        // and the three source-target records in the same publication.
+        let limit = if matches!(capture_record, Record::ResidentCapture(_)) {
+            7
+        } else {
+            6
+        };
         let members = self
             .store
-            .original_transaction(envelope.revision_id, 6, budget)?;
+            .original_transaction(envelope.revision_id, limit, budget)?;
         ensure!(
             members.contains(envelope),
             "original marked question receipt differs"
@@ -683,14 +747,13 @@ impl Ledger {
             roots == 1 && records == acknowledged && members.contains(&interpreted),
             "marked question transaction membership differs"
         );
-        let capture = self.store.resolve_record(&mark.capture, budget)?;
         ensure!(
             capture.media_descriptors.contains(&mark.overview),
             "marked question overview absent from capture media"
         );
-        let overview = capture_overview(Self::decode(&capture)?, &user, &mark.source)?;
+        let (source, overview) = capture_overview(capture_record, &user)?;
         ensure!(
-            overview == mark.overview,
+            source == mark.source && overview == mark.overview,
             "marked question overview differs"
         );
         budget.charge(overview.bytes)?;
