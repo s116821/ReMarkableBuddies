@@ -104,7 +104,6 @@ impl ResidentSourceCapture {
         self.correspondence.expected.document
     }
 
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn page(&self) -> Uuid {
         self.correspondence.expected.page
     }

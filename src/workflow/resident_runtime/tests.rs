@@ -36,6 +36,11 @@ impl Fixture {
         self.0.join("successor-position")
     }
 
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_research_successor(&self, page: StoreUuid) {
+        fs::write(self.0.join("research-successor"), page.to_string()).unwrap();
+    }
+
     fn store(&self) -> Arc<Store> {
         Arc::new(
             Store::open(StorePaths {

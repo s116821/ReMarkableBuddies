@@ -356,7 +356,7 @@ pub struct ContextBudget {
     /// Supplied by the provider adapter; None refuses provider context assembly.
     pub provider_token_limit: Option<usize>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ContextView {
     pub target_uses: Vec<super::target::TargetUse>,
     pub region_sources: Vec<super::target::RegionSource>,

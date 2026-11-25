@@ -528,6 +528,29 @@ impl Ledger {
                         )?);
                     }
                 }
+                RequestSource::CapturedPage { source_record, .. } => {
+                    ensure!(
+                        retrieval.is_none() && !allow_notebook,
+                        "captured-page Reader request has an unexpected index"
+                    );
+                    if let Some(operation) = anchor {
+                        let pinned = records.iter().find_map(|record| match record {
+                            Record::RequestEvidence(evidence)
+                                if evidence.operation == operation =>
+                            {
+                                evidence.sources.iter().find(|r| r.record == *source_record)
+                            }
+                            _ => None,
+                        });
+                        ensure!(
+                            pinned.is_some_and(|reference| capture
+                                .records
+                                .iter()
+                                .any(|(_, r)| r == reference)),
+                            SourceResolutionRefusal::ChangedSource
+                        );
+                    }
+                }
                 RequestSource::NoDocument => {
                     ensure!(
                         retrieval.is_none() && !allow_notebook,
@@ -641,7 +664,7 @@ impl Ledger {
             .chain(std::iter::once(context.request()))
             .flat_map(|t| t.sources.iter().copied())
             .collect::<BTreeSet<_>>();
-        if let SourceAssociation::Original { source_record, .. } = context.source() {
+        if let Some(source_record) = context.source().source_record() {
             needed.insert(source_id(source_record).context("original source absent")?);
         }
         let root = capture

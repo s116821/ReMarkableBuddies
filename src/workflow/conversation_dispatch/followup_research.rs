@@ -9,6 +9,7 @@ use crate::{
                 research::{
                     openai::{OpenAIWebResearch, TransportOptions},
                     ResearchDirective, ResearchInput, ResearchOptions, ResearchPolicy,
+                    ResearchRefusal,
                 },
                 CombinedBudget,
             },
@@ -36,6 +37,7 @@ pub(in crate::workflow) struct ResearchRequest<'a> {
     pub(in crate::workflow) directive: ResearchDirective,
     pub(in crate::workflow) search: Option<OrdinarySearch<'a>>,
     pub(in crate::workflow) deadline: Instant,
+    pub(in crate::workflow) original_image_only: bool,
 }
 
 impl<'a> FollowupResearch<'a> {
@@ -55,6 +57,7 @@ impl<'a> FollowupResearch<'a> {
                 directive,
                 search,
                 deadline,
+                original_image_only: false,
             },
         }
     }
@@ -136,7 +139,7 @@ pub(in crate::workflow) fn answer(
     let preference = config.personalization_snapshot()?;
     let count = |text: &str| Ok(text.len());
     check()?;
-    let images = FollowupAttachments::acquire(ledger, &context)?;
+    let images = FollowupAttachments::acquire(ledger, &context, research.original_image_only)?;
     let memory = memory
         .map(|provider| {
             Ok::<_, anyhow::Error>((
@@ -173,9 +176,13 @@ pub(in crate::workflow) fn answer(
         let search = research
             .search
             .as_ref()
-            .context("Reader follow-up research unavailable")?;
-        let models = search.resolve(config)?;
-        let (model, endpoint, credential) = models.required_search()?;
+            .ok_or(ResearchRefusal::Unavailable)?;
+        let models = search
+            .resolve(config)
+            .map_err(|_| ResearchRefusal::Unavailable)?;
+        let (model, endpoint, credential) = models
+            .required_search()
+            .map_err(|_| ResearchRefusal::Unavailable)?;
         let endpoint = search.endpoint(endpoint);
         #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
         let endpoint = crate::workflow::orchestrator::researched_fixture::endpoint(endpoint)?;

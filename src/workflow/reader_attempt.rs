@@ -21,7 +21,7 @@ enum EvidenceKind {
     Legacy,
     SdkFixture,
     Development,
-    ResidentHistorical { document: Uuid },
+    ResidentHistorical { document: Uuid, page: Uuid },
 }
 
 pub(super) struct Attempt {
@@ -433,7 +433,7 @@ impl Attempt {
     pub(super) fn memory_document(&self, installed_reader: bool) -> Result<Option<Uuid>> {
         match (&self.selected, self.kind) {
             (Some(selected), _) => selected.document(),
-            (None, EvidenceKind::ResidentHistorical { document }) if installed_reader => {
+            (None, EvidenceKind::ResidentHistorical { document, .. }) if installed_reader => {
                 Ok(Some(document))
             }
             _ => Ok(None),
@@ -560,6 +560,7 @@ impl Attempt {
                     prepared.evidence.id,
                     EvidenceKind::ResidentHistorical {
                         document: capture.document(),
+                        page: capture.page(),
                     },
                 )
             }
@@ -938,6 +939,21 @@ impl Attempt {
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(super) fn retained_source(&self) -> Uuid {
         self.evidence
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn current_reader_answer_page(
+        &self,
+    ) -> Option<&crate::conversation::BindingReceipt> {
+        let EvidenceKind::ResidentHistorical { document, page } = self.kind else {
+            return None;
+        };
+        self.resident_answer
+            .as_ref()
+            .map(|answer| answer.receipt())
+            .filter(|receipt| {
+                receipt.observed_document == document && receipt.observed_page == page
+            })
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]

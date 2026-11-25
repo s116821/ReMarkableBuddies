@@ -27,6 +27,10 @@ const RESULT_BYTES: usize = 16 * 1024;
 pub enum RequestSource {
     /// Explicit caller declaration, not an inferred blank-page observation.
     NoDocument,
+    CapturedPage {
+        origin_turn: Uuid,
+        source_record: Uuid,
+    },
     Original {
         origin_turn: Uuid,
         source_record: Uuid,
@@ -49,11 +53,51 @@ pub struct ReceivingBudget {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SourceAssociation {
     NoDocument,
+    CapturedPage {
+        origin_turn: Uuid,
+        source_record: Box<Record>,
+    },
     Original {
         origin_turn: Uuid,
         source_record: Box<Record>,
         expected: IndexKey,
     },
+}
+
+impl SourceAssociation {
+    pub(super) fn source_record(&self) -> Option<&Record> {
+        match self {
+            Self::NoDocument => None,
+            Self::CapturedPage { source_record, .. } | Self::Original { source_record, .. } => {
+                Some(source_record)
+            }
+        }
+    }
+
+    pub(super) fn request_source(&self) -> Result<RequestSource> {
+        let record_id = |record: &Record| -> Result<Uuid> {
+            source_id(record).ok_or_else(|| ReceivingRefusal::OriginalUnavailable.into())
+        };
+        Ok(match self {
+            Self::NoDocument => RequestSource::NoDocument,
+            Self::CapturedPage {
+                origin_turn,
+                source_record,
+            } => RequestSource::CapturedPage {
+                origin_turn: *origin_turn,
+                source_record: record_id(source_record)?,
+            },
+            Self::Original {
+                origin_turn,
+                source_record,
+                expected,
+            } => RequestSource::Original {
+                origin_turn: *origin_turn,
+                source_record: record_id(source_record)?,
+                expected: expected.clone(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -251,18 +295,7 @@ pub(super) fn validate_historical(
         SourceAssociation::Original { source_record, .. }
             if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_))
     );
-    let choice = match &frame.source {
-        SourceAssociation::NoDocument => RequestSource::NoDocument,
-        SourceAssociation::Original {
-            origin_turn,
-            source_record,
-            expected,
-        } => RequestSource::Original {
-            origin_turn: *origin_turn,
-            source_record: source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?,
-            expected: expected.clone(),
-        },
-    };
+    let choice = frame.source.request_source()?;
     ensure!(
         original(
             records,
@@ -295,7 +328,7 @@ pub(super) fn validate_historical(
         .chain(std::iter::once(request))
         .flat_map(|t| t.sources.iter().copied())
         .collect::<BTreeSet<_>>();
-    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+    if let Some(source_record) = frame.source.source_record() {
         source_ids.insert(source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?);
     }
     let supplied = records
@@ -322,7 +355,7 @@ pub(super) fn validate_historical(
             }
         }
     }
-    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+    if let Some(source_record) = frame.source.source_record() {
         for m in source_media(source_record)? {
             if frame.missing_media.contains(&m) && !view.missing_media.contains(&m) {
                 view.missing_media.push(m);
@@ -336,7 +369,7 @@ pub(super) fn validate_historical(
     let retrieval = frame.retrieval.take();
     let base = encoded(&frame, budget.max_encoded_bytes)?;
     match (&frame.source, retrieval) {
-        (SourceAssociation::NoDocument, None) => {}
+        (SourceAssociation::NoDocument | SourceAssociation::CapturedPage { .. }, None) => {}
         (
             SourceAssociation::Original {
                 expected,
@@ -430,15 +463,21 @@ pub(super) fn original(
     cap: usize,
     allow_notebook: bool,
 ) -> Result<SourceAssociation> {
-    let RequestSource::Original {
-        origin_turn,
-        source_record,
-        expected,
-    } = choice
-    else {
-        return Ok(SourceAssociation::NoDocument);
+    let (origin_turn, source_record, expected) = match choice {
+        RequestSource::NoDocument => return Ok(SourceAssociation::NoDocument),
+        RequestSource::CapturedPage {
+            origin_turn,
+            source_record,
+        } => (origin_turn, source_record, None),
+        RequestSource::Original {
+            origin_turn,
+            source_record,
+            expected,
+        } => {
+            validate_key(&expected)?;
+            (origin_turn, source_record, Some(expected))
+        }
     };
-    validate_key(&expected)?;
     let origin = records
         .iter()
         .find_map(|record| match record {
@@ -457,6 +496,21 @@ pub(super) fn original(
         .iter()
         .find(|record| source_id(record) == Some(source_record))
         .ok_or(ReceivingRefusal::OriginalUnavailable)?;
+    let Some(expected) = expected else {
+        let Record::ResidentCapture(capture) = record else {
+            return Err(ReceivingRefusal::OriginalUnavailable.into());
+        };
+        capture.validate()?;
+        ensure!(
+            capture.conversation == request.conversation && capture.turn == origin.id,
+            ReceivingRefusal::AssociationMismatch
+        );
+        encoded(record, cap)?;
+        return Ok(SourceAssociation::CapturedPage {
+            origin_turn,
+            source_record: Box::new(record.clone()),
+        });
+    };
     let (conversation, turn, document) = match record {
         Record::Source(source) => (
             source.conversation,
@@ -828,8 +882,8 @@ impl Ledger {
             ReceivingRefusal::InvalidHistory
         );
         view.turns.pop();
-        if let SourceAssociation::Original { source_record, .. } = &association {
-            if let Record::ArchivedNormalizedSource(archive) = source_record.as_ref() {
+        if let Some(source_record) = association.source_record() {
+            if let Record::ArchivedNormalizedSource(archive) = source_record {
                 if !view
                     .archived_sources
                     .iter()

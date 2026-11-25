@@ -347,6 +347,14 @@ impl FrozenRequestContext {
                     text: text.to_owned(),
                     document: match self.source() {
                         SourceAssociation::NoDocument => None,
+                        SourceAssociation::CapturedPage { source_record, .. } => {
+                            let crate::conversation::Record::ResidentCapture(capture) =
+                                source_record.as_ref()
+                            else {
+                                return Err(CompositionRefusal::IncompatibleRequest.into());
+                            };
+                            Some(capture.before.document)
+                        }
                         SourceAssociation::Original { expected, .. } => Some(expected.document),
                     },
                     now_ms: options.now_ms,

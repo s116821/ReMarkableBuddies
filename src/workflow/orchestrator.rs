@@ -392,6 +392,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                 book,
                 local.ok_or_else(|| anyhow::anyhow!("Ordinary Reader dispatch absent"))?,
             ),
+            None if self.workflow.uses_installed_reader_history() && attempt.resident_output() => {
+                if let Some(dispatch) = local {
+                    self.run_ordinary_captured_page(&mut attempt, dispatch)
+                } else {
+                    self.run_prepared(&mut attempt)
+                }
+            }
             None => self.run_prepared(&mut attempt),
         };
         #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
