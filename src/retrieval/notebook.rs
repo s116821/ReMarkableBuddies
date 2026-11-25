@@ -11,7 +11,10 @@ use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, io::Cursor};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 #[cfg(any(test, all(target_os = "linux", feature = "installed-resident-output")))]
 pub(crate) mod saved_render;
@@ -37,6 +40,13 @@ pub struct PageImage<'a> {
     pub png: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PatternedPaper {
+    PaperOnly,
+    Ink,
+}
+
 /// Full-page images and verified output-page identities from the source owner.
 /// The order is the native notebook order, including any Buddy pages.
 pub(crate) struct OrderedNotebookImages<'a> {
@@ -44,6 +54,7 @@ pub(crate) struct OrderedNotebookImages<'a> {
     pub order: &'a [Uuid],
     pub originals: &'a [(Uuid, &'a [u8])],
     pub buddy_pages: &'a BTreeSet<Uuid>,
+    pub patterned_paper: &'a BTreeMap<Uuid, PatternedPaper>,
 }
 
 /// Evidence from the acquisition owner, sealed after verifying that the saved
@@ -78,11 +89,24 @@ impl OrderedNotebookImages<'_> {
             .iter()
             .map(|(page, png)| (*page, digest(png)))
             .collect();
-        Ok(digest(&serde_json::to_vec(&(
-            "native-ordered-notebook-pngs-v1",
-            self.order_revision()?,
-            originals,
-        ))?))
+        let order_revision = self.order_revision()?;
+        let bytes = if self.patterned_paper.is_empty() {
+            serde_json::to_vec(&("native-ordered-notebook-pngs-v1", order_revision, originals))?
+        } else {
+            ensure!(
+                self.patterned_paper
+                    .keys()
+                    .all(|page| originals.iter().any(|(original, _)| original == page)),
+                "patterned paper evidence names a non-original page"
+            );
+            serde_json::to_vec(&(
+                "native-ordered-notebook-pngs-and-paper-v2",
+                order_revision,
+                originals,
+                self.patterned_paper,
+            ))?
+        };
+        Ok(digest(&bytes))
     }
 
     pub(crate) fn normalize(
@@ -103,6 +127,7 @@ impl OrderedNotebookImages<'_> {
         let mut seen = BTreeSet::new();
         let mut originals = self.originals.iter();
         let mut pages = Vec::with_capacity(self.originals.len());
+        let mut patterned_paper = BTreeMap::new();
         for (index, &id) in self.order.iter().enumerate() {
             ensure!(
                 !id.is_nil() && seen.insert(id),
@@ -115,10 +140,11 @@ impl OrderedNotebookImages<'_> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("original notebook page missing"))?;
             ensure!(page == id, "original notebook page order changed");
-            pages.push(PageImage {
-                page: (index + 1).try_into()?,
-                png,
-            });
+            let page = (index + 1).try_into()?;
+            if let Some(&paper) = self.patterned_paper.get(&id) {
+                patterned_paper.insert(page, paper);
+            }
+            pages.push(PageImage { page, png });
         }
         ensure!(
             originals.next().is_none() && self.buddy_pages.is_subset(&seen),
@@ -139,7 +165,7 @@ impl OrderedNotebookImages<'_> {
         let mut units = Vec::new();
         let mut text_bytes = 0;
         for batch in pages.chunks(options.max_pages) {
-            let next = writer_visual::extract(batch, engine, options, progress)?;
+            let next = writer_visual::extract(batch, &patterned_paper, engine, options, progress)?;
             text_bytes += next.iter().map(|unit| unit.text.len()).sum::<usize>();
             ensure!(
                 text_bytes <= crate::writer::notebook::MAX_SELECTED_BYTES,
@@ -147,12 +173,17 @@ impl OrderedNotebookImages<'_> {
             );
             units.extend(next);
         }
+        let paper_revision = if patterned_paper.is_empty() {
+            ""
+        } else {
+            "stock-paper-v1:"
+        };
         Ok(NormalizedDocument {
             document: self.document,
             format: SourceFormat::Notebook,
             source_sha256: image_digest,
             extractor_revision: format!(
-                "{WRITER_VISUAL_REVISION}{}",
+                "{WRITER_VISUAL_REVISION}{paper_revision}{}",
                 digest(model_profile.as_bytes())
             ),
             units,

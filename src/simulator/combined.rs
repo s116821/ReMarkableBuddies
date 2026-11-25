@@ -660,6 +660,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let mut source = fixture_source(Uuid::new_v4());
+    let no_patterns = std::collections::BTreeMap::new();
     let blank = Uuid::new_v4();
     let buddy = Uuid::new_v4();
     let last = Uuid::new_v4();
@@ -678,6 +679,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         order: &order,
         originals: &originals,
         buddy_pages: &buddy_pages,
+        patterned_paper: &no_patterns,
     };
     source.order_revision = Some(images.order_revision()?);
     // Model the owner's saved-scene sampling independently of the rendered PNGs.
@@ -741,6 +743,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             order: &order,
             originals: wrong,
             buddy_pages: &buddy_pages,
+            patterned_paper: &no_patterns,
         };
         let Err(error) = dispatch.whole_notebook(
             &ledger,
@@ -1040,7 +1043,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
 fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Result<()> {
     use crate::{
         conversation::notebook::NotebookPlan,
-        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages},
+        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages, PatternedPaper},
         writer::notebook::runner::Status,
     };
 
@@ -1059,7 +1062,7 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
     let [first, blank, third, fourth, fifth] = originals;
     let buddy = Uuid::new_v4();
     let order = [first, blank, buddy, third, fourth, fifth];
-    let pngs = [5, 255, 12, 18, 25].map(fixture_png);
+    let pngs = [5, 245, 12, 18, 25].map(fixture_png);
     let pngs = pngs.into_iter().collect::<Result<Vec<_>>>()?;
     let original_images: Vec<_> = originals
         .into_iter()
@@ -1070,6 +1073,10 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
         order: &order,
         originals: &original_images,
         buddy_pages: &std::collections::BTreeSet::from([buddy]),
+        patterned_paper: &std::collections::BTreeMap::from([
+            (blank, PatternedPaper::PaperOnly),
+            (fifth, PatternedPaper::Ink),
+        ]),
     };
     let receipt = NotebookSourceReceipt {
         saved_source_revision: digest(b"independently observed fixture notebook"),
@@ -1154,6 +1161,13 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
             .collect::<Vec<_>>(),
         [4, 1, 0, 0, 0]
     );
+    for (batch, pattern) in [json!({"2":"paper-only"}), json!({"6":"ink"})]
+        .into_iter()
+        .enumerate()
+    {
+        let manifest: Value = serde_json::from_str(&model.seen[batch].0[1])?;
+        assert_eq!(manifest["patterned_paper"], pattern);
+    }
     let encoded: Vec<_> = model
         .seen
         .iter()

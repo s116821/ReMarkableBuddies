@@ -187,6 +187,81 @@ fn saved_render_preserves_single_and_repeated_punctuation_dots() -> Result<()> {
     Ok(())
 }
 
+const RULED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><rect y="337" width="1404" height="6" fill="#aaaaaa"/></svg>"##;
+const GRID: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="1872"><line x1="0" y1="340" x2="1404" y2="340" stroke="#aaaaaa" stroke-width="6"/><rect x="197" width="6" height="1872" fill="#aaaaaa"/></svg>"##;
+const DOTS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><circle cx="200" cy="340" r="4" fill="#aaaaaa"/></svg>"##;
+
+#[test]
+fn saved_render_layers_stock_paper_under_ink_and_keeps_paper_only_pages() -> Result<()> {
+    let ink = scene(Some((340.0, Pen::FinelinerV2 as u32)));
+    let blank = scene(None);
+    for template in [RULED, GRID, DOTS] {
+        let mut raster = NotebookRaster::default();
+        let ink_page = Uuid::new_v4();
+        let paper_only = Uuid::new_v4();
+        let mut page = saved_page(ink_page, &ink);
+        page.template_svg = Some(template);
+        raster.push(page, &mut || Ok(()))?;
+        let mut page = saved_page(paper_only, &blank);
+        page.template_svg = Some(template);
+        raster.push(page, &mut || Ok(()))?;
+
+        let painted = image::load_from_memory(&raster.originals[0].1)?.to_rgba8();
+        let empty = image::load_from_memory(&raster.originals[1].1)?.to_rgba8();
+        assert_eq!(painted.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        assert_eq!(painted.get_pixel(200, 340).0, [170, 170, 170, 255]);
+        assert_eq!(empty.get_pixel(200, 340).0, [170, 170, 170, 255]);
+        assert_eq!(empty.get_pixel(250, 400).0, [255; 4]);
+        assert!(painted.get_pixel(DEFAULT_WIDTH / 2, 340)[0] < 80);
+        assert_eq!(raster.patterned_paper[&ink_page], PatternedPaper::Ink);
+        assert_eq!(
+            raster.patterned_paper[&paper_only],
+            PatternedPaper::PaperOnly
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn saved_render_checks_pinned_paper_variants_and_refuses_pattern_stretch() -> Result<()> {
+    let mut pixels =
+        image::RgbaImage::from_pixel(DEFAULT_WIDTH, DEFAULT_HEIGHT, image::Rgba([255; 4]));
+    for y in 337..343 {
+        for x in 0..DEFAULT_WIDTH {
+            pixels.put_pixel(x, y, image::Rgba([170, 170, 170, 255]));
+        }
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    let blank = scene(None);
+    let mut raster = NotebookRaster::default();
+    let mut page = saved_page(Uuid::new_v4(), &blank);
+    page.template_svg = Some(RULED);
+    page.template_png = Some(&png);
+    raster.push(page, &mut || Ok(()))?;
+
+    let mut mismatch = saved_page(Uuid::new_v4(), &blank);
+    mismatch.template_png = Some(&png);
+    let err = raster.push(mismatch, &mut || Ok(())).unwrap_err();
+    assert_eq!(err.to_string(), "saved paper SVG and PNG variants disagree");
+
+    let extended = scene(Some((
+        DEFAULT_HEIGHT as f32 + 40.0,
+        Pen::FinelinerV2 as u32,
+    )));
+    let mut page = saved_page(Uuid::new_v4(), &extended);
+    page.template_svg = None;
+    page.template_png = Some(&png);
+    let err = raster.push(page, &mut || Ok(())).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "patterned saved paper cannot extend beyond its native canvas"
+    );
+    assert_eq!(raster.originals.len(), 1);
+    Ok(())
+}
+
 #[test]
 fn saved_render_refuses_partial_interpretation() -> Result<()> {
     let id = Uuid::new_v4();
