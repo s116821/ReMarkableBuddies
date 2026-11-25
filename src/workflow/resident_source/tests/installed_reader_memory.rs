@@ -666,11 +666,13 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         pages.iter().copied().map(sdk_id).collect(),
     )
     .unwrap();
+    let rendered = Rc::new(RefCell::new(Vec::new()));
     workflow.device = Box::new(
         RefusingBackend::with_resident_releases(vec![released(Instant::now())]).with_test_output(
             Box::new(RecognitionProbe {
                 confirmed_source: true,
                 early_source: Some((facts, Rc::new(RefCell::new(None)))),
+                rendered_text: Some(rendered.clone()),
                 ..RecognitionProbe::default()
             }),
         ),
@@ -706,6 +708,7 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         std::io::ErrorKind::WouldBlock,
         "Reader read the saved notebook metadata"
     );
+    assert!(rendered.borrow().iter().any(|text| text.contains(NOTEBOOK)));
     let calls = calls.borrow();
     let [_, verification, answer] = calls.as_slice() else {
         anyhow::bail!("Expected only two readings and the captured-page answer");
