@@ -1696,7 +1696,20 @@ struct PageFirstModel {
     first: bool,
     refuse_at: Option<usize>,
     fail_source_readback: Option<Arc<Store>>,
+    verify_circled_operand: bool,
 }
+
+const ARITHMETIC_QUESTION: &str = "What is the answer to this?";
+const ARITHMETIC_PROPOSAL: &str = "\
+QUESTION: What is the answer to this?\n\
+REQUEST_WEB_JSON: {\"version\":1,\"intent\":\"no-restriction\"}\n\
+QUESTION_BOX: 130,496,438,33\n\
+HANDWRITTEN_QUESTION_MARK: present\n\
+SELECTION_CENTER: 356,266\n\
+SELECTION_SUBJECT: division expression 24 / 6\n\
+---\n\
+ANSWER: Deferred";
+const ARITHMETIC_DISAGREEMENT: &str = r#"{"version":1,"transcription":"24 / 6","request_web":{"version":1,"intent":"no-restriction"}}"#;
 
 impl crate::LLMEngine for PageFirstModel {
     fn guarded_timeout(&self) -> Option<Duration> {
@@ -1756,6 +1769,26 @@ impl crate::LLMEngine for PageFirstModel {
         if self.refuse_at == Some(self.inner.steps.get()) {
             return Err(crate::llm::ProviderRefused.into());
         }
+        if self.verify_circled_operand {
+            match self.inner.steps.get() {
+                1 => {
+                    self.inner.steps.set(2);
+                    return Ok(ARITHMETIC_PROPOSAL.into());
+                }
+                2 => {
+                    let prompt = self.inner.text.join("\n");
+                    assert!(prompt.contains("When a separate question is written nearby"));
+                    assert!(
+                        prompt.contains("A marked equation, label, or passage is source material")
+                    );
+                    assert!(!prompt.contains(ARITHMETIC_QUESTION));
+                    assert!(!prompt.contains("24 / 6"));
+                    self.inner.steps.set(3);
+                    return Ok(ARITHMETIC_DISAGREEMENT.into());
+                }
+                _ => {}
+            }
+        }
         self.inner.execute()
     }
 }
@@ -1770,11 +1803,12 @@ enum OversizedObservation {
 enum SubmissionFailure {
     Provider(usize),
     SourceReadback,
+    CircledOperandAsRequest,
 }
 
 #[test]
 fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_page() -> Result<()> {
-    use SubmissionFailure::{Provider, SourceReadback};
+    use SubmissionFailure::{CircledOperandAsRequest, Provider, SourceReadback};
     for (only_mode, submission, reuse, switch_page, failure, after_oversized) in [
         (
             Some(Mode::Reader),
@@ -1809,6 +1843,14 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             false,
             false,
             Some(Provider(3)),
+            None,
+        ),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            Some(CircledOperandAsRequest),
             None,
         ),
         (
@@ -1849,6 +1891,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             _ => None,
         };
         let readback_failed = matches!(failure, Some(SourceReadback));
+        let verify_circled_operand = matches!(failure, Some(CircledOperandAsRequest));
         let reader_enabled = only_mode != Some(Mode::Writer);
         let writer_enabled = only_mode != Some(Mode::Reader);
         let mode = "reconnect-source-handoff-open-first";
@@ -1972,6 +2015,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             first: true,
             refuse_at,
             fail_source_readback: readback_failed.then(|| store.clone()),
+            verify_circled_operand,
         };
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -2012,6 +2056,21 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         if switch_page || refuse {
             assert!(result.is_err(), "{result:?}");
             let (request, message) = match (switch_page, refuse_at) {
+                (false, None) if verify_circled_operand => {
+                    assert_eq!(
+                        steps.get(),
+                        3,
+                        "disagreement must stop before answer generation"
+                    );
+                    assert_eq!(
+                        result.as_ref().unwrap_err().to_string(),
+                        "The selected text could not be read reliably."
+                    );
+                    (
+                        Some(ARITHMETIC_QUESTION),
+                        "The selected text could not be read reliably.",
+                    )
+                }
                 (false, None) if readback_failed => {
                     assert!(format!("{:#}", result.as_ref().unwrap_err())
                         .contains("injected storage interruption"));

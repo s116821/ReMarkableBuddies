@@ -38,6 +38,8 @@ use std::{
 
 type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryBookSource>>);
 
+const QUESTION_VERIFICATION_SCOPE: &str = "Use the page layout to distinguish the handwritten request from its subject. A circle, outline, or highlight can mark the material the request refers to. When a separate question is written nearby, transcribe only that question, even when it refers to the marked content as 'this'. A marked equation, label, or passage is source material even when handwritten. If the request itself is inside the outline, transcribe only the writing that forms the request. Report unclear if you cannot distinguish the request from its subject.";
+
 pub(super) fn acquire(
     workflow: &mut Workflow,
     local: Option<&Dispatch<'_>>,
@@ -349,7 +351,13 @@ impl<M: LLMEngine> Orchestrator<M> {
         let (analysis, mut result) = match (proposed_answer, &marked) {
             (Ok(value), _) => value,
             (Err(_), Some(marked)) => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+                return self.preserve_ordinary_marked_question(
+                    attempt,
+                    prepared,
+                    source,
+                    marked,
+                    AttemptReason::NoSelection,
+                );
             }
             (Err(error), None) => return Err(error),
         };
@@ -369,7 +377,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             attempt,
             prepared,
             source,
-            &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
+            &format!("{QUESTION_VERIFICATION_SCOPE}\n{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
             verification,
             true,
         );
@@ -377,14 +385,27 @@ impl<M: LLMEngine> Orchestrator<M> {
             (Ok(verified), _) => reader_intent::parse_verification_response(&verified)
                 .and_then(|reading| reader_intent::agree(analysis, reading)),
             (Err(error), Some(marked)) if error.is::<crate::llm::ProviderRefused>() => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+                return self.preserve_ordinary_marked_question(
+                    attempt,
+                    prepared,
+                    source,
+                    marked,
+                    AttemptReason::NoSelection,
+                );
             }
             (Err(error), _) => return Err(error),
         };
         let agreement = match (agreement, &marked) {
             (Ok(value), _) => value,
-            (Err(_), Some(marked)) => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+            (Err(error), Some(marked)) => {
+                let reason = match error {
+                    reader_intent::Refusal::Disagreement => {
+                        AttemptReason::TranscriptionDisagreement
+                    }
+                    _ => AttemptReason::NoSelection,
+                };
+                return self
+                    .preserve_ordinary_marked_question(attempt, prepared, source, marked, reason);
             }
             (Err(error), None) => return Err(error.into()),
         };
@@ -442,6 +463,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         prepared: &Captured,
         source: &OrdinarySource<'_>,
         marked: &MarkedFragment,
+        reason: AttemptReason,
     ) -> Result<()> {
         source.require_current(&mut self.workflow)?;
         let head = attempt.interpret_ordinary_pdf(
@@ -454,7 +476,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
         if self.workflow.opened_submission().is_some() {
-            return Err(RefusedSubmission(AttemptReason::NoSelection).into());
+            return Err(RefusedSubmission(reason).into());
         }
         self.present_ordinary_outcome(
             attempt,
