@@ -517,6 +517,58 @@ impl Ledger {
         Ok(None)
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    fn resident_binding_after_source_capture(
+        &self,
+        capture: &ResidentSourceCapture,
+        conversation: Uuid,
+        binding_id: Uuid,
+    ) -> Result<Option<super::HistoricalPageAssociation>> {
+        let Some(envelope) = self.store.value(Namespace::Conversation, binding_id)? else {
+            return Ok(None);
+        };
+        let Record::Binding(binding) = Self::decode(&envelope)? else {
+            bail!("resident answer binding variant mismatch");
+        };
+        let receipt = &binding.receipt;
+        let correspondence = &capture.correspondence;
+        let facts = &correspondence.expected;
+        // Early opening can add exactly one adjacent page after capture. Keep
+        // the original facts and pixels intact and qualify that single delta
+        // against the existing binding. This grants no live output authority.
+        if receipt.acquisition != super::BindingAcquisition::Inserted
+            || receipt.conversation != conversation
+            || receipt.evidence_origin != "installed-native-guarded-v1"
+            || receipt.adapter_fingerprint != correspondence.adapter_sha256
+            || receipt.source.capability_revision != correspondence.profile_sha256
+            || receipt.source.document != facts.document
+            || receipt.source.page != facts.page
+            || receipt.expected_order != facts.order
+            || receipt.observed_document != facts.document
+            || facts.order.contains(&receipt.observed_page)
+        {
+            return Ok(None);
+        }
+        let source_index = facts
+            .order
+            .iter()
+            .position(|page| *page == facts.page)
+            .context("resident source absent from captured order")?;
+        let mut expected_order = facts.order.clone();
+        expected_order.insert(source_index + 1, receipt.observed_page);
+        if receipt.observed_order != expected_order {
+            return Ok(None);
+        }
+        match self.inspect_page_association(conversation, facts.document, receipt.observed_page)? {
+            super::HistoricalPageAssociationInspection::HistoricalCandidate(association)
+                if association.binding_revision() == envelope.revision_id =>
+            {
+                Ok(Some(*association))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Persist original resident receipt and PNG atomically with the Prepared turn.
     /// No source observation, native binding, selection token or effect context is made.
     pub fn prepare_resident_historical(
@@ -613,9 +665,18 @@ impl Ledger {
         }
         let (root_head, mut root) = self.live_root(turn.conversation, Some(&expected_root))?;
         if let Some(binding_id) = root.binding {
-            let association = self
-                .resident_answer_association(capture)?
-                .context("resident request no longer matches its bound answer page")?;
+            let association = self.resident_answer_association(capture)?;
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            let association = match association {
+                Some(_) => association,
+                None => self.resident_binding_after_source_capture(
+                    capture,
+                    turn.conversation,
+                    binding_id,
+                )?,
+            };
+            let association =
+                association.context("resident request no longer matches its bound answer page")?;
             let receipt = association.receipt();
             ensure!(
                 receipt.conversation == turn.conversation

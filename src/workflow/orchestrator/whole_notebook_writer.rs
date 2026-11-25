@@ -45,7 +45,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         dispatch.require_ledger(&self.ledger)?;
         writer::validate_request(&request)?;
         let (_, model_profile) = dispatch.regional_writer_settings()?;
-        let (facts, mut source) = capture.notebook_source();
+        let (captured_facts, mut source) = capture.notebook_source();
+        let opened_facts = self
+            .workflow
+            .resident_source
+            .as_ref()
+            .context("installed Writer page owner unavailable")?
+            .opened_source_order()?;
+        let facts = opened_facts.as_ref().unwrap_or(captured_facts);
         let order: Vec<_> = facts
             .order()
             .iter()

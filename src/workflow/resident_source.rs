@@ -272,6 +272,28 @@ impl Factory for InstalledFactory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OutputPurpose<'a> {
+    #[cfg(feature = "installed-resident-output")]
+    Open(&'a [u8]),
+    Render(super::resident_output::ResidentOutputText<'a>),
+}
+
+#[derive(Clone)]
+struct PlacedOutput {
+    target: ReaderFacts,
+    runtime: RuntimeIdentity,
+    newly_created: bool,
+}
+
+// A request-local binding to the page already opened, never a live write lease.
+#[derive(Clone)]
+struct OpenedOutput {
+    placement: PlacedOutput,
+    association: crate::conversation::HistoricalPageAssociation,
+    render_started: bool,
+}
+
 pub(super) struct ResidentSourceOwner {
     selection: InstalledReaderSelection,
     store: Arc<Store>,
@@ -288,7 +310,9 @@ pub(super) struct ResidentSourceOwner {
     reconnect: bool,
     canceled: bool,
     fatal: bool,
-    captured_source: Option<remarkable_open_sdk::native_adapter::ReaderFacts>,
+    captured_source: Option<ReaderFacts>,
+    #[cfg(feature = "installed-resident-output")]
+    opened_output: Option<OpenedOutput>,
     #[cfg(all(test, feature = "installed-resident-output"))]
     ordinary_pdf_fixture: Option<(std::path::PathBuf, std::path::PathBuf)>,
     #[cfg(all(
@@ -316,6 +340,8 @@ impl ResidentSourceOwner {
             canceled: false,
             fatal: false,
             captured_source: None,
+            #[cfg(feature = "installed-resident-output")]
+            opened_output: None,
             #[cfg(all(test, feature = "installed-resident-output"))]
             ordinary_pdf_fixture: None,
             #[cfg(all(
@@ -764,14 +790,14 @@ impl ResidentSourceOwner {
     pub(super) fn read_ordinary_book(
         &mut self,
         health: &mut ServiceHealth,
-        source: original_pdf::OrdinaryBookSource,
+        mut source: original_pdf::OrdinaryBookSource,
     ) -> Result<Option<original_pdf::ObservedOriginalBook>> {
-        let facts = self
-            .captured_source
-            .clone()
-            .context("Resident Reader capture facts absent")?;
+        let facts = self.current_source_order()?;
         let deadline = self.deadline.context("Resident source deadline absent")?;
         self.acquisition_current(health)?;
+        if self.opened_output.is_some() {
+            source.after_opening(&facts)?;
+        }
         source.read(&facts, deadline, &mut || {
             self.original_pdf_progress(health, deadline, &mut || Ok(()))
         })
@@ -788,10 +814,7 @@ impl ResidentSourceOwner {
         original_pdf::CapturedOriginalBook,
         Option<original_pdf::OrdinaryBookCache>,
     )> {
-        let facts = self
-            .captured_source
-            .clone()
-            .context("Resident Reader capture facts absent")?;
+        let facts = self.current_source_order()?;
         let acquired = self.deadline.context("Resident source deadline absent")?;
         let executable = std::path::Path::new(original_pdf::INSTALLED_EXECUTABLE);
         #[cfg(test)]
@@ -1039,6 +1062,10 @@ impl ResidentSourceOwner {
         }
         self.deadline = None;
         self.captured_source = None;
+        #[cfg(feature = "installed-resident-output")]
+        {
+            self.opened_output = None;
+        }
         self.canceled = false;
         // The old guard is gone, never renewed. Cancellation stayed sticky
         // throughout its request; only a distinct release can begin another.
@@ -1140,10 +1167,22 @@ impl ResidentSourceOwner {
     ) -> Result<bool> {
         let original = self
             .captured_source
-            .clone()
+            .as_ref()
             .context("Resident capture facts absent")?;
+        #[cfg(feature = "installed-resident-output")]
+        let opened = self
+            .opened_output
+            .as_ref()
+            .map(|opened| &opened.placement.target);
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opened: Option<&ReaderFacts> = None;
+        let expected = opened.unwrap_or(original).clone();
+        let already_open = opened.is_some();
         self.reconnect_for_observation(health, deadline)?;
         let current = self.output_observe(health, deadline)?;
+        if current != expected && already_open {
+            self.canceled = true;
+        }
         // Provider and indexing work can outlast an idle client connection.
         // Retain the same owner and open a fresh read-only connection when needed.
         self.session
@@ -1151,7 +1190,7 @@ impl ResidentSourceOwner {
             .context("resident Session absent")?
             .finish();
         self.reconnect = true;
-        Ok(current == original)
+        Ok(current == expected)
     }
 
     fn reconnect_for_observation(
@@ -1248,17 +1287,24 @@ impl ResidentSourceOwner {
         expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
         blank_start_source: bool,
         protect_source: bool,
+        retained: Option<&[u8]>,
         end: Instant,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::PageUse> {
         let runtime = self.session.as_ref().unwrap().identity();
-        let image = self.output_capture(health, expected, end)?;
+        let fresh;
+        let pixels = if let Some(retained) = retained {
+            retained
+        } else {
+            fresh = self.output_capture(health, expected, end)?;
+            fresh.png()
+        };
         let mut role = backend.classify(
             ledger,
             conversation,
             &runtime,
             expected,
-            &image,
+            pixels,
             blank_start_source,
             end,
             &mut || admitted_progress(end, || self.progress(health)),
@@ -1285,7 +1331,7 @@ impl ResidentSourceOwner {
                 conversation,
                 &runtime,
                 expected,
-                &image,
+                image.png(),
                 blank_start_source,
                 end,
                 &mut || admitted_progress(end, || self.progress(health)),
@@ -1326,27 +1372,141 @@ impl ResidentSourceOwner {
         }
         admitted_progress(end, || self.progress(health))
     }
+    #[cfg(feature = "installed-resident-output")]
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_answer(
+    pub(super) fn open_submission_page(
         &mut self,
         health: &mut ServiceHealth,
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: super::resident_output::ResidentOutputText<'_>,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+        retained: &[u8],
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+
+        ensure!(
+            self.opened_output.is_none(),
+            "Buddy page already opened for this request"
+        );
+        let end = self.deadline.context("Resident source deadline absent")?;
+        let placement = self
+            .place_output(
+                health,
+                backend,
+                ledger,
+                conversation,
+                OutputPurpose::Open(retained),
+                association,
+                &mut || Ok(()),
+                end,
+            )?
+            .map_err(|outcome| anyhow::anyhow!("Buddy page opening: {outcome:?}"))?;
+        admitted_progress(end, || self.progress(health))?;
+        if placement.newly_created {
+            backend.bind_opened_page(ledger, conversation, &placement.target)?;
+        }
+        admitted_progress(end, || self.progress(health))?;
+        let document =
+            crate::storage::Uuid::from_bytes(*placement.target.page().document.as_bytes());
+        let page = crate::storage::Uuid::from_bytes(*placement.target.page().page.as_bytes());
+        let HistoricalCandidate(binding) =
+            ledger.inspect_page_association(conversation, document, page)?
+        else {
+            anyhow::bail!("opened Buddy page binding unavailable");
+        };
+        self.opened_output = Some(OpenedOutput {
+            placement,
+            association: *binding,
+            render_started: false,
+        });
+        self.session
+            .as_mut()
+            .context("resident Session absent")?
+            .finish();
+        self.reconnect = true;
+        log::info!("Buddy conversation page observed before model submission");
+        Ok(())
+    }
+
+    fn check_opened_binding(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        binding: &crate::conversation::HistoricalPageAssociation,
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+        let receipt = binding.receipt();
+        ensure!(
+            matches!(ledger.inspect_page_association(receipt.conversation, receipt.observed_document, receipt.observed_page)?,
+                HistoricalCandidate(current) if current.binding_revision() == binding.binding_revision()),
+            "opened Buddy page binding changed"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_render_started(&self) -> bool {
+        self.opened_output
+            .as_ref()
+            .is_some_and(|output| output.render_started)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_page_is_new(&self) -> bool {
+        self.opened_output
+            .as_ref()
+            .is_some_and(|output| output.placement.newly_created)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_association(
+        &self,
+    ) -> Option<&crate::conversation::HistoricalPageAssociation> {
+        self.opened_output
+            .as_ref()
+            .map(|output| &output.association)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn current_source_order(&self) -> Result<ReaderFacts> {
+        let source = self
+            .captured_source
+            .as_ref()
+            .context("Resident source absent")?;
+        if let Some(opened) = &self.opened_output {
+            return ReaderFacts::new(source.page(), opened.placement.target.order().to_vec())
+                .map_err(|error| anyhow::anyhow!("opened document order: {error:?}"));
+        }
+        Ok(source.clone())
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_source_order(&self) -> Result<Option<ReaderFacts>> {
+        self.opened_output
+            .as_ref()
+            .map(|_| self.current_source_order())
+            .transpose()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_output(
+        &mut self,
+        health: &mut ServiceHealth,
+        backend: &mut dyn super::resident_output::ResidentOutputBackend,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        purpose: OutputPurpose<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<super::resident_output::ResidentOutputOutcome> {
-        use super::resident_output::{exact, PageUse, ResidentOutputOutcome as Outcome};
-        use remarkable_open_sdk::{
-            native_adapter::{InsertAfter, ReaderFacts},
-            navigation::LogicalDirection,
-            PageKey,
+        end: Instant,
+    ) -> Result<std::result::Result<PlacedOutput, super::resident_output::ResidentOutputOutcome>>
+    {
+        use super::resident_output::{
+            exact, PageUse, ResidentOutputOutcome as Outcome, ResidentOutputText,
         };
-        // One original output deadline. Provider work cannot refresh this window;
-        // later stages only clamp it, and synchronous work is checked on return.
-        let placement_started = Instant::now();
-        let end = placement_started + Duration::from_secs(90);
+        use remarkable_open_sdk::{
+            native_adapter::InsertAfter, navigation::LogicalDirection, PageKey,
+        };
         self.selection.current(end)?;
         admitted_progress(end, || self.progress(health))?;
         let original = self
@@ -1370,16 +1530,24 @@ impl ResidentSourceOwner {
         self.reconnect_for_observation(health, end)?;
         let fresh = self.output_observe(health, end)?;
         exact(&fresh, &original)?;
-        let reader_boot = matches!(
-            text,
-            super::resident_output::ResidentOutputText::Reader { .. }
-                | super::resident_output::ResidentOutputText::ReaderQuestion(_)
-        )
+        // The capture before opening already bracketed these same source facts.
+        // An actual navigation or insertion still gets its own fresh observation.
+        #[cfg(feature = "installed-resident-output")]
+        let opening = matches!(purpose, OutputPurpose::Open(_));
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opening = false;
+        let reader_boot = (opening
+            || matches!(
+                purpose,
+                OutputPurpose::Render(
+                    ResidentOutputText::Reader { .. } | ResidentOutputText::ReaderQuestion(_)
+                )
+            ))
         .then_some(runtime.boot);
         if let Some(target) = unsettled_output_insertion(ledger, &fresh, conversation, reader_boot)?
         {
             log::info!("Resident output requires reconciliation for historical insertion {target}");
-            return Ok(Outcome::Unresolved);
+            return Ok(Err(Outcome::Unresolved));
         }
         let association_current = || -> Result<bool> {
             let Some(expected) = association else {
@@ -1393,7 +1561,7 @@ impl ResidentSourceOwner {
             ))
         };
         if !association_current()? {
-            return Ok(Outcome::Unresolved);
+            return Ok(Err(Outcome::Unresolved));
         }
         let blank_start_source = self.blank_start_requested();
         let current = self.output_role(
@@ -1404,9 +1572,14 @@ impl ResidentSourceOwner {
             &original,
             blank_start_source,
             matches!(
-                text,
-                super::resident_output::ResidentOutputText::WriterSourceDraft(_)
+                purpose,
+                OutputPurpose::Render(ResidentOutputText::WriterSourceDraft(_))
             ),
+            match purpose {
+                #[cfg(feature = "installed-resident-output")]
+                OutputPurpose::Open(retained) => Some(retained),
+                OutputPurpose::Render(_) => None,
+            },
             end,
             before_effect,
         )?;
@@ -1415,7 +1588,7 @@ impl ResidentSourceOwner {
             original.clone() // current-first reuse: do not inspect a successor
         } else {
             if current != PageUse::ConfirmedNonBuddy {
-                return Ok(Outcome::Unresolved);
+                return Ok(Err(Outcome::Unresolved));
             }
             let source_index = original
                 .order()
@@ -1443,6 +1616,7 @@ impl ResidentSourceOwner {
                     &expected,
                     false,
                     false,
+                    None,
                     end,
                     before_effect,
                 )?;
@@ -1467,7 +1641,7 @@ impl ResidentSourceOwner {
                             "Resident output refused after restoring source {}",
                             original.page().page
                         );
-                        return Ok(Outcome::Unresolved);
+                        return Ok(Err(Outcome::Unresolved));
                     }
                 }
             }
@@ -1475,10 +1649,14 @@ impl ResidentSourceOwner {
                 existing
             } else {
                 if association.is_some() {
-                    return Ok(Outcome::Unresolved);
+                    return Ok(Err(Outcome::Unresolved));
                 }
-                if !backend.supports_page_text(text, true)? {
-                    return Ok(Outcome::Unavailable);
+                if match purpose {
+                    #[cfg(feature = "installed-resident-output")]
+                    OutputPurpose::Open(_) => false,
+                    OutputPurpose::Render(text) => !backend.supports_page_text(text, true)?,
+                } {
+                    return Ok(Err(Outcome::Unavailable));
                 }
                 ensure!(original.order().len() <= 16, "native insertion order bound");
                 let observed = self.output_observe(health, end)?;
@@ -1511,7 +1689,7 @@ impl ResidentSourceOwner {
                     }
                     Ok(Reply::Rejected(reason)) => {
                         log::info!("Resident page insertion refused: {reason:?}");
-                        return Ok(Outcome::InsertionRefused);
+                        return Ok(Err(Outcome::InsertionRefused));
                     }
                     Ok(other) => {
                         anyhow::bail!("resident insertion unresolved; no retry: {other:?}")
@@ -1551,9 +1729,73 @@ impl ResidentSourceOwner {
             if expected.receipt().observed_page.as_bytes() != target.page().page.as_bytes()
                 || !association_current()?
             {
-                return Ok(Outcome::Unresolved);
+                return Ok(Err(Outcome::Unresolved));
             }
         }
+        Ok(Ok(PlacedOutput {
+            target,
+            runtime,
+            newly_created,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_answer(
+        &mut self,
+        health: &mut ServiceHealth,
+        backend: &mut dyn super::resident_output::ResidentOutputBackend,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: super::resident_output::ResidentOutputText<'_>,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::resident_output::ResidentOutputOutcome> {
+        use super::resident_output::{exact, ResidentOutputOutcome as Outcome};
+        let placement_started = Instant::now();
+        let end = placement_started + Duration::from_secs(90);
+        #[cfg(feature = "installed-resident-output")]
+        let opened = self.opened_output.clone();
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opened: Option<OpenedOutput> = None;
+        let already_open = opened.is_some();
+        let PlacedOutput {
+            target,
+            runtime,
+            newly_created,
+        } = if let Some(opened) = opened {
+            ensure!(
+                opened.association.receipt().conversation == conversation
+                    && association.is_some_and(|association| {
+                        association.binding_revision() == opened.association.binding_revision()
+                    }),
+                "opened Buddy page belongs to another request"
+            );
+            self.check_opened_binding(ledger, &opened.association)?;
+            self.selection.current(end)?;
+            self.reconnect_for_observation(health, end)?;
+            ensure!(
+                self.session.as_ref().unwrap().identity() == opened.placement.runtime,
+                "opened Buddy runtime changed"
+            );
+            if !backend.supports_page_text(text, opened.placement.newly_created)? {
+                return Ok(Outcome::Unavailable);
+            }
+            opened.placement
+        } else {
+            match self.place_output(
+                health,
+                backend,
+                ledger,
+                conversation,
+                OutputPurpose::Render(text),
+                association,
+                before_effect,
+                end,
+            )? {
+                Ok(placed) => placed,
+                Err(outcome) => return Ok(outcome),
+            }
+        };
         if text.is_empty() && !newly_created {
             return Ok(Outcome::ReusedWithoutWrite);
         }
@@ -1569,6 +1811,9 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         let observed = self.output_observe(health, end)?;
+        if already_open && observed != target {
+            self.canceled = true;
+        }
         exact(&observed, &target)?;
         before_effect()?;
         admitted_progress(end, || self.progress(health))?;
@@ -1594,8 +1839,21 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         let final_target = self.output_observe(health, end)?;
+        if already_open && final_target != target {
+            self.canceled = true;
+        }
         exact(&final_target, &target)?;
+        if already_open {
+            self.check_opened_binding(
+                ledger,
+                association.context("opened output binding absent")?,
+            )?;
+        }
         admitted_progress(end, || self.progress(health))?;
+        #[cfg(feature = "installed-resident-output")]
+        if let Some(opened) = &mut self.opened_output {
+            opened.render_started = true;
+        }
         let mut lease = DevelopmentTargetLease {
             owner: self,
             health,
@@ -1705,10 +1963,7 @@ pub(crate) mod tests {
     };
     use nix::libc;
     use remarkable_open_sdk::{
-        native_adapter::{
-            Command, ConnectionIdentity, Frame, HistoricalCapture, InsertAfter, Message,
-            ReaderFacts,
-        },
+        native_adapter::{Command, ConnectionIdentity, Frame, InsertAfter, Message, ReaderFacts},
         navigation::LogicalDirection,
     };
     use std::{
@@ -3074,6 +3329,8 @@ pub(crate) mod tests {
         rendered_text: Option<Rc<RefCell<Vec<String>>>>,
         #[cfg(feature = "installed-resident-output")]
         book_edit_on_navigation: Option<PathBuf>,
+        #[cfg(feature = "installed-resident-output")]
+        early_source: Option<(ReaderFacts, Rc<RefCell<Option<String>>>)>,
     }
 
     struct SuccessorProbe {
@@ -3257,6 +3514,60 @@ pub(crate) mod tests {
     }
 
     impl ResidentOutputBackend for RecognitionProbe {
+        #[cfg(feature = "installed-resident-output")]
+        fn opens_submission_page(&self) -> bool {
+            self.early_source.is_some()
+        }
+
+        #[cfg(feature = "installed-resident-output")]
+        fn bind_opened_page(
+            &mut self,
+            ledger: &Ledger,
+            conversation: ConversationId,
+            target: &ReaderFacts,
+        ) -> Result<()> {
+            use crate::conversation::{
+                BindingAcquisition, BindingReceipt, ExpectedHeads, SourceObservation,
+            };
+            let (source, _) = self
+                .early_source
+                .as_ref()
+                .context("fixture source absent")?;
+            let stored = |uuid: Uuid| ConversationId::from_bytes(*uuid.as_bytes());
+            let operation = ConversationId::new_v4();
+            ledger.bind(
+                operation,
+                ledger.expected(Namespace::Conversation, conversation)?,
+                ExpectedHeads::default(),
+                BindingReceipt {
+                    operation,
+                    conversation,
+                    request_fingerprint: "open-before-model-fixture".into(),
+                    adapter_fingerprint: crate::storage::digest(b"adapter"),
+                    source: SourceObservation {
+                        document: stored(source.page().document),
+                        page: stored(source.page().page),
+                        session: "open-before-model-fixture".into(),
+                        visit: operation.to_string(),
+                        content_revision: None,
+                        order_revision: None,
+                        capability_revision: crate::storage::digest(b"profile"),
+                        evidence_procedure: "open-before-model-fixture".into(),
+                    },
+                    intended_target: Some(stored(target.page().page)),
+                    observed_document: stored(target.page().document),
+                    observed_page: stored(target.page().page),
+                    expected_order: source.order().iter().copied().map(stored).collect(),
+                    observed_order: target.order().iter().copied().map(stored).collect(),
+                    persisted_revision: "fixture-scene".into(),
+                    observed_ms: 3,
+                    evidence_origin: "installed-native-guarded-v1".into(),
+                    acquisition: BindingAcquisition::Inserted,
+                },
+            )?;
+            Ok(())
+        }
+
         fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
             #[cfg(feature = "installed-resident-output")]
             if matches!(
@@ -3267,6 +3578,10 @@ pub(crate) mod tests {
                     && crate::workflow::resident_output::development::fits_test_keyboard(
                         text, new_page,
                     ));
+            }
+            #[cfg(feature = "installed-resident-output")]
+            if self.early_source.is_some() {
+                return Ok(true);
             }
             assert!(
                 new_page
@@ -3292,12 +3607,21 @@ pub(crate) mod tests {
             _: &Ledger,
             conversation: ConversationId,
             _: &RuntimeIdentity,
-            _: &ReaderFacts,
-            _: &HistoricalCapture,
+            _facts: &ReaderFacts,
+            _pixels: &[u8],
             _: bool,
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
+            #[cfg(feature = "installed-resident-output")]
+            if let Some((source, captured)) = &self.early_source {
+                self.conversation.set(Some(conversation));
+                if source == _facts {
+                    *captured.borrow_mut() = Some(crate::storage::digest(_pixels));
+                    return Ok(PageUse::ConfirmedNonBuddy);
+                }
+                return Ok(PageUse::RelevantBuddy);
+            }
             let previous = self.conversation.replace(Some(conversation));
             assert!(
                 previous.is_none() || (self.successor.is_some() && previous == Some(conversation))

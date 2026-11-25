@@ -79,7 +79,7 @@ pub(super) enum WriterCapture<'a> {
 const EXPORT_CLARIFICATION: &str =
     "Should I save a note from this page to your configured destination?";
 
-fn source_conversation(capture: &ResidentSourceCapture) -> Uuid {
+pub(super) fn source_conversation(capture: &ResidentSourceCapture) -> Uuid {
     writer::stage(
         crate::conversation::Ledger::binding_id(capture.document(), capture.page()),
         "source-page-conversation",
@@ -449,7 +449,9 @@ impl<M: LLMEngine> Orchestrator<M> {
         preparation: Uuid,
         purpose: WriterCapture<'_>,
     ) -> Result<PreparedWriterCapture> {
-        let association = self.ledger.resident_answer_association(capture)?;
+        let association = self
+            .workflow
+            .installed_source_association(&self.ledger, capture)?;
         let conversation = if let Some(binding) = &association {
             ensure!(
                 binding.receipt().source.page == capture.page()

@@ -411,13 +411,9 @@ impl NativeOutputBackend {
     fn recognizes_ordinary_page(
         &self,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
     ) -> Result<bool> {
-        ensure!(
-            pixels.before() == facts && pixels.after() == facts,
-            "native capture changed"
-        );
         let root = Path::new("/home/root/.local/share/remarkable/xochitl");
         let content_path = root.join(format!("{}.content", facts.page().document));
         let raw = Self::read_native_file(&content_path, 1024 * 1024)?;
@@ -444,7 +440,7 @@ impl NativeOutputBackend {
         if page.get("deleted").is_some() {
             return Ok(false);
         }
-        let image = image::load_from_memory(pixels.png())?.into_rgba8();
+        let image = image::load_from_memory(pixels)?.into_rgba8();
         if image.dimensions() != (1404, 1872) {
             return Ok(false);
         }
@@ -649,6 +645,23 @@ impl NativeOutputBackend {
 }
 
 impl ResidentOutputBackend for NativeOutputBackend {
+    #[cfg(feature = "installed-resident-output")]
+    fn opens_submission_page(&self) -> bool {
+        matches!(self.pin.as_ref(), OutputPin::Installed(_))
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn bind_opened_page(
+        &mut self,
+        ledger: &Ledger,
+        conversation: Uuid,
+        target: &ReaderFacts,
+    ) -> Result<()> {
+        self.pin.current()?;
+        self.bind(ledger, conversation, target, true, None)?;
+        Ok(())
+    }
+
     fn selected_conversation_request(&self) -> Result<Option<SelectedConversationRequest>> {
         self.pin.current()?;
         Ok(self.plan.as_ref().and_then(|plan| {
@@ -815,7 +828,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         conversation: Uuid,
         runtime: &RuntimeIdentity,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
         end: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
@@ -836,7 +849,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
                 .create_new(true)
                 .mode(0o600)
                 .open(directory.join(format!("{stem}.png")))?;
-            file.write_all(pixels.png())?;
+            file.write_all(pixels)?;
             file.sync_all()?;
             let mut receipt = OpenOptions::new()
                 .write(true)
@@ -845,7 +858,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
                 .open(directory.join(format!("{stem}.json")))?;
             serde_json::to_writer(
                 &mut receipt,
-                &serde_json::json!({"runtime":format!("{runtime:?}"),"facts":format!("{facts:?}"),"png_sha256":hex(&pixels.sha256()),"page_authority":false}),
+                &serde_json::json!({"runtime":format!("{runtime:?}"),"facts":format!("{facts:?}"),"png_sha256":crate::storage::digest(pixels),"page_authority":false}),
             )?;
             receipt.sync_all()?;
         }
@@ -903,7 +916,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
             ) => return Ok(PageUse::Unresolved),
             _ => {}
         }
-        let image = image::load_from_memory(pixels.png())?.resize_exact(
+        let image = image::load_from_memory(pixels)?.resize_exact(
             768,
             1024,
             image::imageops::FilterType::Nearest,
@@ -919,7 +932,8 @@ impl ResidentOutputBackend for NativeOutputBackend {
         // The historical framebuffer header cache can differ from native pixels.
         if plan.is_some_and(|plan| {
             plan.adopt_legacy.iter().any(|p| {
-                p.page == stored(facts.page().page) && p.png_sha256 == hex(&pixels.sha256())
+                p.page == stored(facts.page().page)
+                    && p.png_sha256 == crate::storage::digest(pixels)
             })
         }) {
             log::info!("Explicit native legacy fixture matched; cached header match={cached_header_matches}");
@@ -984,7 +998,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         // The ONLY negative shortcut is an explicit fixture proof matched to real
         // fresh native pixels; no binding/cache/header absence proves non-Buddy.
         let page = stored(facts.page().page);
-        let digest = hex(&pixels.sha256());
+        let digest = crate::storage::digest(pixels);
         let confirmed = match creation {
             Some(second) => second.source == page && second.png_sha256 == digest,
             None => plan.is_some_and(|plan| {

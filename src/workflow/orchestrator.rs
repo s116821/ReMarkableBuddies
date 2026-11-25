@@ -332,6 +332,62 @@ impl<M: LLMEngine> Orchestrator<M> {
             };
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if let super::AcquiredEvidence::ResidentHistorical(capture) = &acquired {
+            self.workflow.open_installed_submission(
+                &self.ledger,
+                capture,
+                current_page_writer::source_conversation(capture),
+            )?;
+        }
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        {
+            use crate::{conversation::Mode, storage::Uuid};
+            let opened = self.workflow.opened_submission().cloned();
+            let mut request = opened.as_ref().map(|_| source_submission::OpenedRequest {
+                exchange: Uuid::new_v4(),
+                mode: if config.is_some_and(|config| !config.reader_enabled()) {
+                    Mode::Writer
+                } else {
+                    Mode::Reader
+                },
+                request: None,
+            });
+            let result = self.run_source_submission(
+                acquired,
+                observed_book,
+                local,
+                config,
+                request.as_mut(),
+            );
+            if let (Some(binding), Some(request), Err(error)) = (opened, request, &result) {
+                if let Err(feedback_error) = self.present_opened_failure(&binding, request, error) {
+                    return Err(anyhow::anyhow!(
+                        "{error:#}; Buddy feedback could not be saved: {feedback_error:#}"
+                    ));
+                }
+            }
+            result
+        }
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        self.run_source_submission(acquired, local, config)
+    }
+
+    fn run_source_submission(
+        &mut self,
+        acquired: super::AcquiredEvidence,
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        observed_book: Result<
+            Option<super::resident_source::original_pdf::OrdinaryBookSource>,
+        >,
+        local: Option<&Dispatch<'_>>,
+        config: Option<&Config>,
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))] mut opened: Option<
+            &mut source_submission::OpenedRequest,
+        >,
+    ) -> Result<()> {
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        let _ = local;
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         if let (Some(dispatch), super::AcquiredEvidence::ResidentHistorical(capture)) =
             (local, &acquired)
         {
@@ -339,7 +395,16 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && dispatch.shared_source_writer_enabled()
             {
                 use source_submission::SourceIntent;
-                match self.classify_source_submission(capture, dispatch)? {
+                let intent = self.classify_source_submission(capture, dispatch)?;
+                if let (Some(opened), Some((request, stage))) =
+                    (opened.as_deref_mut(), intent.writer_exchange())
+                {
+                    let (capture_operation, _) = capture.writer_page_input()?;
+                    opened.exchange = crate::writer::stage(capture_operation, stage);
+                    opened.mode = crate::conversation::Mode::Writer;
+                    opened.request = Some(request.to_owned());
+                }
+                match intent {
                     SourceIntent::Reader => {}
                     SourceIntent::WriterCurrentPage { request } => {
                         return self
@@ -396,6 +461,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                         );
                     }
                     SourceIntent::Unresolved => {
+                        if self.workflow.opened_submission().is_some() {
+                            return Err(source_submission::UnresolvedSubmission.into());
+                        }
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());
                     }
@@ -407,7 +475,23 @@ impl<M: LLMEngine> Orchestrator<M> {
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let observed_book = ordinary_pdf::classify(&mut self.workflow, observed_book?)?;
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let mut attempt = if let Some(binding) = self.workflow.opened_submission() {
+            Attempt::prepare_with_resident_association(
+                &self.ledger,
+                acquired,
+                Some(binding.clone()),
+            )?
+        } else {
+            Attempt::prepare(&self.ledger, acquired)?
+        };
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        if let Some(opened) = opened {
+            opened.exchange = attempt.user.exchange;
+            opened.mode = attempt.user.mode.clone();
+        }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let result = match observed_book {
             Some(book) => self.run_ordinary_book(
@@ -767,6 +851,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                     == selected.root,
             "Writer draft changed before page placement"
         );
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let association = self
+            .workflow
+            .installed_source_association(&self.ledger, capture)?;
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let association = self.ledger.resident_answer_association(capture)?;
         anyhow::ensure!(
             association.as_ref().map(|a| a.binding_revision())
@@ -1266,7 +1355,15 @@ impl<M: LLMEngine> Orchestrator<M> {
                     rendered.as_ref().err()
                 ));
             }
-            rendered?;
+            let outcome = rendered?;
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            if self.workflow.opened_submission().is_some() {
+                anyhow::ensure!(
+                    outcome == super::resident_output::ResidentOutputOutcome::SubmittedUnverified,
+                    "Buddy answer could not be submitted on its opened page"
+                );
+            }
+            let _ = outcome;
             return Ok(());
         }
         if !attempt.legacy_output() {

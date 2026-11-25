@@ -420,6 +420,18 @@ impl OrdinaryBookSource {
         })
     }
 
+    pub(super) fn after_opening(&mut self, facts: &ReaderFacts) -> Result<()> {
+        let mut work = METADATA_SAMPLE_WORK;
+        let directory = self.directory.current(&mut work)?;
+        self.table = Asset::open(
+            &directory,
+            format!("{}.content", facts.page().document),
+            TABLE_BYTES,
+            &mut work,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn read(
         self,
         facts: &ReaderFacts,

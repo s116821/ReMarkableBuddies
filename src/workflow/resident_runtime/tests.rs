@@ -46,6 +46,14 @@ impl Fixture {
         self.0.join("ordinary-pdf-order-change")
     }
 
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn opened_page_probe(&self) -> (PathBuf, PathBuf) {
+        (
+            self.0.join("observed-open-page"),
+            self.0.join("source-switch"),
+        )
+    }
+
     pub(crate) fn successor_position(&self) -> PathBuf {
         self.0.join("successor-position")
     }

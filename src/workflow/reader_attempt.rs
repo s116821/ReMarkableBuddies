@@ -440,15 +440,24 @@ impl Attempt {
         }
     }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
+        Self::prepare_with_resident_association(ledger, acquired, None)
+    }
+
+    pub(super) fn prepare_with_resident_association(
+        ledger: &Ledger,
+        acquired: AcquiredEvidence,
+        opened: Option<HistoricalPageAssociation>,
+    ) -> Result<Self> {
         let timestamp = now()?;
         let destination = match &acquired {
             AcquiredEvidence::Sdk { destination, .. } => *destination,
             _ => None,
         };
         let resident_answer = match &acquired {
-            AcquiredEvidence::ResidentHistorical(capture) => {
-                ledger.resident_answer_association(capture)?
-            }
+            AcquiredEvidence::ResidentHistorical(capture) => match opened {
+                Some(opened) => Some(opened),
+                None => ledger.resident_answer_association(capture)?,
+            },
             _ => None,
         };
         let modeled_binding = match destination {
