@@ -29,11 +29,28 @@ pub struct ReleasedReaderInput {
     pub(crate) gesture: ResidentGesture,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interruption {
+    ObservedAction,
+    NonquietContact,
+    InputLost,
+}
+
+impl Interruption {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ObservedAction => "observed-action",
+            Self::NonquietContact => "nonquiet-contact",
+            Self::InputLost => "input-loss",
+        }
+    }
+}
+
 pub struct RequestInput {
     observer: InputObserver,
     corner: TriggerCorner,
     owned_sysfs: Option<PathBuf>,
-    canceled: bool,
+    first_interruption: Option<Interruption>,
     lost: bool,
 }
 
@@ -107,11 +124,11 @@ impl RequestInput {
                 );
                 let mut next = fresh()?;
                 ensure!(
-                    prior.poll()?.is_empty() && prior.quiescent(),
+                    prior.poll_request()?.is_empty() && prior.quiescent(),
                     "Input changed during resident release handoff"
                 );
                 ensure!(
-                    next.poll()?.is_empty() && next.quiescent(),
+                    next.poll_request()?.is_empty() && next.quiescent(),
                     "New resident input observer not quiet"
                 );
                 progress()?;
@@ -127,7 +144,7 @@ impl RequestInput {
                         observer: next,
                         corner,
                         owned_sysfs: None,
-                        canceled: false,
+                        first_interruption: None,
                         lost: false,
                     },
                 });
@@ -145,7 +162,7 @@ impl RequestInput {
             observer: InputObserver::new(corner.clone(), owned_sysfs)?,
             corner,
             owned_sysfs: owned_sysfs.map(Path::to_path_buf),
-            canceled: false,
+            first_interruption: None,
             lost: false,
         })
     }
@@ -157,8 +174,16 @@ impl RequestInput {
         self.require_quiet()?;
         let mut next = InputObserver::new(self.corner.clone(), Some(path))?;
         self.require_quiet()?;
+        let events = match next.poll_request() {
+            Ok(events) => events,
+            Err(error) => {
+                self.record_interruption(Interruption::InputLost);
+                self.lost = true;
+                return Err(error);
+            }
+        };
         ensure!(
-            next.poll()?.is_empty() && next.quiescent(),
+            self.observe_activity(&events, next.quiescent()),
             "input changed during owned keyboard handoff"
         );
         self.observer = next;
@@ -169,27 +194,49 @@ impl RequestInput {
     pub fn poll(&mut self) -> Result<InputProgress> {
         // Poll even after cancellation so a later observer failure stays fatal.
         self.sample_quiet()?;
-        Ok(if self.canceled {
-            InputProgress::Canceled
-        } else {
-            InputProgress::Quiet
-        })
+        Ok(self.progress_state())
     }
 
     // Read-only startup can wait on an abandoned guard without renewing its
     // authority. Sampling never clears sticky cancellation or input loss.
     pub(crate) fn sample_quiet(&mut self) -> Result<bool> {
         ensure!(!self.lost, "Resident request input integrity lost");
-        let events = match self.observer.poll() {
+        let events = match self.observer.poll_request() {
             Ok(events) => events,
             Err(error) => {
+                self.record_interruption(Interruption::InputLost);
                 self.lost = true;
                 return Err(error);
             }
         };
-        let quiet = events.is_empty() && self.observer.quiescent();
-        self.canceled |= !quiet;
-        Ok(quiet)
+        Ok(self.observe_activity(&events, self.observer.quiescent()))
+    }
+
+    fn progress_state(&self) -> InputProgress {
+        if self.first_interruption.is_some() {
+            InputProgress::Canceled
+        } else {
+            InputProgress::Quiet
+        }
+    }
+
+    fn observe_activity(&mut self, events: &[Interaction], quiescent: bool) -> bool {
+        if !events.is_empty() {
+            self.record_interruption(Interruption::ObservedAction);
+        } else if !quiescent {
+            self.record_interruption(Interruption::NonquietContact);
+        }
+        events.is_empty() && quiescent
+    }
+
+    fn record_interruption(&mut self, reason: Interruption) {
+        if self.first_interruption.is_none() {
+            self.first_interruption = Some(reason);
+            log::info!(
+                "Resident request input interrupted reason={}",
+                reason.label()
+            );
+        }
     }
 
     pub(crate) fn require_quiet(&mut self) -> Result<()> {
@@ -217,18 +264,16 @@ impl RequestInput {
                 return Ok(InputProgress::Canceled);
             }
             let mut fresh = create()?;
-            let prior = self.poll()?;
-            let events = fresh.poll()?;
-            self.canceled |=
-                prior == InputProgress::Canceled || !events.is_empty() || !fresh.quiescent();
+            self.poll()?;
+            let events = fresh.poll_request()?;
+            self.observe_activity(&events, fresh.quiescent());
             self.observer = fresh;
-            Ok(if self.canceled {
-                InputProgress::Canceled
-            } else {
-                InputProgress::Quiet
-            })
+            Ok(self.progress_state())
         })();
-        self.lost |= result.is_err();
+        if result.is_err() {
+            self.record_interruption(Interruption::InputLost);
+            self.lost = true;
+        }
         result
     }
 
@@ -238,9 +283,16 @@ impl RequestInput {
             observer: InputObserver::scripted(polls),
             corner: TriggerCorner::LowerLeft,
             owned_sysfs: None,
-            canceled: false,
+            first_interruption: None,
             lost: false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replay(batches: Vec<(bool, Vec<super::owned_pen_window::Event>)>) -> Self {
+        let mut guard = Self::scripted(vec![]);
+        guard.observer = InputObserver::replay_request(batches);
+        guard
     }
 }
 
@@ -278,8 +330,48 @@ mod tests {
                 assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
                 assert!(guard.poll().is_err());
                 assert!(guard.poll().is_err());
+                assert_eq!(guard.first_interruption, Some(Interruption::ObservedAction));
             }
         }
+    }
+
+    #[test]
+    fn passive_device_packets_do_not_cancel_resident_input() {
+        use evdev::{EventType, MiscCode};
+
+        let timestamp = (EventType::MISC.0, MiscCode::MSC_TIMESTAMP.0, 17);
+        let mut unfiltered =
+            InputObserver::replay_request(vec![(false, vec![timestamp, (0, 0, 0)])]);
+        assert_eq!(unfiltered.poll().unwrap(), [Interaction::Invalidated]);
+
+        let mut guard = RequestInput::replay(vec![
+            (true, vec![timestamp]), // No SYN_REPORT has arrived on this descriptor.
+            (
+                false,
+                vec![
+                    timestamp,
+                    (EventType::LED.0, 0, 1),
+                    (EventType::SOUND.0, 1, 0),
+                    (EventType::REPEAT.0, 0, 100),
+                    (0, 0, 0),
+                ],
+            ),
+        ]);
+        assert_eq!(guard.poll().unwrap(), InputProgress::Quiet);
+        assert_eq!(guard.first_interruption, None);
+
+        // The same packets cannot hide the genuine key event in their batch.
+        let mut guard = RequestInput::replay(vec![(
+            false,
+            vec![
+                timestamp,
+                (EventType::KEY.0, 28, 1),
+                (EventType::LED.0, 0, 1),
+                (0, 0, 0),
+            ],
+        )]);
+        assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+        assert_eq!(guard.first_interruption, Some(Interruption::ObservedAction));
     }
 
     #[test]
@@ -291,14 +383,20 @@ mod tests {
         )]);
         assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
         assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+        assert_eq!(
+            guard.first_interruption,
+            Some(Interruption::NonquietContact)
+        );
     }
 
     #[test]
     fn dropped_raw_input_is_integrity_loss() {
-        let mut guard = RequestInput::scripted(vec![]);
-        guard.observer = InputObserver::replay_request(vec![(true, vec![(0, 3, 0)])]);
-        assert!(guard.poll().is_err());
-        assert!(guard.poll().is_err());
+        for touch in [true, false] {
+            let mut guard = RequestInput::replay(vec![(touch, vec![(0, 3, 0)])]);
+            assert!(guard.poll().is_err());
+            assert!(guard.poll().is_err());
+            assert_eq!(guard.first_interruption, Some(Interruption::InputLost));
+        }
     }
 
     #[test]

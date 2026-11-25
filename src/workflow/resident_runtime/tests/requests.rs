@@ -156,6 +156,98 @@ fn final_admission_after_real_outcome_publication_preserves_history_without_deli
 }
 
 #[test]
+fn post_insert_observation_accepts_passive_packets_and_still_stops_for_user_input() {
+    use crate::device::request_input::RequestInput;
+    use evdev::{EventType, MiscCode};
+
+    for user_input in [false, true] {
+        let fixture = Fixture::new();
+        let page = PageKey {
+            document: nonce(),
+            page: nonce(),
+        };
+        fixture.declare_source(
+            StoreUuid::from_bytes(*page.document.as_bytes()),
+            StoreUuid::from_bytes(*page.page.as_bytes()),
+        );
+        let mut runtime = fixture
+            .start(
+                "reconnect-source-handoff-writer-insert",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let operation = OperationId(nonce());
+        let target = nonce();
+        let conversation = StoreUuid::new_v4();
+        let result = request::execute(
+            &mut runtime,
+            operation,
+            Request::Insert {
+                conversation,
+                insertion: InsertAfter {
+                    source: ReaderFacts::new(page, vec![page.page]).unwrap(),
+                    target,
+                },
+            },
+            end(),
+            &mut quiet,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let after = PageKey {
+            document: page.document,
+            page: target,
+        };
+        assert_eq!(
+            result,
+            Reply::InsertionObserved {
+                target: after,
+                after_order: vec![page.page, target],
+            }
+        );
+        let journal = runtime
+            .store
+            .paths
+            .data
+            .join("native-insertion-attempts-v1.json");
+        let original_receipt = fs::read(&journal).unwrap();
+
+        let mut packets = vec![
+            (EventType::MISC.0, MiscCode::MSC_TIMESTAMP.0, 17),
+            (EventType::LED.0, 0, 1),
+        ];
+        if user_input {
+            packets.push((EventType::KEY.0, 28, 1));
+        }
+        packets.push((0, 0, 0)); // SYN_REPORT
+        let mut guard = RequestInput::replay(vec![(false, packets)]);
+        let observation = request::execute(
+            &mut runtime,
+            OperationId(nonce()),
+            Request::Observe,
+            end(),
+            &mut || guard.poll(),
+            &mut || Ok(()),
+        );
+        if user_input {
+            assert_eq!(observation.unwrap_err().kind, FailureKind::Canceled);
+        } else {
+            assert_eq!(
+                observation.unwrap(),
+                Reply::Observed(ReaderFacts::new(after, vec![page.page, target]).unwrap()),
+            );
+        }
+        assert_eq!(fs::read(&journal).unwrap(), original_receipt);
+        let attempts = resident_client::attempts(&runtime.store).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].conversation, conversation);
+        assert_eq!(attempts[0].request.frame().operation, operation);
+        assert_eq!(attempts[0].reply.as_ref(), Some(&result));
+        assert!(runtime.shutdown(end()).reaped);
+    }
+}
+
+#[test]
 fn ordinary_request_retirement_keeps_process_and_allows_explicit_reconnect() {
     for scenario in ["canceled", "deadline", "pending-deadline", "eof"] {
         let fixture = Fixture::new();
