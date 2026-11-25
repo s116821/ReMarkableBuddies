@@ -7,13 +7,17 @@ use remarkable_rm::{
     blocks::iter_blocks,
     primitives::Reader,
     scene::{
-        items::{read_scene_item, ItemType},
+        items::{read_scene_item, ItemEnvelope, ItemType},
         line::read_line,
         tree::{read_scene_tree_block, read_tree_node_block},
     },
-    BlockType, CrdtId, Line, Pen, PenColor, RenderOptions, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    BlockType, CrdtId, Layer, Line, Page, Pen, RenderOptions, DEFAULT_HEIGHT, DEFAULT_WIDTH,
 };
-use std::{collections::BTreeSet, io::Cursor};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 const MAX_SCENE_BYTES: usize = 256 * 1024;
 const MAX_BLOCKS: usize = 512;
@@ -54,12 +58,10 @@ impl NotebookRaster {
             "unsupported saved notebook page count or identity"
         );
         progress()?;
-        let height = checked_scene_extent(page.scene)?;
+        let (scene, height) = saved_scene(page.scene)?;
         verify_white_template(&page)?;
         progress()?;
 
-        let scene =
-            remarkable_rm::parse_page(page.scene).context("saved scene assembly refused")?;
         let png = remarkable_rm::render_page(
             &scene,
             RenderOptions {
@@ -187,18 +189,18 @@ fn verify_white_svg(svg: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Check the records the upstream assembler can drop, plus the ink geometry
-/// its rasterizer would otherwise clip. Only complete flat scenes qualify.
-fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
+/// Assemble the flat, fully accounted scene once, in the tablet's paint order.
+fn saved_scene(bytes: &[u8]) -> Result<(Page, u32)> {
     ensure!(
         bytes.len() <= MAX_SCENE_BYTES,
         "saved scene exceeds byte budget"
     );
     let mut trees = BTreeSet::new();
-    let mut nodes = BTreeSet::new();
+    let mut nodes = BTreeMap::new();
     let mut layers = BTreeSet::new();
-    let mut items = BTreeSet::new();
-    let mut line_parents = BTreeSet::new();
+    let mut item_ids = BTreeSet::new();
+    let mut groups = Vec::new();
+    let mut lines: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut points = 0;
     let mut has_size = false;
     let mut bottom = DEFAULT_HEIGHT as f32;
@@ -214,14 +216,16 @@ fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
             (BlockType::SceneTree, 1) => {
                 let tree = read_scene_tree_block(&mut body)?;
                 ensure!(
-                    tree.parent_id == CrdtId::ROOT && trees.insert(tree.node_id),
+                    tree.parent_id == CrdtId::ROOT && trees.insert(tree.tree_id),
                     "nested or ambiguous saved scene tree"
                 );
             }
             (BlockType::TreeNode, 1 | 2) => {
                 let node = read_tree_node_block(&mut body)?;
                 ensure!(
-                    node.anchor.is_none() && node.visible.value && nodes.insert(node.node_id),
+                    node.anchor.is_none()
+                        && node.visible.value
+                        && nodes.insert(node.node_id, node.label.value).is_none(),
                     "unsupported saved scene layer"
                 );
             }
@@ -234,12 +238,13 @@ fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
                 ensure!(
                     group.parent_id == CrdtId::ROOT
                         && group.deleted_length == 0
-                        && items.insert(group.item_id)
+                        && item_ids.insert(group.item_id)
                         && group.value.is_some_and(|id| {
                             id != CrdtId::ROOT && id != CrdtId::SENTINEL && layers.insert(id)
                         }),
                     "unsupported saved scene group"
                 );
+                groups.push(group);
             }
             (BlockType::SceneLineItem, 2) => {
                 let stroke = read_scene_item(&mut body, ItemType::Line, |value| {
@@ -248,14 +253,14 @@ fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
                     Ok(line)
                 })?;
                 ensure!(
-                    stroke.deleted_length == 0 && items.insert(stroke.item_id),
+                    stroke.deleted_length == 0 && item_ids.insert(stroke.item_id),
                     "ambiguous saved stroke"
                 );
-                let line = stroke.value.context("missing saved stroke")?;
-                line_parents.insert(stroke.parent_id);
+                let line = stroke.value.as_ref().context("missing saved stroke")?;
                 points += line.points.len();
                 ensure!(points <= MAX_POINTS, "saved scene exceeds point budget");
-                bottom = bottom.max(ink_bottom(&line)?);
+                bottom = bottom.max(ink_bottom(line)?);
+                lines.entry(stroke.parent_id).or_default().push(stroke);
             }
             (BlockType::SceneInfo, 1) => {
                 ensure!(!has_size, "ambiguous saved scene geometry");
@@ -271,6 +276,9 @@ fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
                         && size.is_eof(),
                     "unsupported saved scene paper size"
                 );
+                if !body.is_eof() {
+                    check_portrait_layout(&mut body)?;
+                }
                 has_size = true;
             }
             _ => bail!("saved scene record or version is outside the supported profile"),
@@ -282,11 +290,109 @@ fn checked_scene_extent(bytes: &[u8]) -> Result<u32> {
         has_size
             && !layers.is_empty()
             && layers == trees
-            && layers == nodes
-            && line_parents.is_subset(&layers),
+            && nodes.keys().eq(layers.iter())
+            && lines.keys().all(|id| layers.contains(id))
+            && !item_ids.contains(&CrdtId::SENTINEL)
+            && !item_ids.contains(&CrdtId::ROOT),
         "saved scene layer accounting is incomplete"
     );
-    Ok(bottom.ceil() as u32)
+    let mut ordered_layers = Vec::with_capacity(layers.len());
+    for id in paint_order(groups)? {
+        ordered_layers.push(Layer {
+            node_id: id,
+            name: nodes.remove(&id).context("missing saved layer")?,
+            visible: true,
+            lines: paint_order(lines.remove(&id).unwrap_or_default())?,
+            glyphs: Vec::new(),
+        });
+    }
+    Ok((
+        Page {
+            layers: ordered_layers,
+            text: None,
+            paper_size: Some((DEFAULT_WIDTH, DEFAULT_HEIGHT)),
+        },
+        bottom.ceil() as u32,
+    ))
+}
+
+// Stock RM2 pages can include a zero rectangle, two copies of the paper size
+// and an enabled flag after SceneInfo's integer paper size. Validate the
+// captured layout values independently of their last-writer timestamps.
+fn check_portrait_layout(body: &mut Reader<'_>) -> Result<()> {
+    fn stored_value<'a>(body: &mut Reader<'a>, index: u32) -> Result<Reader<'a>> {
+        let mut field = body.read_subblock(index)?;
+        field.read_id(1)?;
+        let value = field.read_subblock(2)?;
+        ensure!(field.is_eof(), "uninterpreted saved layout field");
+        Ok(value)
+    }
+
+    let mut rectangle = stored_value(body, 6)?;
+    for _ in 0..4 {
+        ensure!(
+            rectangle.read_f64()? == 0.0,
+            "unsupported saved layout rectangle"
+        );
+    }
+    ensure!(rectangle.is_eof(), "uninterpreted saved layout rectangle");
+    for mut size in [body.read_subblock(7)?, stored_value(body, 8)?] {
+        ensure!(
+            size.read_f64()? == f64::from(DEFAULT_WIDTH)
+                && size.read_f64()? == f64::from(DEFAULT_HEIGHT)
+                && size.is_eof(),
+            "unsupported saved layout dimensions"
+        );
+    }
+    let mut flag = stored_value(body, 9)?;
+    ensure!(
+        flag.read_u8()? == 1 && flag.is_eof(),
+        "unsupported saved layout flag"
+    );
+    Ok(())
+}
+
+// Sibling links determine paint order. For simultaneous inserts, rmscene's
+// tablet rule is higher author first, then lower sequence number. The pinned
+// renderer's generic assembler breaks drawing ties in ascending author order.
+fn paint_order<T>(mut items: Vec<ItemEnvelope<T>>) -> Result<Vec<T>> {
+    let indices: BTreeMap<_, _> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| (item.item_id, i))
+        .collect();
+    let priority = |id: CrdtId, index| (Reverse(id.author), id.seq, index);
+    let mut pending = vec![0_usize; items.len()];
+    let mut next = vec![Vec::new(); items.len()];
+    for (i, item) in items.iter().enumerate() {
+        for (other, is_left) in [(item.left_id, true), (item.right_id, false)] {
+            if other == CrdtId::SENTINEL {
+                continue;
+            }
+            let &j = indices
+                .get(&other)
+                .context("missing saved paint neighbour")?;
+            let (before, after) = if is_left { (j, i) } else { (i, j) };
+            next[before].push(after);
+            pending[after] += 1;
+        }
+    }
+    let mut ready: BTreeSet<_> = (0..items.len())
+        .filter(|&i| pending[i] == 0)
+        .map(|i| priority(items[i].item_id, i))
+        .collect();
+    let mut values = Vec::with_capacity(items.len());
+    while let Some((_, _, i)) = ready.pop_first() {
+        values.push(items[i].value.take().context("missing saved paint item")?);
+        for &j in &next[i] {
+            pending[j] -= 1;
+            if pending[j] == 0 {
+                ready.insert(priority(items[j].item_id, j));
+            }
+        }
+    }
+    ensure!(values.len() == items.len(), "cyclic saved paint order");
+    Ok(values)
 }
 
 fn strict_value_end(value: &Reader<'_>) -> Result<(), remarkable_rm::ParseError> {
@@ -301,26 +407,44 @@ fn strict_value_end(value: &Reader<'_>) -> Result<(), remarkable_rm::ParseError>
 
 fn ink_bottom(line: &Line) -> Result<f32> {
     ensure!(
-        line.tool == Pen::FinelinerV2
-            && line.color == PenColor::Black
-            && line.color_rgba.is_none_or(|color| color == [0, 0, 0, 255])
-            && (0.5..=12.0).contains(&line.thickness_scale)
+        (0.5..=12.0).contains(&line.thickness_scale)
             && line.starting_length == 0.0
             && line.move_id.is_none()
             && !line.points.is_empty(),
         "saved stroke is outside the supported ink profile"
     );
+    // Bound the painted extent before allocating the canvas. The renderer
+    // applies the recorded pressure, speed, tilt, colour and blending.
+    let widest = f32::from(line.points.iter().map(|p| p.width).max().unwrap_or(0)) / 4.0;
+    let scale = line.thickness_scale as f32;
+    let diameter = match line.tool {
+        Pen::FinelinerV1 | Pen::FinelinerV2 => 1.8 * scale,
+        Pen::BallpointV1 | Pen::BallpointV2 => widest + 1.5,
+        Pen::PencilV1 | Pen::PencilV2 => 10.0 * scale,
+        Pen::MechanicalPencilV1 | Pen::MechanicalPencilV2 => scale * scale,
+        Pen::PaintbrushV1 | Pen::PaintbrushV2 | Pen::Calligraphy => 2.0 * widest,
+        Pen::MarkerV1 | Pen::MarkerV2 | Pen::HighlighterV1 | Pen::HighlighterV2 | Pen::Shader => {
+            widest
+        }
+        Pen::Eraser | Pen::EraserAreaSelect => bail!("saved scene contains an unapplied eraser"),
+    };
+    let radius = if matches!(line.tool, Pen::HighlighterV1 | Pen::HighlighterV2) {
+        diameter * std::f32::consts::FRAC_1_SQRT_2 // square cap at any angle
+    } else {
+        diameter * 0.5
+    };
+    let margin = (radius + 1.0).ceil().max(EDGE_MARGIN);
     let half_width = DEFAULT_WIDTH as f32 / 2.0;
     let mut bottom = 0.0_f32;
     for point in &line.points {
         ensure!(
             point.x.is_finite()
                 && point.y.is_finite()
-                && point.x.abs() <= half_width - EDGE_MARGIN
-                && (EDGE_MARGIN..=MAX_HEIGHT as f32 - EDGE_MARGIN).contains(&point.y),
+                && point.x.abs() <= half_width - margin
+                && (margin..=MAX_HEIGHT as f32 - margin).contains(&point.y),
             "saved ink exceeds the supported full canvas"
         );
-        bottom = bottom.max(point.y + EDGE_MARGIN);
+        bottom = bottom.max(point.y + margin);
     }
     Ok(bottom)
 }

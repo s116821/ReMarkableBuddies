@@ -47,26 +47,64 @@ fn scene_with_samples(stroke: Option<(f32, u32, &[f32])>) -> Vec<u8> {
     record(&mut scene, 4, 1, &group);
 
     if let Some((y, tool, samples)) = stroke {
+        TestStroke {
+            tool,
+            ..Default::default()
+        }
+        .append(&mut scene, y, samples);
+    }
+    scene
+}
+
+#[derive(Clone, Copy)]
+struct TestStroke {
+    // The fixture's sequence numbers all fit in a single varuint byte.
+    id: [u8; 2],
+    left: [u8; 2],
+    tool: u32,
+    color: remarkable_rm::PenColor,
+    width: u16,
+}
+
+impl Default for TestStroke {
+    fn default() -> Self {
+        Self {
+            id: [0, 4],
+            left: [0, 0],
+            tool: Pen::FinelinerV2 as u32,
+            color: remarkable_rm::PenColor::Black,
+            width: 8,
+        }
+    }
+}
+
+impl TestStroke {
+    fn append(self, scene: &mut Vec<u8>, y: f32, samples: &[f32]) {
         let mut ink = vec![3, 0x14];
-        ink.extend(tool.to_le_bytes());
-        ink.extend([0x24, 0, 0, 0, 0, 0x38]);
+        ink.extend(self.tool.to_le_bytes());
+        ink.push(0x24);
+        ink.extend((self.color as u32).to_le_bytes());
+        ink.push(0x38);
         ink.extend(2.0_f64.to_le_bytes());
         ink.extend([0x44, 0, 0, 0, 0]);
         let mut points = Vec::new();
         for &x in samples {
             points.extend(x.to_le_bytes());
             points.extend(y.to_le_bytes());
-            points.extend([0, 0, 8, 0, 0, 255]);
+            points.extend([0, 0]);
+            points.extend(self.width.to_le_bytes());
+            points.extend([0, 255]);
         }
         subblock(&mut ink, 0x5c, &points);
         ink.extend([0x6f, 0, 5]);
-        let mut envelope = vec![
-            0x1f, 0, 2, 0x2f, 0, 4, 0x3f, 0, 0, 0x4f, 0, 0, 0x54, 0, 0, 0, 0,
-        ];
+        let mut envelope = vec![0x1f, 0, 2, 0x2f];
+        envelope.extend(self.id);
+        envelope.push(0x3f);
+        envelope.extend(self.left);
+        envelope.extend([0x4f, 0, 0, 0x54, 0, 0, 0, 0]);
         subblock(&mut envelope, 0x6c, &ink);
-        record(&mut scene, 5, 2, &envelope);
+        record(scene, 5, 2, &envelope);
     }
-    scene
 }
 
 fn saved_page(id: Uuid, bytes: &[u8]) -> SavedPage<'_> {
@@ -165,4 +203,144 @@ fn saved_render_refuses_partial_interpretation() -> Result<()> {
     assert!(raster.push(page, &mut || Ok(())).is_err());
     assert!(raster.originals.is_empty());
     Ok(())
+}
+
+const STOCK_PENS: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/notebook-ink/pens-small.rm"
+));
+
+#[test]
+fn published_rm2_page_preserves_nine_pens_in_the_notebook_input() -> Result<()> {
+    let page = Uuid::new_v4();
+    let mut raster = NotebookRaster::default();
+    raster.push(saved_page(page, STOCK_PENS), &mut || Ok(()))?;
+    raster.images(Uuid::new_v4(), &[page], &BTreeSet::new(), |images| {
+        assert_eq!(images.originals.len(), 1);
+        assert_eq!(images.originals[0].0, page);
+        let image = image::load_from_memory(images.originals[0].1)?.to_rgb8();
+        assert_eq!(image.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        let samples = [
+            ("fineliner", 241, 235, [0, 0, 0]),
+            ("highlighter", 180, 330, [255, 237, 117]),
+            ("ballpoint", 320, 435, [75, 120, 210]),
+            ("pencil", 352, 550, [208, 67, 20]),
+            ("mechanical pencil", 343, 680, [166, 166, 166]),
+            ("calligraphy", 293, 860, [0, 0, 0]),
+            ("marker", 210, 1098, [0, 0, 0]),
+            ("shader", 205, 1240, [199, 199, 198]),
+            ("paintbrush", 396, 1480, [204, 51, 0]),
+        ];
+        for (pen, x, y, rgb) in samples {
+            let visible = (y - 2..=y + 2).any(|row| {
+                (x - 2..=x + 2).any(|col| {
+                    image
+                        .get_pixel(col, row)
+                        .0
+                        .iter()
+                        .zip(rgb)
+                        .all(|(&actual, expected)| actual.abs_diff(expected) <= 12)
+                })
+            });
+            assert!(visible, "missing {pen} near ({x}, {y})");
+        }
+        assert_eq!(image.get_pixel(1250, 1700).0, [255, 255, 255]);
+        Ok(())
+    })
+}
+
+#[test]
+fn overlapping_inks_follow_sibling_links_before_concurrent_author_order() -> Result<()> {
+    use remarkable_rm::PenColor;
+    let red = TestStroke {
+        id: [1, 4],
+        color: PenColor::Red,
+        ..Default::default()
+    };
+    let blue = TestStroke {
+        id: [2, 4],
+        color: PenColor::Blue,
+        ..Default::default()
+    };
+    let after_red = TestStroke {
+        left: red.id,
+        ..blue
+    };
+    for (ordered, red_on_top) in [
+        ([red, blue], true),
+        ([blue, red], true),
+        ([after_red, red], false),
+    ] {
+        let mut scene = scene(None);
+        for stroke in ordered {
+            stroke.append(&mut scene, 500.0, &[-30.0, 30.0]);
+        }
+        let mut raster = NotebookRaster::default();
+        raster.push(saved_page(Uuid::new_v4(), &scene), &mut || Ok(()))?;
+        let image = image::load_from_memory(&raster.originals[0].1)?.to_rgb8();
+        let [r, _, b] = image.get_pixel(DEFAULT_WIDTH / 2, 500).0;
+        assert!(if red_on_top { r > b } else { b > r });
+    }
+    for invalid in [
+        [
+            TestStroke {
+                left: [99, 1],
+                ..red
+            },
+            blue,
+        ],
+        [
+            TestStroke {
+                left: blue.id,
+                ..red
+            },
+            after_red,
+        ],
+    ] {
+        let mut scene = scene(None);
+        for stroke in invalid {
+            stroke.append(&mut scene, 500.0, &[-30.0, 30.0]);
+        }
+        assert!(saved_scene(&scene).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn broad_highlighter_is_included_to_its_edge_or_refused_before_capture() -> Result<()> {
+    let marker = TestStroke {
+        tool: Pen::HighlighterV2 as u32,
+        color: remarkable_rm::PenColor::Yellow,
+        width: 320,
+        ..Default::default()
+    };
+    let y = DEFAULT_HEIGHT + 120;
+    let mut extended = scene(None);
+    marker.append(&mut extended, y as f32, &[-90.0, 90.0]);
+    let mut raster = NotebookRaster::default();
+    raster.push(saved_page(Uuid::new_v4(), &extended), &mut || Ok(()))?;
+    let painted = image::load_from_memory(&raster.originals[0].1)?.to_rgb8();
+    assert!(painted.height() >= y + 58);
+    assert!(painted.get_pixel(DEFAULT_WIDTH / 2, y + 36)[2] < 240);
+    let mut clipped = scene(None);
+    marker.append(&mut clipped, (MAX_HEIGHT - 45) as f32, &[-90.0, 90.0]);
+    assert!(saved_scene(&clipped).is_err());
+    Ok(())
+}
+
+#[test]
+fn nonstandard_portrait_layout_remains_unrenderable() {
+    let mut scene = STOCK_PENS.to_vec();
+    let mut extent = vec![0x7c, 16, 0, 0, 0];
+    extent.extend(f64::from(DEFAULT_WIDTH).to_le_bytes());
+    extent.extend(f64::from(DEFAULT_HEIGHT).to_le_bytes());
+    let positions: Vec<_> = scene
+        .windows(extent.len())
+        .enumerate()
+        .filter_map(|(i, field)| (field == extent).then_some(i))
+        .collect();
+    assert_eq!(positions.len(), 1);
+    let width = positions[0] + 5;
+    scene[width..width + 8].copy_from_slice(&f64::from(DEFAULT_WIDTH - 1).to_le_bytes());
+    assert!(saved_scene(&scene).is_err());
 }
