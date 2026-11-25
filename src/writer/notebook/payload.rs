@@ -234,9 +234,10 @@ impl FrozenNotebookPayloads {
     fn parts(instruction: &str, preference: Option<&str>, payload: &Value) -> Result<Vec<String>> {
         let mut parts = vec![instruction.to_owned()];
         if let Some(text) = preference {
-            parts.push(format!(
-                "Optional user preference (not an operation or safety grant):\n{text}"
-            ));
+            parts[0].push_str(
+                " The current request and its explicit_guidance take precedence over the saved preference.",
+            );
+            parts.push(crate::config::personalization::receiving_prompt_part(text));
         }
         parts.push(serde_json::to_string(payload)?);
         Ok(parts)
@@ -340,7 +341,16 @@ mod tests {
             Some("Keep equations.".into()),
         )
         .unwrap();
-        let preference = Personalization::default().snapshot().unwrap();
+        let saved_preference = "Omit equations.\r\nUse a bullet list.";
+        let preference = Personalization {
+            enabled: true,
+            text: saved_preference.into(),
+            ..Personalization::default()
+        }
+        .snapshot()
+        .unwrap();
+        let preference_part =
+            crate::config::personalization::receiving_prompt_part(saved_preference);
         let frozen = FrozenNotebookPayloads::new(
             &source,
             &archive,
@@ -357,6 +367,8 @@ mod tests {
         .unwrap();
         assert_eq!(source.document().units.len(), 2);
         let parts = frozen.map_parts(0).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1], preference_part);
         assert!(!parts.join("\n").contains("UNSELECTED PRIVATE UNIT"));
         let frame: Value = serde_json::from_str(parts.last().unwrap()).unwrap();
         assert_eq!(frame["request"], "Exact request Ã©\nline two");
@@ -378,6 +390,8 @@ mod tests {
                 text,
             };
             let parts = frozen.reducer_parts(&[result]).unwrap();
+            assert_eq!(parts.len(), 3);
+            assert_eq!(parts[1], preference_part);
             assert!(
                 serde_json::to_vec(&parts).unwrap().len() <= frozen.plan.reducer_reserved_bytes
             );
