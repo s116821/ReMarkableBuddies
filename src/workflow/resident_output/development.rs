@@ -1304,28 +1304,139 @@ impl ResidentRenderer for Renderer {
             pulse()
         })?;
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
-            let result = (|| -> Result<()> {
-                for ch in text.chars() {
-                    pulse()?;
-                    self.pin.current()?;
-                    self.keyboard
-                        .borrow_mut()
-                        .string_to_keypresses(&ch.to_string())?;
-                    pulse()?;
-                }
-                Ok(())
-            })();
-            let release = self.keyboard.borrow_mut().release_all();
-            result?;
-            release?;
-            pulse()
+            write_guarded_text(
+                &text,
+                matches!(self.pin.as_ref(), OutputPin::Installed(_)),
+                pulse,
+                || self.pin.current(),
+                |ch, start| {
+                    let mut keyboard = self.keyboard.borrow_mut();
+                    if start {
+                        keyboard.start_keypresses()?;
+                    }
+                    keyboard.character_to_keypresses(ch)
+                },
+                || self.keyboard.borrow_mut().release_all(),
+            )
         })
     }
+}
+
+fn write_guarded_text(
+    text: &str,
+    single_start: bool,
+    pulse: &mut dyn FnMut() -> Result<()>,
+    check_pin: impl Fn() -> Result<()>,
+    mut write_character: impl FnMut(char, bool) -> Result<()>,
+    release_keys: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let result = (|| -> Result<()> {
+        for (index, ch) in text.chars().enumerate() {
+            pulse()?;
+            check_pin()?;
+            // Only the write may borrow the keyboard. The guards can re-enter the backend.
+            write_character(ch, !single_start || index == 0)?;
+            pulse()?;
+        }
+        Ok(())
+    })();
+    let release = release_keys();
+    result?;
+    release?;
+    pulse()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum TextStep {
+        Pulse,
+        CheckPin,
+        Start,
+        Key(char),
+        Release,
+    }
+
+    fn guarded_text_steps(
+        text: &str,
+        single_start: bool,
+        cancel_after: Option<char>,
+    ) -> (Result<()>, Vec<TextStep>) {
+        // The guards and writes borrow the same state to model backend re-entry.
+        let steps = RefCell::new(Vec::new());
+        let result = write_guarded_text(
+            text,
+            single_start,
+            &mut || {
+                let mut steps = steps.borrow_mut();
+                let canceled =
+                    matches!(steps.last(), Some(TextStep::Key(ch)) if Some(*ch) == cancel_after);
+                steps.push(TextStep::Pulse);
+                ensure!(!canceled, "canceled");
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push(TextStep::CheckPin);
+                Ok(())
+            },
+            |ch, start| {
+                let mut steps = steps.borrow_mut();
+                if start {
+                    steps.push(TextStep::Start);
+                }
+                steps.push(TextStep::Key(ch));
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push(TextStep::Release);
+                Ok(())
+            },
+        );
+        (result, steps.into_inner())
+    }
+
+    #[test]
+    fn installed_text_starts_once_and_guards_each_character() {
+        use TextStep::*;
+
+        let (result, steps) = guarded_text_steps("=^", true, None);
+        result.unwrap();
+        assert_eq!(
+            steps,
+            [
+                Pulse,
+                CheckPin,
+                Start,
+                Key('='),
+                Pulse,
+                Pulse,
+                CheckPin,
+                Key('^'),
+                Pulse,
+                Release,
+                Pulse,
+            ]
+        );
+
+        let (result, steps) = guarded_text_steps("=^", false, None);
+        result.unwrap();
+        assert_eq!(steps.iter().filter(|step| **step == Start).count(), 2);
+
+        let (result, steps) = guarded_text_steps("", true, None);
+        result.unwrap();
+        assert_eq!(steps, [Release, Pulse]);
+    }
+
+    #[test]
+    fn canceled_installed_text_releases_keys_before_next_character() {
+        use TextStep::*;
+
+        let (result, steps) = guarded_text_steps("=^", true, Some('='));
+        assert_eq!(result.unwrap_err().to_string(), "canceled");
+        assert_eq!(steps, [Pulse, CheckPin, Start, Key('='), Pulse, Release]);
+    }
 
     #[test]
     fn page_text_checks_the_exact_destination_and_preserves_a_fitting_answer() {
