@@ -117,7 +117,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .into_iter()
                     .map(|turn| (turn.sequence, turn.role, turn.mode, turn.text))
                     .collect();
-                Ok((conversation, root, serde_json::to_string(&turns)?))
+                let history = (!turns.is_empty())
+                    .then(|| serde_json::to_string(&turns))
+                    .transpose()?;
+                Ok((conversation, root, history))
             })
             .transpose()?;
 
@@ -147,7 +150,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             model.0.clear_content();
             let destination = dispatch.config.export_destination();
             model.0.add_text_content(&format!("{ROUTING_PROMPT}\nConfigured destination: {destination:?}.\nFor writer-circled and writer-export-circled, the target field uses this geometry contract: {}", target::candidate_geometry_contract()));
-            if let Some((_, _, context)) = &history {
+            if let Some((_, _, Some(context))) = &history {
                 model.0.add_text_content(context);
             }
             model.0.add_image_content(&image);

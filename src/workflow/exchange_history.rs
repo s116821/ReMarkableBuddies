@@ -197,11 +197,25 @@ fn current_turn(ledger: &Ledger, turn: &Turn) -> Result<PresentedTurn> {
         matches!(Ledger::decode(&envelope)?, crate::conversation::Record::Turn(current) if current == *turn),
         "presentation turn changed"
     );
+    let text = match &turn.text {
+        Some(text) => text.clone(),
+        None if turn.role == Role::User
+            && matches!(
+                turn.outcome,
+                Outcome::Prepared | Outcome::Failed | Outcome::Canceled
+            ) =>
+        {
+            // A failed submission may have no recognized wording. Keep its
+            // exchange anchored without inventing a request to display.
+            String::new()
+        }
+        None => anyhow::bail!("presentation text unavailable"),
+    };
     Ok(PresentedTurn {
         about: None,
         id: turn.id,
         revision: envelope.revision_id,
-        text: turn.text.clone().context("presentation text unavailable")?,
+        text,
     })
 }
 

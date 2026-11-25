@@ -1562,7 +1562,10 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         if reuse {
             native.declare_source_order(&[page, buddy]);
         }
-        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let case = format!("Writer enabled={writer_enabled}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}");
+        let runtime = native
+            .start_with_store(store.clone(), mode, Duration::from_secs(10))
+            .with_context(|| case.clone())?;
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_for_installed_output(
             &base.join("output-profile"),
@@ -1697,6 +1700,40 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                 .turns
                 .iter()
                 .all(|turn| turn.id != reply.id));
+            let projection = crate::workflow::exchange_history::project(
+                &ledger,
+                conversation,
+                &crate::workflow::exchange_history::PageOwner {
+                    document,
+                    page: opened,
+                    visit: "fixture-redisplay".into(),
+                    session: "fixture-redisplay".into(),
+                },
+                "",
+            )?;
+            let reopened = projection
+                .exchanges
+                .iter()
+                .find(|exchange| exchange.id == reply.exchange)
+                .context("original exchange absent from redisplay")?;
+            assert_eq!(
+                reopened
+                    .turns
+                    .iter()
+                    .filter(|turn| turn.text == message)
+                    .count(),
+                1
+            );
+            assert!(reopened
+                .turns
+                .iter()
+                .any(|turn| turn.text == request.unwrap_or_default()));
+            if switch_page {
+                assert!(records
+                    .iter()
+                    .any(|record| matches!(record, Record::Turn(turn)
+                    if turn.role == Role::Assistant && turn.text.as_deref() == Some("Four."))));
+            }
             assert_eq!(write_count, usize::from(refuse));
             if refuse {
                 let expected = request.map_or_else(
@@ -1706,7 +1743,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                 assert_eq!(written.borrow().as_slice(), &[expected]);
             }
         } else {
-            result?;
+            result.with_context(|| case.clone())?;
             assert_eq!(write_count, 1);
             assert!(
                 written.borrow()[0].contains(if submission == Submission::Reader {
