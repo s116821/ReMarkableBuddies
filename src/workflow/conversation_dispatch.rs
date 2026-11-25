@@ -743,10 +743,27 @@ impl<'a> Dispatch<'a> {
                 .is_none(),
             "routed notebook operation consumed"
         );
-        let normalized = images.normalize(
-            admitted.source.page,
-            &receipt.ordered_image_sha256,
+        let originals =
+            images.admit_originals(admitted.source.page, &receipt.ordered_image_sha256)?;
+        let handwriting = self.handwriting_runtime(ledger)?.map(|runtime| {
+            runtime.capture(ledger.store(), &originals.target_hashes, &mut || {
+                visit
+                    .progress(&admitted.source)
+                    .and_then(|()| admitted.check_root(ledger))
+                    .map_err(|_| crate::handwriting::ContextFailure::Canceled)
+            })
+        });
+        ensure!(
+            handwriting
+                .as_ref()
+                .is_none_or(|capture| capture.failure.is_none()),
+            "Writer handwriting context unavailable"
+        );
+        let normalized = originals.normalize(
             model_profile,
+            handwriting
+                .as_ref()
+                .and_then(|capture| capture.context.as_deref()),
             engine,
             &mut |progress| {
                 use crate::retrieval::notebook::Progress;
@@ -761,6 +778,7 @@ impl<'a> Dispatch<'a> {
                 }
             },
         )?;
+        drop(handwriting);
         let bytes = serde_json::to_vec(&normalized)?;
         let frozen = ValidatedNotebook::from_bytes(&bytes, &crate::storage::digest(&bytes))?;
         self.notebook(ledger, engine, &request, Some(frozen), admitted, visit)
