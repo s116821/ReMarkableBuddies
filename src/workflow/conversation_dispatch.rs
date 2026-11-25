@@ -626,9 +626,7 @@ impl<'a> Dispatch<'a> {
             retrieval.as_ref().map(|provider| provider as &dyn Provider),
             |text| Ok(text.len()),
             Some(head),
-            notebook.map(|notebook| {
-                crate::conversation::evidence::ReaderNotebookEvidence::Supplied(notebook.source())
-            }),
+            notebook,
         )?;
         check_visit()?;
         check_source()?;

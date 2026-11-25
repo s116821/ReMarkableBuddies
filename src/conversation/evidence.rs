@@ -333,15 +333,6 @@ pub(super) fn matches(envelope: &Envelope, conversation: Uuid) -> bool {
         || payload["acknowledgment"]["conversation"].as_str() == Some(&identity)
         || (envelope.namespace == Namespace::Conversation && envelope.record_id == conversation)
 }
-pub(crate) enum ReaderNotebookEvidence<'a> {
-    Supplied(&'a crate::writer::notebook::ValidatedNotebook),
-    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    Resident {
-        source_record: Uuid,
-        index: &'a crate::retrieval::Index,
-    },
-}
-
 impl Ledger {
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn capture_prepared_pdf(&self, user: &Turn, root: Uuid) -> Result<Captured> {
@@ -464,7 +455,7 @@ impl Ledger {
         retrieval: Option<&dyn crate::retrieval::Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
         followup: Option<FollowupRequestHead>,
-        notebook: Option<ReaderNotebookEvidence<'_>>,
+        notebook: Option<&crate::retrieval::notebook::SuppliedNotebook<'_>>,
     ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
         let allow_notebook = notebook.is_some();
@@ -560,32 +551,13 @@ impl Ledger {
                             );
                         }
                     }
-                    match notebook {
-                        Some(ReaderNotebookEvidence::Supplied(input)) => {
-                            verified_notebook = Some(self.verify_followup_notebook(
-                                &records,
-                                *source_record,
-                                expected,
-                                input,
-                            )?);
-                        }
-                        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-                        Some(ReaderNotebookEvidence::Resident {
-                            source_record: retained,
-                            index,
-                        }) => {
-                            ensure!(
-                                retained == *source_record
-                                    && index.key() == expected
-                                    && records.iter().any(|record| matches!(record,
-                                        Record::ResidentCapture(capture)
-                                            if capture.id == retained
-                                                && capture.before.document == expected.document
-                                                && capture.turn == *origin_turn)),
-                                SourceResolutionRefusal::ChangedSource
-                            );
-                        }
-                        None => {}
+                    if let Some(input) = notebook {
+                        verified_notebook = Some(self.verify_followup_notebook(
+                            &records,
+                            *source_record,
+                            expected,
+                            input.source(),
+                        )?);
                     }
                 }
                 RequestSource::CapturedPage { source_record, .. } => {

@@ -1,7 +1,6 @@
 //! Ordinary installed Reader on a captured page, with a verified PDF or EPUB index when available.
 use super::{
     encode_model_images,
-    installed_notebook::{self, InstalledNotebook},
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
     source_submission::RefusedSubmission,
     AnalysisResult, Attempt, MarkedFragment, ModelContent, Orchestrator, Workflow, ANALYSIS_PROMPT,
@@ -10,7 +9,7 @@ use super::{
 use crate::{
     config::researched_reader::OrdinarySearch,
     conversation::{
-        evidence::{FollowupRequestHead, ReaderNotebookEvidence},
+        evidence::FollowupRequestHead,
         receiving::{memory::research::ResearchRefusal, ReceivingBudget, RequestSource},
         resolution::SourceDirective,
         AttemptReason, ContextBudget,
@@ -114,7 +113,6 @@ impl OriginalBook {
 
 struct OrdinarySource<'a> {
     book: Option<&'a OriginalBook>,
-    notebook: Option<&'a InstalledNotebook>,
     deadline: Instant,
 }
 
@@ -128,8 +126,7 @@ impl OrdinarySource<'_> {
     }
 
     fn check_file(&self) -> Result<()> {
-        self.book.map_or(Ok(()), OriginalBook::check_file)?;
-        self.notebook.map_or(Ok(()), InstalledNotebook::check)
+        self.book.map_or(Ok(()), OriginalBook::check_file)
     }
 
     fn require_current(&self, workflow: &mut Workflow) -> Result<()> {
@@ -234,7 +231,6 @@ impl<M: LLMEngine> Orchestrator<M> {
             &prepared,
             &OrdinarySource {
                 book: Some(&book),
-                notebook: None,
                 deadline,
             },
             dispatch,
@@ -264,7 +260,6 @@ impl<M: LLMEngine> Orchestrator<M> {
             &prepared,
             &OrdinarySource {
                 book: None,
-                notebook: None,
                 deadline,
             },
             dispatch,
@@ -567,60 +562,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         let user = attempt.user.id;
         let expected = head.expected_root();
         let generation = head.generation();
-        let source_record = attempt.retained_source();
-        let mut directive = if let Some(book) = source.book {
-            SourceDirective::Explicit(RequestSource::Original {
-                origin_turn: user,
-                source_record,
-                expected: book.key.clone(),
-            })
-        } else if let Some(binding) = attempt.current_reader_answer_page() {
-            ledger.bound_resident_reader_source(&attempt.user, binding)?
-        } else {
-            SourceDirective::Explicit(RequestSource::CapturedPage {
-                origin_turn: user,
-                source_record,
-            })
-        };
-        let mut notebook_origin = None;
-        let mut notebook = None;
-        if source.book.is_none() && self.workflow.opened_submission().is_some() {
-            let original = match &directive {
-                SourceDirective::Explicit(source) => source.clone(),
-                SourceDirective::Inherit { .. } => {
-                    ledger.resolve_request_source(conversation, user, directive.clone())?
-                }
-            };
-            if let RequestSource::CapturedPage {
-                origin_turn,
-                source_record,
-            } = original
-            {
-                notebook = installed_notebook::admit(
-                    &mut self.workflow,
-                    ledger,
-                    source_record,
-                    source.deadline,
-                    self.ordinary_notebook_cache.take(),
-                )?;
-                if let Some(notebook) = &notebook {
-                    directive = SourceDirective::Explicit(RequestSource::Original {
-                        origin_turn,
-                        source_record,
-                        expected: notebook.index().key().clone(),
-                    });
-                    notebook_origin = Some(ReaderNotebookEvidence::Resident {
-                        source_record,
-                        index: notebook.index(),
-                    });
-                }
-            }
-        }
-        let source = &OrdinarySource {
-            book: source.book,
-            notebook: notebook.as_ref(),
-            deadline: source.deadline,
-        };
         let prepared = {
             let mut progress = || {
                 source.check_deadline()?;
@@ -641,14 +582,21 @@ impl<M: LLMEngine> Orchestrator<M> {
                 question: &result.question,
                 progress: RefCell::new(&mut progress),
             });
-            let retrieval = provider
-                .as_ref()
-                .map(|provider| provider as &dyn Provider)
-                .or_else(|| {
-                    source
-                        .notebook
-                        .map(|notebook| notebook.index() as &dyn Provider)
-                });
+            let source_record = attempt.retained_source();
+            let directive = if let Some(book) = source.book {
+                SourceDirective::Explicit(RequestSource::Original {
+                    origin_turn: user,
+                    source_record,
+                    expected: book.key.clone(),
+                })
+            } else if let Some(binding) = attempt.current_reader_answer_page() {
+                ledger.bound_resident_reader_source(&attempt.user, binding)?
+            } else {
+                SourceDirective::Explicit(RequestSource::CapturedPage {
+                    origin_turn: user,
+                    source_record,
+                })
+            };
             ledger.prepare_declared_evidence(
                 conversation,
                 user,
@@ -665,10 +613,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     max_passage_bytes: 16 * 1024,
                     neighbors: true,
                 },
-                retrieval,
+                provider.as_ref().map(|provider| provider as &dyn Provider),
                 |text| Ok(text.len()),
                 Some(head),
-                notebook_origin,
+                None,
             )?
         };
         ensure!(
@@ -782,10 +730,6 @@ impl<M: LLMEngine> Orchestrator<M> {
         self.place_answer(attempt, result, true, &mut |ledger| {
             source.check_file()?;
             evidence.with_current(ledger, || Ok(()))
-        })?;
-        if let Some(notebook) = notebook {
-            self.ordinary_notebook_cache = Some(notebook.into_cache());
-        }
-        Ok(())
+        })
     }
 }

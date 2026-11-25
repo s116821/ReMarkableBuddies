@@ -754,26 +754,21 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
     Ok(())
 }
 
-fn saved_notebook_fixture(
-    base: &std::path::Path,
-    document: ConversationId,
-    pages: [ConversationId; 2],
-) -> Result<(PathBuf, PathBuf, PathBuf)> {
+#[test]
+fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> Result<()> {
     use std::{
         fs,
         io::Write,
         os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     };
 
+    let base = std::env::temp_dir().join(format!("notebook-save-{}", ConversationId::new_v4()));
     let root = base.join("xochitl");
     let templates = base.join("templates");
+    let document = ConversationId::new_v4();
+    let pages = [ConversationId::new_v4(), ConversationId::new_v4()];
     let saved_pages = root.join(document.to_string());
-    for path in [
-        base,
-        root.as_path(),
-        templates.as_path(),
-        saved_pages.as_path(),
-    ] {
+    for path in [&base, &root, &templates, &saved_pages] {
         fs::DirBuilder::new().mode(0o700).create(path)?;
     }
     let private_write = |path: PathBuf, bytes: &[u8]| -> Result<()> {
@@ -811,22 +806,10 @@ fn saved_notebook_fixture(
         br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><rect width="100%" height="100%" fill="#fff"/></svg>"##,
     )?;
     let original_scene = include_bytes!("../../../../tests/fixtures/notebook-ink/pens-small.rm");
+    let changed_scene = include_bytes!("../../../../tests/fixtures/native-history/applied.rm");
     for page in pages {
         private_write(saved_pages.join(format!("{page}.rm")), original_scene)?;
     }
-
-    Ok((root, templates, saved_pages))
-}
-
-#[test]
-fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> Result<()> {
-    use std::fs;
-    let base = std::env::temp_dir().join(format!("notebook-save-{}", ConversationId::new_v4()));
-    let document = ConversationId::new_v4();
-    let pages = [ConversationId::new_v4(), ConversationId::new_v4()];
-    let (root, templates, saved_pages) = saved_notebook_fixture(&base, document, pages)?;
-    let original_scene = include_bytes!("../../../../tests/fixtures/notebook-ink/pens-small.rm");
-    let changed_scene = include_bytes!("../../../../tests/fixtures/native-history/applied.rm");
 
     let config: crate::config::Config = serde_json::from_value(serde_json::json!({
         "paths": StorePaths {
@@ -1808,313 +1791,5 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         drop((service, dispatch, ledger, store));
         std::fs::remove_dir_all(base)?;
     }
-    Ok(())
-}
-
-struct IndexedReaderModel {
-    calls: usize,
-    opened: PathBuf,
-    original: ConversationId,
-    answer_page: ConversationId,
-    expect_index: bool,
-    edit_after_answer: Option<PathBuf>,
-    text: Vec<String>,
-    image_count: usize,
-}
-
-impl crate::LLMEngine for IndexedReaderModel {
-    fn guarded_timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(2))
-    }
-
-    fn execute_with_handoff(
-        &mut self,
-        progress: &mut dyn FnMut() -> Result<()>,
-        handoff: &mut crate::llm::ModelHandoff<'_>,
-    ) -> Result<String> {
-        progress()?;
-        let mut result = None;
-        handoff(&mut || {
-            result = Some(self.execute());
-            Ok(())
-        })?;
-        result.context("Indexed Reader provider not reached")?
-    }
-
-    fn add_text_content(&mut self, text: &str) {
-        self.text.push(text.to_owned());
-    }
-
-    fn add_image_content(&mut self, _: &str) {
-        self.image_count += 1;
-    }
-
-    fn clear_content(&mut self) {
-        self.text.clear();
-        self.image_count = 0;
-    }
-
-    fn execute(&mut self) -> Result<String> {
-        const QUESTION: &str = "What does the last page say?";
-        let step = self.calls;
-        self.calls += 1;
-        match step {
-            0 => {
-                assert_ne!(
-                    std::fs::read_to_string(&self.opened)?,
-                    self.original.to_string()
-                );
-                assert!(self.image_count > 0);
-                Ok(format!("QUESTION: {QUESTION}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: Example\nREQUEST_WEB_JSON: {{\"version\":1,\"intent\":\"no-restriction\"}}\n---\nANSWER: Deferred"))
-            }
-            1 => {
-                assert!(self.image_count > 0);
-                Ok(serde_json::json!({
-                    "version": 1, "transcription": QUESTION,
-                    "request_web": {"version":1,"intent":"no-restriction"}
-                })
-                .to_string())
-            }
-            2 => {
-                assert_eq!(
-                    self.image_count, 1,
-                    "only the retained source becomes an answer attachment"
-                );
-                let combined = self.text.join("\n");
-                if self.expect_index {
-                    assert!(
-                        combined.contains("Last page.")
-                            && combined.contains(&self.answer_page.to_string())
-                    );
-                    assert!(combined.contains("unverified-historical-page-image-ocr"));
-                } else {
-                    assert!(
-                        !combined.contains("Last page.")
-                            && !combined.contains(&self.answer_page.to_string())
-                    );
-                }
-                if let Some(scene) = &self.edit_after_answer {
-                    std::fs::write(
-                        scene,
-                        include_bytes!("../../../../tests/fixtures/native-history/applied.rm"),
-                    )?;
-                }
-                Ok(serde_json::json!({
-                    "status":"answered", "text": if self.expect_index { "Last page answer." } else { "Current page only." },
-                    "citations":[]
-                }).to_string())
-            }
-            _ => panic!("a Reader request must not transcribe any extra pages"),
-        }
-    }
-}
-
-#[test]
-fn installed_reader_uses_verified_local_notebook_text_from_another_page() -> Result<()> {
-    use std::fs;
-
-    let base = std::env::temp_dir().join(format!(
-        "reader-local-notebook-{}",
-        ConversationId::new_v4()
-    ));
-    let document = ConversationId::new_v4();
-    let pages = [ConversationId::new_v4(), ConversationId::new_v4()];
-    let (root, templates, saved_pages) = saved_notebook_fixture(&base, document, pages)?;
-    let config = |reader, writer| -> Result<crate::config::Config> {
-        Ok(serde_json::from_value(serde_json::json!({
-            "paths": StorePaths {
-                data: base.join("data"), cache: base.join("cache"), credentials: base.join("credentials"),
-            },
-            "research_policy":"disabled",
-            "product_settings": {"reader_enabled":reader, "writer_enabled":writer}
-        }))?)
-    };
-    let writer_config = config(true, true)?;
-    drop(Store::open(writer_config.paths.clone())?);
-    let store = Arc::new(Store::prepare_notebook(writer_config.paths.clone())?);
-    let ledger = Ledger::new(store.clone());
-
-    // Use the real installed Writer receiver to produce the local archive. The
-    // fake output backend refuses its display, independently of saved text.
-    let mode = "reconnect-source-handoff-text-refusal";
-    let (mut workflow, events, _) = workflow_with_store(mode, vec![], Duration::ZERO, &store);
-    let native = Fixture::new();
-    native.declare_source(document, pages[0]);
-    native.declare_source_order(&pages);
-    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
-    let owner = workflow.resident_source.as_mut().unwrap();
-    owner.selection = InstalledReaderSelection::fixture_for_installed_output(
-        &base.join("writer-profile"),
-        runtime.identity(),
-    )?;
-    owner.session = Some(Box::new(OwnedSession {
-        runtime,
-        _fixture: native,
-        events,
-        delivery_fault: false,
-        observe_file_change: None,
-        writer_slot: None,
-        writer_slot_fault: false,
-        refinement_slot: None,
-    }));
-    workflow.device = Box::new(
-        RefusingBackend::with_resident_releases(vec![released(Instant::now())]).with_test_output(
-            Box::new(RecognitionProbe {
-                refuse_writer_text: true,
-                ..RecognitionProbe::default()
-            }),
-        ),
-    );
-    let dispatch =
-        Dispatch::local(&writer_config, &ledger)?.with_regional_writer_model("fixture".into());
-    let writer = SubmissionModel {
-        submission: Submission::SaveNotebook(Save::Explicit),
-        last_visible_text: Some("Initial Writer result".into()),
-        steps: Rc::new(Cell::new(0)),
-        source: Rc::new(RefCell::new(None)),
-        images: vec![],
-        text: vec![],
-    };
-    assert!(workflow.wait_for_idle_batch(None, Some(&writer_config))?);
-    let mut service = Orchestrator::new(workflow, writer, Ledger::new(store.clone()));
-    let refused =
-        super::original_pdf::saved_notebook::with_fixture_paths(&root, &templates, || {
-            service.run_iteration_with_trigger(false, Some(&dispatch), Some(&writer_config))
-        });
-    assert!(format!("{:#}", refused.unwrap_err()).contains("Writer draft cannot be typed"));
-    assert_eq!(
-        store
-            .snapshot_heads_matching(&[Namespace::Source], 8, |record| record.payload
-                ["record_kind"]
-                .as_str()
-                == Some("archived-normalized-source"))?
-            .len(),
-        1
-    );
-    drop(service);
-    drop(dispatch);
-
-    // The adjacent Buddy page came later. Keep the original Writer order as
-    // evidence and describe the complete current order to the Reader peer.
-    let buddy = ConversationId::new_v4();
-    let order = [pages[0], buddy, pages[1]];
-    let table = root.join(format!("{document}.content"));
-    let mut current: serde_json::Value = serde_json::from_slice(&fs::read(&table)?)?;
-    current["cPages"]["pages"].as_array_mut().unwrap().insert(
-        1,
-        serde_json::json!({"id":buddy,"idx":{"value":"ab"},"template":{"value":"Blank"}}),
-    );
-    current["pageCount"] = serde_json::json!(3);
-    fs::write(&table, serde_json::to_vec(&current)?)?;
-
-    let config = config(true, false)?;
-    let dispatch = Dispatch::local(&config, &ledger)?;
-    let mode = "reconnect-source-handoff-open-first";
-    let (mut workflow, events, _) = workflow_with_store(mode, vec![], Duration::ZERO, &store);
-    let native = Fixture::new();
-    native.declare_source(document, pages[0]);
-    native.declare_source_order(&order);
-    let position = native.successor_position();
-    let (opened, _) = native.opened_page_probe();
-    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
-    let owner = workflow.resident_source.as_mut().unwrap();
-    owner.selection = InstalledReaderSelection::fixture_for_installed_output(
-        &base.join("reader-profile"),
-        runtime.identity(),
-    )?;
-    owner.session = Some(Box::new(OwnedSession {
-        runtime,
-        _fixture: native,
-        events,
-        delivery_fault: false,
-        observe_file_change: None,
-        writer_slot: None,
-        writer_slot_fault: false,
-        refinement_slot: None,
-    }));
-    let id = |id: ConversationId| Uuid::parse(&id.to_string()).unwrap();
-    let facts = |current, order: &[ConversationId]| {
-        ReaderFacts::new(
-            remarkable_open_sdk::PageKey {
-                document: id(document),
-                page: id(current),
-            },
-            order.iter().copied().map(id).collect(),
-        )
-        .unwrap()
-    };
-    let written = Rc::new(RefCell::new(Vec::new()));
-    let mut backend = RecognitionProbe {
-        confirmed_source: true,
-        early_source: Some((facts(pages[0], &pages), Rc::new(RefCell::new(None)))),
-        successor: Some(SuccessorProbe {
-            position: position.clone(),
-            interrupt_restore: false,
-        }),
-        rendered_text: Some(written.clone()),
-        ..RecognitionProbe::default()
-    };
-    let conversation = ConversationId::new_v4();
-    ledger.create(conversation, ConversationId::new_v4(), 1)?;
-    backend.bind_opened_page(&ledger, conversation, &facts(buddy, &order))?;
-    backend.early_source.as_mut().unwrap().0 = facts(pages[0], &order);
-
-    let scene = saved_pages.join(format!("{}.rm", pages[1]));
-    let model = IndexedReaderModel {
-        calls: 0,
-        opened: opened.clone(),
-        original: pages[0],
-        answer_page: pages[1],
-        expect_index: true,
-        edit_after_answer: None,
-        text: vec![],
-        image_count: 0,
-    };
-    workflow.device = Box::new(
-        RefusingBackend::with_resident_releases(vec![released(Instant::now())])
-            .with_test_output(Box::new(backend)),
-    );
-    assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
-    let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
-    super::original_pdf::saved_notebook::with_fixture_paths(&root, &templates, || {
-        service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))
-    })?;
-    assert_eq!(written.borrow().len(), 1);
-    assert!(written.borrow()[0].contains("Last page answer."));
-    let records = ledger.inspect(conversation, false)?;
-    let evidence = records
-        .iter()
-        .find_map(|record| match record {
-            Record::RequestEvidence(evidence) => Some(evidence),
-            _ => None,
-        })
-        .context("Indexed Reader evidence absent")?;
-    let context: serde_json::Value = serde_json::from_str(&evidence.frame_json)?;
-    assert!(context["retrieval"]["passages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|passage| {
-            passage["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("Last page."))
-                && passage["page"] == 2
-                && passage["section"]
-                    .as_str()
-                    .is_some_and(|label| label.contains(&pages[1].to_string()))
-        }));
-    assert!(context["retrieval"]["passages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|passage| {
-            !passage["section"]
-                .as_str()
-                .is_some_and(|label| label.contains(&buddy.to_string()))
-        }));
-    assert!(position.exists());
-    assert!(scene.exists());
-    drop((service, dispatch, ledger, store));
-    fs::remove_dir_all(base)?;
     Ok(())
 }

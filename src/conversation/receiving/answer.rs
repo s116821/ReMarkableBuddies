@@ -17,8 +17,8 @@ const SUPPLIED_NOTEBOOK_OCR: &str = "unverified-historical-page-image-ocr";
 fn is_notebook_ocr(context: &FrozenResearchContext) -> bool {
     matches!(
         context.source_memory_context().source_context().source(),
-        super::SourceAssociation::Original { expected, .. }
-            if expected.format == crate::retrieval::SourceFormat::Notebook
+        super::SourceAssociation::Original { source_record, .. }
+            if matches!(source_record.as_ref(), crate::conversation::Record::ArchivedNormalizedSource(_))
     )
 }
 
