@@ -192,7 +192,7 @@ const GRID: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="1404" he
 const DOTS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><circle cx="200" cy="340" r="4" fill="#aaaaaa"/></svg>"##;
 
 #[test]
-fn saved_render_layers_stock_paper_under_ink_and_keeps_paper_only_pages() -> Result<()> {
+fn saved_render_excludes_stock_ruling_and_keeps_paper_only_pages() -> Result<()> {
     let ink = scene(Some((340.0, Pen::FinelinerV2 as u32)));
     let blank = scene(None);
     for template in [RULED, GRID, DOTS] {
@@ -209,15 +209,79 @@ fn saved_render_layers_stock_paper_under_ink_and_keeps_paper_only_pages() -> Res
         let painted = image::load_from_memory(&raster.originals[0].1)?.to_rgba8();
         let empty = image::load_from_memory(&raster.originals[1].1)?.to_rgba8();
         assert_eq!(painted.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
-        assert_eq!(painted.get_pixel(200, 340).0, [170, 170, 170, 255]);
-        assert_eq!(empty.get_pixel(200, 340).0, [170, 170, 170, 255]);
-        assert_eq!(empty.get_pixel(250, 400).0, [255; 4]);
+        assert_eq!(painted.get_pixel(200, 340).0, [255; 4]);
+        assert!(empty.as_raw().iter().all(|&channel| channel == 255));
         assert!(painted.get_pixel(DEFAULT_WIDTH / 2, 340)[0] < 80);
         assert_eq!(raster.patterned_paper[&ink_page], PatternedPaper::Ink);
         assert_eq!(
             raster.patterned_paper[&paper_only],
             PatternedPaper::PaperOnly
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn saved_render_omits_printed_heading_and_keeps_black_and_white_ink() -> Result<()> {
+    // Print "NAME" near the top of the PNG as a template-only heading.
+    let heading = [
+        "#.# .#. #.# ###",
+        "### #.# ### #..",
+        "### ### #.# ##.",
+        "### #.# #.# #..",
+        "#.# #.# #.# ###",
+    ];
+    let mut pixels =
+        image::RgbaImage::from_pixel(DEFAULT_WIDTH, DEFAULT_HEIGHT, image::Rgba([255; 4]));
+    for (row, line) in heading.iter().enumerate() {
+        for (column, mark) in line.bytes().enumerate() {
+            if mark == b'#' {
+                let x = 80 + 4 * column as u32;
+                let y = 40 + 4 * row as u32;
+                for y in y..y + 4 {
+                    for x in x..x + 4 {
+                        pixels.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+                    }
+                }
+            }
+        }
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+
+    for (colour, plain) in [(PenColor::Black, 255), (PenColor::White, 224)] {
+        let mut bytes = scene(None);
+        TestStroke {
+            color: colour,
+            ..Default::default()
+        }
+        .append(&mut bytes, 340.0, &[-20.0, 20.0]);
+        let id = Uuid::new_v4();
+        let mut raster = NotebookRaster::default();
+        raster.push(
+            SavedPage {
+                id,
+                scene: &bytes,
+                template_svg: None,
+                template_png: Some(&png),
+            },
+            &mut || Ok(()),
+        )?;
+        raster.images(id, &[id], &BTreeSet::new(), |images| {
+            let image = image::load_from_memory(images.originals[0].1)?.to_rgb8();
+            assert_eq!(image.dimensions(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
+            // The entire printed heading region must match the uniform canvas.
+            assert!((40..60).all(|y| (80..140).all(|x| image.get_pixel(x, y).0 == [plain; 3])));
+            let ink = image.get_pixel(DEFAULT_WIDTH / 2, 340)[0];
+            assert!(match colour {
+                PenColor::Black => ink < 80,
+                PenColor::White => ink > plain,
+                _ => unreachable!(),
+            });
+            assert_eq!(images.patterned_paper[&id], PatternedPaper::Ink);
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -232,7 +296,11 @@ fn saved_render_accepts_white_hex_in_any_case_with_or_without_png() -> Result<()
     for colour in ["#FFFFFF", "#FfF"] {
         let svg = white.replace("#fff", colour);
         for variant in [None, Some(png.as_slice())] {
-            assert!(paper::background(Some(svg.as_bytes()), variant, MAX_HEIGHT)?.is_none());
+            assert!(!paper::is_patterned(
+                Some(svg.as_bytes()),
+                variant,
+                MAX_HEIGHT
+            )?);
         }
     }
     Ok(())

@@ -176,7 +176,7 @@ impl OrderedNotebookImages<'_> {
         let paper_revision = if patterned_paper.is_empty() {
             ""
         } else {
-            "stock-paper-v1:"
+            "stock-paper-ink-only-v2:"
         };
         Ok(NormalizedDocument {
             document: self.document,

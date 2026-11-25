@@ -1,4 +1,4 @@
-//! Admit and render the exact stock paper assets from the saved-source owner.
+//! Validate the exact stock paper assets from the saved-source owner.
 use super::super::static_png;
 use anyhow::{bail, ensure, Context, Result};
 use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
@@ -13,11 +13,7 @@ const MAX_TEMPLATE_PNG: usize = 1024 * 1024;
 const MAX_TEMPLATE_SVG: usize = 32 * 1024;
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
-pub(super) fn background(
-    svg: Option<&[u8]>,
-    png: Option<&[u8]>,
-    height: u32,
-) -> Result<Option<BackgroundImage>> {
+pub(super) fn is_patterned(svg: Option<&[u8]>, png: Option<&[u8]>, height: u32) -> Result<bool> {
     let background = match (svg, png) {
         (Some(svg), Some(png)) => {
             let svg = svg_background(svg)?;
@@ -44,7 +40,7 @@ pub(super) fn background(
         background.is_none() || height == DEFAULT_HEIGHT,
         "patterned saved paper cannot extend beyond its native canvas"
     );
-    Ok(background)
+    Ok(background.is_some())
 }
 
 fn png_background(png: &[u8]) -> Result<Option<BackgroundImage>> {

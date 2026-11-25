@@ -67,7 +67,7 @@ pub(super) fn extract(
     if !patterns.is_empty() {
         manifest["patterned_paper"] = json!(patterns);
         instruction.push_str(
-            " On pages listed in patterned_paper, ignore the saved template's ruled lines, grid or dots. A paper-only page has no user writing or drawing and must be reported blank."
+            " The printed template artwork has been removed from pages listed in patterned_paper. Treat the uniform canvas as empty space. A paper-only page has no user writing or drawing and must be reported blank."
         );
     }
     let manifest = manifest.to_string();

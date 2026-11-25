@@ -1062,7 +1062,7 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
     let [first, blank, third, fourth, fifth] = originals;
     let buddy = Uuid::new_v4();
     let order = [first, blank, buddy, third, fourth, fifth];
-    let pngs = [5, 245, 12, 18, 25].map(fixture_png);
+    let pngs = [5, 255, 12, 18, 25].map(fixture_png);
     let pngs = pngs.into_iter().collect::<Result<Vec<_>>>()?;
     let original_images: Vec<_> = originals
         .into_iter()

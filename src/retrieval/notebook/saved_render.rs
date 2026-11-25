@@ -10,7 +10,8 @@ use remarkable_rm::{
         line::read_line,
         tree::{read_scene_tree_block, read_tree_node_block},
     },
-    BlockType, CrdtId, Layer, Line, Page, Pen, RenderOptions, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    BackgroundImage, BlockType, CrdtId, Layer, Line, Page, Pen, PenColor, RenderOptions,
+    DEFAULT_HEIGHT, DEFAULT_WIDTH,
 };
 use std::{
     cmp::Reverse,
@@ -55,16 +56,31 @@ impl NotebookRaster {
         );
         progress()?;
         let (scene, height) = saved_scene(page.scene)?;
-        let background = paper::background(page.template_svg, page.template_png, height)?;
+        let patterned = paper::is_patterned(page.template_svg, page.template_png, height)?;
         progress()?;
 
+        // Keep white strokes visible while leaving all template pixels out of OCR.
+        let needs_contrast = patterned
+            && scene
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.lines)
+                .any(|line| match line.color_rgba {
+                    Some([red, green, blue, alpha]) => [red, green, blue] == [255; 3] && alpha != 0,
+                    None => line.color == PenColor::White,
+                });
+        let matte = needs_contrast.then(|| BackgroundImage {
+            width: 1,
+            height: 1,
+            rgba: vec![224, 224, 224, 255],
+        });
         let png = remarkable_rm::render_page_with_background(
             &scene,
             RenderOptions {
                 width: DEFAULT_WIDTH,
                 height,
             },
-            background.as_ref(),
+            matte.as_ref(),
         )
         .context("saved scene rasterization refused")?;
         ensure!(
@@ -73,7 +89,7 @@ impl NotebookRaster {
         );
         progress()?;
         self.retained_png_bytes += png.len();
-        if background.is_some() {
+        if patterned {
             let empty = scene.text.is_none()
                 && scene
                     .layers
