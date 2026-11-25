@@ -2,6 +2,7 @@
 use super::{
     encode_model_images,
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
+    source_submission::RefusedSubmission,
     AnalysisResult, Attempt, MarkedFragment, ModelContent, Orchestrator, Workflow, ANALYSIS_PROMPT,
     MARKED_QUESTION_PROMPT, SOURCE_SUBJECT_PROMPT,
 };
@@ -11,7 +12,7 @@ use crate::{
         evidence::FollowupRequestHead,
         receiving::{memory::research::ResearchRefusal, ReceivingBudget, RequestSource},
         resolution::SourceDirective,
-        ContextBudget,
+        AttemptReason, ContextBudget,
     },
     llm::LLMEngine,
     retrieval::{
@@ -306,10 +307,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                 &self.ledger,
                 false,
                 crate::conversation::Outcome::Failed,
-                crate::conversation::AttemptReason::NoSelection,
+                AttemptReason::NoSelection,
             )?;
             return if opened {
-                Err(super::source_submission::UnresolvedSubmission.into())
+                Err(RefusedSubmission(AttemptReason::NoSelection).into())
             } else {
                 Ok(())
             };
@@ -433,7 +434,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
         if self.workflow.opened_submission().is_some() {
-            return Err(super::source_submission::UnresolvedSubmission.into());
+            return Err(RefusedSubmission(AttemptReason::NoSelection).into());
         }
         self.present_ordinary_outcome(
             attempt,
