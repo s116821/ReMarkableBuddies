@@ -181,7 +181,7 @@ fn check_captured_page(case: Case) -> Result<()> {
     owner.selection = InstalledReaderSelection::fixture_with_installed_output();
     owner.factory = Box::new(OwnedFactory {
         source: Some((document, ConversationId::new_v4())),
-        events,
+        events: events.clone(),
         mode,
         delay: Duration::ZERO,
     });
@@ -351,20 +351,19 @@ fn check_captured_page(case: Case) -> Result<()> {
     assert_eq!(capture.correspondence.expected.document, document);
     let turns = ledger.inspect(capture.conversation, false)?;
     assert!(turns.iter().any(|record| matches!(record, Record::Turn(t) if t.role == Role::User && t.text.as_deref() == Some(question))));
-    let generated = turns.iter().find_map(|record| match record {
-        Record::Turn(t) if t.role == Role::Assistant && t.outcome == Outcome::Generated => {
-            t.text.as_deref()
-        }
+    let assistant = turns.iter().find_map(|record| match record {
+        Record::Turn(t) if t.role == Role::Assistant => t.text.as_deref(),
         _ => None,
     });
     if refused {
-        assert!(generated.is_none());
+        assert!(assistant.is_none());
+        assert!(!events.borrow().contains(&"insert"));
         if case == Case::Unavailable {
             assert!(turns.iter().any(|record| matches!(record, Record::Turn(t)
                 if t.role == Role::User && t.outcome == Outcome::Failed && t.text.as_deref() == Some(question))));
         }
     } else {
-        let answer = generated.context("Expected the generated answer")?;
+        let answer = assistant.context("Expected the stored answer")?;
         assert!(answer.starts_with(NOTEBOOK));
         assert_eq!(
             answer.contains("https://example.invalid/compass"),
