@@ -2062,10 +2062,10 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                         3,
                         "disagreement must stop before answer generation"
                     );
-                    assert!(records.iter().any(|record| matches!(record,
-                        Record::OutcomeFact(fact)
-                            if fact.reason == crate::conversation::AttemptReason::TranscriptionDisagreement
-                    )));
+                    assert_eq!(
+                        result.as_ref().unwrap_err().to_string(),
+                        "The selected text could not be read reliably."
+                    );
                     (
                         Some(ARITHMETIC_QUESTION),
                         "The selected text could not be read reliably.",
