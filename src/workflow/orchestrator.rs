@@ -405,6 +405,16 @@ impl<M: LLMEngine> Orchestrator<M> {
                     opened.request = Some(request.to_owned());
                 }
                 match intent {
+                    SourceIntent::Reader if !dispatch.config.reader_enabled() => {
+                        if let Some(request) = opened {
+                            request.mode = crate::conversation::Mode::Reader;
+                            return Err(source_submission::RefusedSubmission(
+                                AttemptReason::ReaderDisabled,
+                            )
+                            .into());
+                        }
+                        return Ok(());
+                    }
                     SourceIntent::Reader => {}
                     SourceIntent::WriterCurrentPage { request } => {
                         return self
@@ -462,7 +472,10 @@ impl<M: LLMEngine> Orchestrator<M> {
                     }
                     SourceIntent::Unresolved => {
                         if self.workflow.opened_submission().is_some() {
-                            return Err(source_submission::UnresolvedSubmission.into());
+                            return Err(source_submission::RefusedSubmission(
+                                AttemptReason::NoSelection,
+                            )
+                            .into());
                         }
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());
