@@ -936,6 +936,14 @@ pub(crate) struct PendingOutput {
 
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 impl PendingOutput {
+    pub(crate) fn notebook_selection(
+        &self,
+        ledger: &Ledger,
+    ) -> Result<crate::conversation::WriterSelection> {
+        self.notebook_draft(ledger)?;
+        ledger.select_writer_for_flow(self.conversation, self.id, self.root.clone())
+    }
+
     pub(crate) fn notebook_draft(&self, ledger: &Ledger) -> Result<Turn> {
         ensure!(
             self.mode == Mode::Writer

@@ -132,18 +132,24 @@ fn acquire_installed(
                     .context("Invalid Buddy page identity")
             })
             .collect::<Result<HashSet<_>>>()?;
-        let source = acquire(
-            SourcePaths {
-                root: Path::new(INSTALLED_ROOT),
-                templates: Path::new(TEMPLATES),
-                owner: (0, Some(0)),
-                fixture: false,
-            },
-            facts,
-            &excluded,
-            &mut progress,
-            consume,
-        )?;
+        let paths = SourcePaths {
+            root: Path::new(INSTALLED_ROOT),
+            templates: Path::new(TEMPLATES),
+            owner: (0, Some(0)),
+            fixture: false,
+        };
+        #[cfg(all(test, feature = "installed-resident-output"))]
+        let fixture = FIXTURE_PATHS.with(|paths| paths.borrow().clone());
+        #[cfg(all(test, feature = "installed-resident-output"))]
+        let paths = fixture
+            .as_ref()
+            .map_or(paths, |(root, templates)| SourcePaths {
+                root,
+                templates,
+                owner: (unsafe { libc::geteuid() }, None),
+                fixture: true,
+            });
+        let source = acquire(paths, facts, &excluded, &mut progress, consume)?;
         let after = ledger.notebook_page_associations(document, &pages, || progress.poll())?;
         ensure!(before == after, "Notebook Buddy ownership changed");
         progress.check_time()?;
@@ -153,6 +159,30 @@ fn acquire_installed(
         Ok(source) => NotebookSourceAcquisition::SavedInputs(source),
         Err(error) => NotebookSourceAcquisition::Unavailable(error),
     }
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+thread_local! {
+    static FIXTURE_PATHS: std::cell::RefCell<Option<(std::path::PathBuf, std::path::PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(crate) fn with_fixture_paths<T>(root: &Path, templates: &Path, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FIXTURE_PATHS.with(|paths| paths.borrow_mut().take());
+        }
+    }
+
+    FIXTURE_PATHS.with(|paths| {
+        let mut paths = paths.borrow_mut();
+        assert!(paths.is_none());
+        *paths = Some((root.to_owned(), templates.to_owned()));
+    });
+    let _reset = Reset;
+    run()
 }
 
 fn exists(dir: &Directory, name: &str) -> Result<bool> {

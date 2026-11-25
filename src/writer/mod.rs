@@ -20,12 +20,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// One model call under an admitted Writer operation. OpenAI clamps its owned
-/// request to this deadline; no slot can be reused after any attempted submit.
+/// A model slot under an admitted Writer operation. An attempted submission
+/// consumes its slot. The notebook runner opens a fresh slot for each batch or
+/// stage when it replaces the content, under the same operation deadline.
 pub(crate) struct ModelStage<'a, E> {
     engine: &'a mut E,
     deadline: Instant,
     used: bool,
+    successive_inputs: bool,
 }
 impl<'a, E> ModelStage<'a, E> {
     pub(crate) fn new(engine: &'a mut E, deadline: Instant) -> Self {
@@ -33,6 +35,14 @@ impl<'a, E> ModelStage<'a, E> {
             engine,
             deadline,
             used: false,
+            successive_inputs: false,
+        }
+    }
+
+    pub(crate) fn for_notebook(engine: &'a mut E, deadline: Instant) -> Self {
+        Self {
+            successive_inputs: true,
+            ..Self::new(engine, deadline)
         }
     }
 }
@@ -47,7 +57,10 @@ impl<E: LLMEngine> LLMEngine for ModelStage<'_, E> {
         self.engine.add_image_content(s)
     }
     fn clear_content(&mut self) {
-        self.engine.clear_content()
+        self.engine.clear_content();
+        if self.successive_inputs {
+            self.used = false;
+        }
     }
     fn execute(&mut self) -> Result<String> {
         self.execute_with_progress(&mut || Ok(()))

@@ -1,6 +1,9 @@
 //! Installed whole-notebook Writer uses the saved source owner and local rasterizer.
 use super::{
-    current_page_writer::{require_same_resident_source, PreparedWriterCapture, WriterCapture},
+    current_page_writer::{
+        require_same_resident_source, NoteExport, NoteScope, PreparedWriterCapture, ResidentSave,
+        WriterCapture,
+    },
     Dispatch, Orchestrator, Workflow,
 };
 use crate::{
@@ -37,6 +40,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         request: String,
         capture: &ResidentSourceCapture,
         dispatch: &Dispatch<'_>,
+        export: Option<NoteExport>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
         writer::validate_request(&request)?;
@@ -109,7 +113,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             operation,
             writer::stage(operation, "source-capture"),
-            WriterCapture::Draft,
+            if export.is_some() {
+                WriterCapture::Save(NoteScope::Notebook)
+            } else {
+                WriterCapture::Draft
+            },
         )?;
         let generation_deadline = deadline - Duration::from_secs(60);
         let (report, pending) = raster.images(source.document, &order, &buddy_pages, |images| {
@@ -124,7 +132,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 saved_source_revision: saved.revision().to_owned(),
                 ordered_image_sha256: images.image_digest()?,
             };
-            let mut engine = writer::ModelStage::new(&mut self.llm, generation_deadline);
+            let mut engine = writer::ModelStage::for_notebook(&mut self.llm, generation_deadline);
             dispatch.whole_notebook(
                 &self.ledger,
                 &mut engine,
@@ -144,11 +152,47 @@ impl<M: LLMEngine> Orchestrator<M> {
             )
         })?;
         drop(raster);
-        let pending = pending.context("whole-notebook Writer did not generate a fresh draft")?;
         ensure!(
             report.status == writer::notebook::runner::Status::Generated,
-            "whole-notebook Writer draft is unresolved"
+            "whole-notebook Writer draft is unresolved ({:?}, {:?})",
+            report.status,
+            report.failure
         );
+        let pending = pending.context("whole-notebook Writer did not generate a fresh draft")?;
+        if let Some(export) = export {
+            let selected = pending.notebook_selection(&self.ledger)?;
+            let (selected, result) = self.export_resident_draft(
+                dispatch,
+                ResidentSave {
+                    capture,
+                    operation,
+                    scope: NoteScope::Notebook,
+                    export,
+                },
+                selected,
+                deadline,
+                |workflow, ledger| {
+                    ensure!(
+                        read_saved_source(workflow, ledger, facts, deadline)? == saved,
+                        "saved notebook changed before export"
+                    );
+                    Ok(())
+                },
+            )?;
+            self.require_same_resident_source(deadline)?;
+            ensure!(
+                read_saved_source(&mut self.workflow, &self.ledger, facts, deadline)? == saved,
+                "saved notebook changed before placement"
+            );
+            return self.present_resident_writer_result(
+                conversation,
+                capture,
+                association.as_ref(),
+                Some(selected),
+                true,
+                Some(result),
+            );
+        }
         let draft = pending.notebook_draft(&self.ledger)?;
         let (title, body) = writer::parse_draft(
             draft
