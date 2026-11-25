@@ -18,7 +18,29 @@ impl Fixture {
             let mut file = create_private(&path.join(name)).unwrap();
             file.write_all(name.as_bytes()).unwrap();
         }
+        // Keep the fixture body outside argv so growth cannot exceed the
+        // production launch limit. The actual arguments still test boundaries.
+        let mut child = create_private(&path.join("resident-child.py")).unwrap();
+        child
+            .write_all(include_bytes!(
+                "../../../tests/fixtures/resident_runtime_child.py"
+            ))
+            .unwrap();
         Self(path)
+    }
+    fn child_arguments(&self, mode: &str) -> Vec<String> {
+        [
+            "-S",
+            self.0.join("resident-child.py").to_str().unwrap(),
+            mode,
+            "--system",
+            "two words",
+            "",
+            "$(not-a-command); *",
+            "λ",
+        ]
+        .map(str::to_owned)
+        .to_vec()
     }
     pub(crate) fn declare_source(&self, document: StoreUuid, page: StoreUuid) {
         fs::write(
@@ -39,6 +61,22 @@ impl Fixture {
             serde_json::to_vec(pages).unwrap(),
         )
         .unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn temporary_source(
+        &self,
+        document: StoreUuid,
+        pages: &[StoreUuid],
+        reject_observation: bool,
+    ) -> PathBuf {
+        let path = self.0.join("temporary-source.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&(document, pages, reject_observation)).unwrap(),
+        )
+        .unwrap();
+        path
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -123,19 +161,7 @@ impl Fixture {
         mut admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
-        input.arguments = [
-            "-S",
-            "-c",
-            include_str!("../../../tests/fixtures/resident_runtime_child.py"),
-            mode,
-            "--system",
-            "two words",
-            "",
-            "$(not-a-command); *",
-            "λ",
-        ]
-        .map(str::to_owned)
-        .to_vec();
+        input.arguments = self.child_arguments(mode);
         ResidentRuntime::launch_checked(
             store,
             input,
