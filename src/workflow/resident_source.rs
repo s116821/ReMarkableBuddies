@@ -254,6 +254,32 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(super) fn activate_at_ordinary_startup(
+        &mut self,
+        corner: crate::device::touch::TriggerCorner,
+        health: &mut ServiceHealth,
+    ) -> Result<()> {
+        ensure!(
+            !self.fatal && self.session.is_none() && self.input.is_none(),
+            "resident startup activation requires an unused owner"
+        );
+        let mut session = Session::activate_ordinary_startup(
+            self.store.clone(),
+            health,
+            &self.selection,
+            || RequestInput::new(corner.clone(), None),
+        )?;
+        session.finish_source_request();
+        self.session = Some(Box::new(session));
+        self.reconnect = true;
+        log::info!("Resident Reader activated before the first request");
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(super) fn activate_at_startup(
         &mut self,
         corner: crate::device::touch::TriggerCorner,
@@ -545,6 +571,8 @@ impl ResidentSourceOwner {
 fn unsettled_output_insertion(
     ledger: &crate::conversation::Ledger,
     facts: &remarkable_open_sdk::native_adapter::ReaderFacts,
+    conversation: crate::storage::Uuid,
+    reader_boot: Option<Uuid>,
 ) -> Result<Option<Uuid>> {
     use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
     use crate::storage::Uuid as StoredUuid;
@@ -558,6 +586,16 @@ fn unsettled_output_insertion(
         let source = insertion.source.page();
         if source.document != page.document
             || (source.page != page.page && insertion.target != page.page)
+        {
+            continue;
+        }
+        // A terminated boot cannot complete its old request against this live order.
+        // Preserve the historical receipt and apply this evidence only to independent Reader output.
+        if attempt.conversation != conversation
+            && matches!(attempt.reply, Some(Reply::Indeterminate))
+            && reader_boot.is_some_and(|boot| boot != attempt.request.frame().scope.runtime.boot)
+            && facts == &insertion.source
+            && !facts.order().contains(&insertion.target)
         {
             continue;
         }
@@ -781,7 +819,13 @@ impl ResidentSourceOwner {
         }
         let fresh = self.output_observe(health, end)?;
         exact(&fresh, &original)?;
-        if let Some(target) = unsettled_output_insertion(ledger, &fresh)? {
+        let reader_boot = matches!(
+            text,
+            super::resident_output::ResidentOutputText::Reader { .. }
+        )
+        .then_some(runtime.boot);
+        if let Some(target) = unsettled_output_insertion(ledger, &fresh, conversation, reader_boot)?
+        {
             log::info!("Resident output requires reconciliation for historical insertion {target}");
             return Ok(Outcome::Unresolved);
         }
@@ -1953,13 +1997,37 @@ mod tests {
     }
 
     #[test]
-    fn resident_output_fences_a_different_conversation_after_indeterminate_insertion() {
-        // R103 observed an indeterminate insertion with unchanged saved page
-        // order. A later conversation is a synthetic follow-on to that run.
-        // https://linear.app/magentumdragon/issue/REM-25#comment-ac409995-98cd-4235-887b-afb43cf85904
-        for seed_insertion in [false, true] {
+    fn resident_reader_rechecks_indeterminate_insertion_before_independent_placement() {
+        use super::super::resident_output::ResidentOutputText;
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Prior {
+            None,
+            ExactEarlierBoot,
+            SameBoot,
+            ChangedOrder,
+            PresentTarget,
+            Reserved,
+            SameConversation,
+            Writer,
+        }
+        for case in [
+            Prior::None,
+            Prior::ExactEarlierBoot,
+            Prior::SameBoot,
+            Prior::ChangedOrder,
+            Prior::PresentTarget,
+            Prior::Reserved,
+            Prior::SameConversation,
+            Prior::Writer,
+        ] {
+            let mode = if case == Prior::PresentTarget {
+                "reconnect-source-handoff-indeterminate-successor"
+            } else {
+                "reconnect-source-handoff-current-rejected"
+            };
             let (mut workflow, store, base, events, _notify) =
-                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+                workflow(mode, vec![], Duration::ZERO);
             let owner = workflow.resident_source.as_mut().unwrap();
             let health = workflow.service_health.as_mut().unwrap();
             owner.begin(released(Instant::now()), health).unwrap();
@@ -1981,13 +2049,29 @@ mod tests {
                     .unwrap();
             }
             let journal = store.paths.data.join("native-insertion-attempts-v1.json");
-            let original_journal = if seed_insertion {
-                let source = owner.captured_source.clone().unwrap();
-                let target = operation().0;
+            let original_journal = if case != Prior::None {
+                let current = owner.captured_source.clone().unwrap();
+                let mut order = current.order().to_vec();
+                let target = if case == Prior::PresentTarget {
+                    order.pop().unwrap()
+                } else {
+                    operation().0
+                };
+                if case == Prior::ChangedOrder {
+                    order.push(operation().0);
+                }
+                let source = ReaderFacts::new(current.page(), order).unwrap();
                 assert!(!source.order().contains(&target));
                 let request = Frame {
                     scope: ConnectionIdentity {
-                        runtime,
+                        runtime: RuntimeIdentity {
+                            boot: if case == Prior::SameBoot {
+                                runtime.boot
+                            } else {
+                                operation().0
+                            },
+                            ..runtime
+                        },
                         connection: operation().0,
                         server_nonce: Some(operation().0),
                     },
@@ -1995,11 +2079,16 @@ mod tests {
                     operation: operation(),
                     message: Message::Request(Command::InsertAfter(InsertAfter { source, target })),
                 };
-                resident_client::seed_indeterminate_insertion(&store, prior, &request).unwrap();
+                let reply_received = case != Prior::Reserved;
+                resident_client::seed_unresolved_insertion(&store, prior, &request, reply_received)
+                    .unwrap();
                 let attempts = resident_client::attempts(&store).unwrap();
                 assert_eq!(attempts.len(), 1);
                 assert_eq!(attempts[0].conversation, prior);
-                assert_eq!(attempts[0].reply, Some(Reply::Indeterminate));
+                assert_eq!(
+                    attempts[0].reply,
+                    reply_received.then_some(Reply::Indeterminate)
+                );
                 Some(std::fs::read(&journal).unwrap())
             } else {
                 assert!(!journal.exists());
@@ -2011,33 +2100,84 @@ mod tests {
             };
             let original_state = conversation_state();
             events.borrow_mut().clear();
-            let mut backend = RecognitionProbe::default();
+            let mut backend = RecognitionProbe {
+                confirmed_source: case == Prior::ExactEarlierBoot,
+                ..RecognitionProbe::default()
+            };
+            let mut effects = 0;
+            let conversation = if case == Prior::SameConversation {
+                prior
+            } else {
+                next
+            };
+            let text = if case == Prior::Writer {
+                ResidentOutputText::Plain("New draft")
+            } else {
+                ResidentOutputText::Reader {
+                    question: "What is the answer to this?",
+                    answer: "4",
+                    center: crate::analysis::SelectionCenter::from_pixels(0.0, 0.0, 1, 1).unwrap(),
+                    subject: None,
+                }
+            };
 
             let outcome = owner
                 .render_answer(
                     health,
                     &mut backend,
                     &ledger,
-                    next,
-                    super::super::resident_output::ResidentOutputText::Plain(
-                        "answer for the new conversation",
-                    ),
+                    conversation,
+                    text,
                     None,
-                    &mut || panic!("unexpected effect callback"),
+                    &mut || {
+                        effects += 1;
+                        Ok(())
+                    },
                 )
                 .unwrap();
 
-            assert!(matches!(outcome, ResidentOutputOutcome::Unresolved));
             // Acquisition retired its socket, so output must reconnect before
             // observing the unchanged source on the same owned peer.
-            if let Some(bytes) = original_journal {
-                assert_eq!(&*events.borrow(), &["reconnect", "observe"]);
-                assert_eq!(backend.conversation.get(), None);
-                assert_eq!(std::fs::read(journal).unwrap(), bytes);
-            } else {
-                assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
+            if case == Prior::ExactEarlierBoot {
+                assert_eq!(outcome, ResidentOutputOutcome::InsertionRefused);
+                assert_eq!(
+                    &*events.borrow(),
+                    &["reconnect", "observe", "capture", "observe", "insert"]
+                );
                 assert_eq!(backend.conversation.get(), Some(next));
-                assert!(!journal.exists());
+                assert_eq!(effects, 1);
+                let old: serde_json::Value =
+                    serde_json::from_slice(&original_journal.unwrap()).unwrap();
+                let new: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+                assert_eq!(new["attempts"][0], old["attempts"][0]);
+                let history = resident_client::attempts(&store).unwrap();
+                assert_eq!(history.len(), 2);
+                assert_eq!(history[1].conversation, next);
+                assert_ne!(
+                    history[1].request.frame().operation,
+                    history[0].request.frame().operation
+                );
+                let new_insertion = match &history[1].request.frame().message {
+                    Message::Request(Command::InsertAfter(insertion)) => insertion,
+                    _ => panic!("expected a new insertion"),
+                };
+                assert_eq!(
+                    &new_insertion.source,
+                    owner.captured_source.as_ref().unwrap()
+                );
+            } else {
+                assert_eq!(outcome, ResidentOutputOutcome::Unresolved, "{case:?}");
+                assert_eq!(effects, 0, "{case:?}");
+                if let Some(bytes) = original_journal {
+                    assert_eq!(&*events.borrow(), &["reconnect", "observe"], "{case:?}");
+                    assert_eq!(backend.conversation.get(), None);
+                    assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+                } else {
+                    assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
+                    assert_eq!(backend.conversation.get(), Some(next));
+                    assert!(!journal.exists());
+                }
             }
             assert_eq!(conversation_state(), original_state);
 
