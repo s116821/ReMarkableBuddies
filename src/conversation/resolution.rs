@@ -67,6 +67,61 @@ fn request(records: &[Record], conversation: Uuid, id: Uuid) -> Result<&Turn> {
 }
 
 impl Ledger {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn bound_resident_reader_capture(
+        &self,
+        request: &Turn,
+        binding: &super::BindingReceipt,
+    ) -> Result<Option<Box<super::ResidentCaptureHistory>>> {
+        use std::collections::BTreeMap;
+
+        ensure!(
+            binding.conversation == request.conversation,
+            SourceResolutionRefusal::InvalidSource
+        );
+        let adjacent = binding
+            .observed_order
+            .windows(2)
+            .any(|pair| pair == [binding.source.page, binding.observed_page]);
+        if !adjacent || binding.source.document != binding.observed_document {
+            return Ok(None);
+        }
+
+        // Scope each turn from the binding and retained captures. An older
+        // request may have searched a whole file or used a different page.
+        let records = self.inspect(request.conversation, false)?;
+        let prior = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn)
+                    if turn.role == Role::User
+                        && turn.outcome == Outcome::Interpreted
+                        && turn.sequence < request.sequence =>
+                {
+                    Some((turn.id, turn))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let original = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ResidentCapture(capture)
+                    if capture.before.document == binding.source.document
+                        && capture.before.page == binding.source.page =>
+                {
+                    prior
+                        .get(&capture.turn)
+                        .filter(|turn| turn.sources.contains(&capture.id))
+                        .map(|turn| (turn.sequence, capture.id, capture))
+                }
+                _ => None,
+            })
+            .max_by_key(|(sequence, id, _)| (*sequence, *id))
+            .map(|(_, _, capture)| capture.clone());
+        Ok(original)
+    }
+
     /// Resolve the caller's declaration as ordinary historical data only.
     /// A subsequent receiver must validate its own snapshot and Provider key.
     pub fn resolve_request_source(
@@ -115,6 +170,8 @@ impl Ledger {
             directive,
             &records,
             anchor.as_ref(),
+            false,
+            false,
         )
     }
 }
@@ -126,6 +183,8 @@ fn from_records(
     directive: SourceDirective,
     records: &[Record],
     historical: Option<&RequestEvidence>,
+    exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     use SourceResolutionRefusal as Refusal;
     ensure!(
@@ -135,20 +194,10 @@ fn from_records(
     let current = request(records, conversation, request_turn)?;
     match directive {
         SourceDirective::Explicit(choice) => {
-            match original(records, current, choice, 512 * 1024)
+            original(records, current, choice, 512 * 1024, allow_notebook)
                 .map_err(|_| Refusal::InvalidSource)?
-            {
-                SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
-                SourceAssociation::Original {
-                    origin_turn,
-                    source_record,
-                    expected,
-                } => Ok(RequestSource::Original {
-                    origin_turn,
-                    source_record: source_id(&source_record).ok_or(Refusal::InvalidSource)?,
-                    expected,
-                }),
-            }
+                .request_source()
+                .map_err(|_| Refusal::InvalidSource.into())
         }
         SourceDirective::Inherit {
             request_turn: prior_request,
@@ -185,10 +234,18 @@ fn from_records(
                     ensure!(expected.is_none(), Refusal::UnexpectedKey);
                     Ok(RequestSource::NoDocument)
                 }
+                prior @ SourceAssociation::CapturedPage { .. } => {
+                    ensure!(expected.is_none(), Refusal::UnexpectedKey);
+                    let choice = prior.request_source()?;
+                    let source = original(records, current, choice, 512 * 1024, allow_notebook)
+                        .map_err(|_| Refusal::InvalidSource)?;
+                    ensure!(source == prior, Refusal::ChangedSource);
+                    source.request_source()
+                }
                 SourceAssociation::Original {
                     origin_turn,
                     source_record,
-                    ..
+                    expected: original_key,
                 } => {
                     let source_identity =
                         source_id(&source_record).ok_or(Refusal::InvalidSource)?;
@@ -201,12 +258,22 @@ fn from_records(
                         origin_turn,
                         source_record: current_source,
                         expected,
-                    } = original(records, current, choice, 512 * 1024)
+                    } = original(records, current, choice, 512 * 1024, allow_notebook)
                         .map_err(|_| Refusal::InvalidSource)?
                     else {
                         return Err(Refusal::InvalidSource.into());
                     };
                     ensure!(current_source == source_record, Refusal::ChangedSource);
+                    if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_)) {
+                        ensure!(expected == original_key, Refusal::ChangedSource);
+                    } else if exact_original_bytes {
+                        ensure!(
+                            expected.document == original_key.document
+                                && expected.format == original_key.format
+                                && expected.source_sha256 == original_key.source_sha256,
+                            Refusal::ChangedSource
+                        );
+                    }
                     Ok(RequestSource::Original {
                         origin_turn,
                         source_record: source_identity,
@@ -224,10 +291,20 @@ pub(super) fn for_frame(
     conversation: Uuid,
     request_turn: Uuid,
     directive: SourceDirective,
+    exact_original_bytes: bool,
+    allow_notebook: bool,
 ) -> Result<RequestSource> {
     match directive {
         SourceDirective::Explicit(source) => Ok(source),
-        inherited => from_records(conversation, request_turn, inherited, records, None),
+        inherited => from_records(
+            conversation,
+            request_turn,
+            inherited,
+            records,
+            None,
+            exact_original_bytes,
+            allow_notebook,
+        ),
     }
 }
 

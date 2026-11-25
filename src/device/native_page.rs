@@ -225,13 +225,7 @@ pub(crate) struct NavigationMetadata {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn navigation_metadata(
-    document: String,
-    session: String,
-    metadata: &Value,
-    content: &Value,
-) -> Result<NavigationMetadata> {
-    ensure!(uuid(&document), "Invalid navigation document ID");
+pub(crate) fn ordered_pages(content: &Value) -> Result<Vec<OrderedPage>> {
     let entries = content["cPages"]["pages"]
         .as_array()
         .context("Missing navigation page order")?;
@@ -284,6 +278,139 @@ fn navigation_metadata(
         !order.is_empty() && !order.windows(2).any(|p| p[0].key == p[1].key),
         "Ambiguous navigation page order"
     );
+    Ok(order)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn original_pdf_mapping(
+    raw: &[u8],
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+) -> Result<(u32, u32)> {
+    let content =
+        crate::config::inspection::strict_json(raw).context("Invalid original PDF page table")?;
+    ensure!(
+        content["fileType"] == "pdf",
+        "Unsupported original document type"
+    );
+    pdf_mapping(&content, observed, false)?.context("Reader page has no original PDF redirect")
+}
+
+#[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+fn ordinary_pdf_mapping(
+    raw: &[u8],
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+) -> Result<Option<(u32, u32)>> {
+    Ok(match ordinary_book_mapping(raw, observed, true, false)? {
+        Some(OriginalBookPage::Pdf { pages, redirect }) => Some((pages, redirect)),
+        _ => None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OriginalBookPage {
+    Pdf { pages: u32, redirect: u32 },
+    Epub,
+}
+
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) fn ordinary_book_mapping(
+    raw: &[u8],
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+    pdf_enabled: bool,
+    epub_enabled: bool,
+) -> Result<Option<OriginalBookPage>> {
+    let content =
+        crate::config::inspection::strict_json(raw).context("Invalid original page table")?;
+    match content["fileType"].as_str() {
+        Some("pdf") if pdf_enabled => Ok(pdf_mapping(&content, observed, true)?
+            .map(|(pages, redirect)| OriginalBookPage::Pdf { pages, redirect })),
+        // A rendered redirect distinguishes a book page from an inserted note.
+        // Only the EPUB spine can identify the sections returned by retrieval.
+        Some("epub") if epub_enabled => {
+            Ok(rendered_mapping(&content, observed, true)?.map(|_| OriginalBookPage::Epub))
+        }
+        Some("pdf" | "notebook" | "epub") => Ok(None),
+        _ => anyhow::bail!("Unsupported original document type"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pdf_mapping(
+    content: &Value,
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+    allow_null_redirect: bool,
+) -> Result<Option<(u32, u32)>> {
+    let Some((count, redirect)) = rendered_mapping(content, observed, allow_null_redirect)? else {
+        return Ok(None);
+    };
+    ensure!(count <= 256, "Invalid original PDF page count");
+    Ok(Some((count as u32, redirect as u32)))
+}
+
+#[cfg(target_os = "linux")]
+fn rendered_mapping(
+    content: &Value,
+    observed: &remarkable_open_sdk::native_adapter::ReaderFacts,
+    allow_null_redirect: bool,
+) -> Result<Option<(u64, u64)>> {
+    let count = content["cPages"]["original"]["value"]
+        .as_u64()
+        .filter(|&count| count > 0 && (allow_null_redirect || count <= 256))
+        .context("Invalid original document page count")?;
+    let order = ordered_pages(content)?;
+    // Ordinary navigation accepts explicit null for notes. Selected PDF
+    // admission retains its stricter check on every declared redirect.
+    ensure!(
+        content["cPages"]["pages"]
+            .as_array()
+            .is_some_and(|pages| pages.iter().all(|page| {
+                page.get("redir").is_none_or(|redirect| {
+                    (allow_null_redirect && redirect.is_null())
+                        || redirect["value"]
+                            .as_u64()
+                            .is_some_and(|index| index < count)
+                })
+            })),
+        "Invalid original document redirect table"
+    );
+    ensure!(
+        order.len() == observed.order().len()
+            && order
+                .iter()
+                .zip(observed.order())
+                .all(|(row, id)| row.id == id.to_string()),
+        "Original document page order changed"
+    );
+    let mut redirects = std::collections::BTreeSet::new();
+    ensure!(
+        order
+            .iter()
+            .filter_map(|page| page.redirect)
+            .all(|index| redirects.insert(index)),
+        "Ambiguous original document redirects"
+    );
+    let page = observed.page().page.to_string();
+    let redirect = order
+        .iter()
+        .find(|row| row.id == page)
+        .context("Reader page is absent from the original document order")?
+        .redirect;
+    let Some(redirect) = redirect else {
+        return Ok(None);
+    };
+    Ok(Some((count, redirect)))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn navigation_metadata(
+    document: String,
+    session: String,
+    metadata: &Value,
+    content: &Value,
+) -> Result<NavigationMetadata> {
+    ensure!(uuid(&document), "Invalid navigation document ID");
+    let order = ordered_pages(content)?;
     let page = content["cPages"]["lastOpened"]["value"]
         .as_str()
         .context("Missing navigation current page")?;
@@ -479,6 +606,89 @@ mod tests {
     use serde_json::json;
     const DOC: &str = "00000000-0000-0000-0000-000000000001";
     const PAGE: &str = "00000000-0000-0000-0000-000000000002";
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    #[test]
+    fn ordinary_pdf_mapping_treats_null_redirect_as_a_note_page() {
+        use remarkable_open_sdk::{native_adapter::ReaderFacts, PageKey, Uuid};
+
+        let document = Uuid::parse(DOC).unwrap();
+        let original = Uuid::parse(PAGE).unwrap();
+        let note = Uuid::parse("00000000-0000-0000-0000-000000000003").unwrap();
+        let facts =
+            |page| ReaderFacts::new(PageKey { document, page }, vec![original, note]).unwrap();
+        let original_facts = facts(original);
+        let note_facts = facts(note);
+        let mut content = json!({
+            "fileType": "pdf",
+            "cPages": {"original": {"value": 1}, "pages": [
+                {"id": original.to_string(), "idx": {"value": "a"}, "redir": {"value": 0}},
+                {"id": note.to_string(), "idx": {"value": "b"}}
+            ]}
+        });
+
+        content["cPages"]["original"]["value"] = json!(257);
+        let oversized = serde_json::to_vec(&content).unwrap();
+        assert_eq!(ordinary_pdf_mapping(&oversized, &note_facts).unwrap(), None);
+        assert!(ordinary_pdf_mapping(&oversized, &original_facts).is_err());
+        assert!(original_pdf_mapping(&oversized, &original_facts).is_err());
+        let reordered = ReaderFacts::new(
+            PageKey {
+                document,
+                page: note,
+            },
+            vec![note, original],
+        )
+        .unwrap();
+        assert!(ordinary_pdf_mapping(&oversized, &reordered).is_err());
+        for file_type in ["notebook", "epub"] {
+            let non_pdf = serde_json::to_vec(&json!({"fileType": file_type})).unwrap();
+            assert_eq!(ordinary_pdf_mapping(&non_pdf, &note_facts).unwrap(), None);
+        }
+        let mut ebook = content.clone();
+        ebook["fileType"] = json!("epub");
+        let ebook = serde_json::to_vec(&ebook).unwrap();
+        assert_eq!(
+            ordinary_book_mapping(&ebook, &original_facts, false, true).unwrap(),
+            Some(OriginalBookPage::Epub)
+        );
+        assert_eq!(
+            ordinary_book_mapping(&ebook, &note_facts, false, true).unwrap(),
+            None
+        );
+        assert_eq!(
+            ordinary_book_mapping(&ebook, &original_facts, true, false).unwrap(),
+            None
+        );
+        assert!(ordinary_book_mapping(&ebook, &reordered, false, true).is_err());
+        content["cPages"]["original"]["value"] = json!(1);
+        let missing = serde_json::to_vec(&content).unwrap();
+        assert_eq!(ordinary_pdf_mapping(&missing, &note_facts).unwrap(), None);
+        assert_eq!(
+            original_pdf_mapping(&missing, &original_facts).unwrap(),
+            (1, 0)
+        );
+
+        content["cPages"]["pages"][1]["redir"] = Value::Null;
+        let explicit_null = serde_json::to_vec(&content).unwrap();
+        assert_eq!(
+            ordinary_pdf_mapping(&explicit_null, &note_facts).unwrap(),
+            None
+        );
+        assert_eq!(
+            ordinary_pdf_mapping(&explicit_null, &original_facts).unwrap(),
+            Some((1, 0))
+        );
+        assert!(original_pdf_mapping(&explicit_null, &original_facts).is_err());
+
+        for redirect in [json!("bad"), json!({"value": null}), json!({"value": 1})] {
+            content["cPages"]["pages"][1]["redir"] = redirect;
+            let invalid = serde_json::to_vec(&content).unwrap();
+            assert!(ordinary_pdf_mapping(&invalid, &original_facts).is_err());
+            assert!(ordinary_pdf_mapping(&invalid, &note_facts).is_err());
+            assert!(original_pdf_mapping(&invalid, &original_facts).is_err());
+        }
+    }
+
     #[test]
     fn navigation_order_handles_inserted_notes_and_rejects_ambiguous_redirects() {
         let note = "00000000-0000-0000-0000-000000000003";

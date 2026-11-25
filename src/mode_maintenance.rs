@@ -1,12 +1,15 @@
-//! Explicit local mode intent. No worker, provider or native activation.
+//! Explicit mode intent and separately qualified first-group control.
 use crate::{
     config::Config,
     storage::{
         self, files,
         maintenance::Refusal,
-        sync::mode::{
-            self, OrdinaryModeLease, SyncModeLease, SyncModeReceipt, SyncModeSnapshot,
-            SyncModeToken,
+        sync::{
+            isolated_provision,
+            mode::{
+                self, OrdinaryModeLease, SyncModeLease, SyncModeReceipt, SyncModeSnapshot,
+                SyncModeToken,
+            },
         },
         Store, Uuid,
     },
@@ -19,6 +22,8 @@ use std::{
     sync::Arc,
 };
 
+mod drive_credential;
+
 pub const MAX_INPUT: usize = 16 * 1024;
 pub const MAX_OUTPUT: usize = 16 * 1024;
 
@@ -28,6 +33,9 @@ pub enum Operation {
     Initialize,
     Inspect,
     Choose,
+    CreateGroup,
+    ProvisionIsolatedBackup,
+    DriveCredential,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -128,6 +136,10 @@ struct Data {
     current_snapshot: Current,
     receipt: Option<SyncModeReceipt>,
     receipt_status: Option<ReceiptStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control: Option<storage::sync::selected::GroupOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isolated_root: Option<isolated_provision::Outcome>,
 }
 
 struct OutputLease {
@@ -162,6 +174,8 @@ pub struct Report {
     _store: Option<Arc<Store>>,
     #[serde(skip)]
     _mode: Option<OutputLease>,
+    #[serde(skip)]
+    drive_credential: Option<drive_credential::Report>,
 }
 impl Report {
     fn new(operation: Operation, status: Status) -> Self {
@@ -174,9 +188,13 @@ impl Report {
             data: None,
             _store: None,
             _mode: None,
+            drive_credential: None,
         }
     }
     fn encoded(&self) -> Result<Vec<u8>> {
+        if let Some(credential) = &self.drive_credential {
+            return credential.encoded();
+        }
         let mut bytes = serde_json::to_vec(self)?;
         bytes.push(b'\n');
         if bytes.len() <= MAX_OUTPUT {
@@ -259,6 +277,8 @@ fn finish(
         },
         receipt,
         receipt_status,
+        control: None,
+        isolated_root: None,
     });
     report
 }
@@ -276,7 +296,81 @@ pub fn run(
     config_path: Option<PathBuf>,
     stdin: &mut impl Read,
 ) -> Report {
+    if operation == Operation::DriveCredential {
+        return drive_credential::run(input, config_path, stdin);
+    }
+    run_with_provision(
+        operation,
+        input,
+        config_path,
+        stdin,
+        isolated_provision::run,
+    )
+}
+
+fn run_with_provision(
+    operation: Operation,
+    input: Option<&Path>,
+    config_path: Option<PathBuf>,
+    stdin: &mut impl Read,
+    provision: impl FnOnce(
+        Arc<Store>,
+        isolated_provision::Request,
+    ) -> std::result::Result<
+        isolated_provision::Outcome,
+        isolated_provision::Failure,
+    >,
+) -> Report {
+    let group_request = if operation == Operation::CreateGroup {
+        let Some(path) = input else {
+            return Report::new(operation, Status::InvalidInput);
+        };
+        if path.as_os_str() != std::ffi::OsStr::new("-") {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        let mut bytes = Vec::new();
+        if stdin
+            .take((MAX_INPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_INPUT
+        {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        let request: storage::sync::selected::CreateGroupRequest =
+            match serde_json::from_slice(&bytes) {
+                Ok(request) => request,
+                Err(_) => return Report::new(operation, Status::InvalidInput),
+            };
+        if request.validate().is_err() {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        Some(request)
+    } else {
+        None
+    };
+    let provision_request = if operation == Operation::ProvisionIsolatedBackup {
+        if input.is_none_or(|path| path.as_os_str() != std::ffi::OsStr::new("-")) {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        let mut bytes = Vec::new();
+        if stdin
+            .take((MAX_INPUT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_INPUT
+        {
+            return Report::new(operation, Status::InvalidInput);
+        }
+        match isolated_provision::Request::parse(&bytes) {
+            Ok(value) => Some(value),
+            Err(_) => return Report::new(operation, Status::InvalidInput),
+        }
+    } else {
+        None
+    };
     let request = match (operation, input) {
+        (Operation::CreateGroup | Operation::ProvisionIsolatedBackup, _) => None,
         (Operation::Choose, Some(path)) => match read_request(path, stdin) {
             Ok(request) => Some(request),
             Err(_) => return Report::new(operation, Status::InvalidInput),
@@ -293,6 +387,11 @@ pub fn run(
         Err(_) => return Report::new(operation, Status::Unavailable),
     };
     if operation != Operation::Inspect && config.sync.enabled {
+        return Report::new(operation, Status::Unsupported);
+    }
+    if provision_request.is_some()
+        && (config.reader.selection.is_some() || config.memory.selection.is_some())
+    {
         return Report::new(operation, Status::Unsupported);
     }
     let store = if operation == Operation::Initialize {
@@ -330,7 +429,63 @@ pub fn run(
         report._store = Some(store);
         return report;
     }
-    if let Some(request) = request {
+    if let Some(request) = provision_request {
+        use isolated_provision::{Failure, State};
+        match provision(store.clone(), request) {
+            Ok(outcome) => {
+                let status = match outcome.outcome {
+                    State::RootVerified => Status::Ok,
+                    State::AuthorizationRequired | State::RetryLater | State::OutcomeUnknown => {
+                        Status::Unavailable
+                    }
+                    State::RecoveryRequired => Status::Failed,
+                    State::ProviderBindingUnqualified => Status::Unsupported,
+                };
+                let mut report = finish(operation, status, store, None);
+                if let Some(data) = &mut report.data {
+                    data.isolated_root = Some(outcome);
+                }
+                report
+            }
+            Err(failure) => finish(
+                operation,
+                match failure {
+                    Failure::Conflict => Status::Conflict,
+                    Failure::Unsupported => Status::Unsupported,
+                    Failure::Recovery => Status::Failed,
+                },
+                store,
+                None,
+            ),
+        }
+    } else if let Some(request) = group_request {
+        // Production qualification is deliberately closed. Keep the actual
+        // control dispatch, but refuse before any credential read or mutation.
+        match storage::sync::selected::create_group(store.clone(), request) {
+            Ok(outcome) => {
+                let mut report = finish(
+                    operation,
+                    Status::Ok,
+                    store,
+                    Some(outcome.mode_receipt.clone()),
+                );
+                if let Some(data) = &mut report.data {
+                    data.control = Some(outcome);
+                }
+                report
+            }
+            Err(error) => finish(
+                operation,
+                if error.to_string() == "shared provider application binding is not qualified" {
+                    Status::Unsupported
+                } else {
+                    mutation_status(&error)
+                },
+                store,
+                None,
+            ),
+        }
+    } else if let Some(request) = request {
         choose(store, request)
     } else {
         finish(operation, Status::Ok, store, None)
@@ -345,8 +500,13 @@ pub struct OrdinaryLifetime {
 
 pub(crate) struct LocalDispatchLifetime {
     store: Arc<Store>,
-    _mode: OrdinaryModeLease,
+    _mode: LocalDispatchMode,
     _data: storage::LocalDomainLease,
+}
+
+enum LocalDispatchMode {
+    Ordinary { _mode: OrdinaryModeLease },
+    Isolated { _mode: SyncModeLease },
 }
 
 impl LocalDispatchLifetime {
@@ -359,7 +519,35 @@ pub(crate) fn admit_local_dispatch(store: &Arc<Store>) -> Result<LocalDispatchLi
     let current = store.sync_mode_snapshot()?;
     Ok(LocalDispatchLifetime {
         store: store.clone(),
-        _mode: store.ordinary_mode_lease(&current.token)?,
+        _mode: LocalDispatchMode::Ordinary {
+            _mode: store.ordinary_mode_lease(&current.token)?,
+        },
+        _data: store.local_domain_lease()?,
+    })
+}
+pub(crate) fn admit_isolated_local_dispatch(
+    store: &Arc<Store>,
+    config: &Config,
+) -> Result<LocalDispatchLifetime> {
+    ensure!(
+        !config.sync.enabled
+            && config.reader.selection.is_none()
+            && config.memory.selection.is_none(),
+        "isolated ordinary runtime requires local Reader and memory configuration"
+    );
+    let current = store.sync_mode_snapshot()?;
+    ensure!(
+        matches!(current.mode, Some(mode::SyncMode::IsolatedBackup { .. })),
+        "isolated mode required"
+    );
+    let lease = store.sync_mode_lease(&current.token)?;
+    ensure!(
+        store.ordinary_isolated_family()?,
+        "isolated ordinary runtime requires format 1"
+    );
+    Ok(LocalDispatchLifetime {
+        store: store.clone(),
+        _mode: LocalDispatchMode::Isolated { _mode: lease },
         _data: store.local_domain_lease()?,
     })
 }

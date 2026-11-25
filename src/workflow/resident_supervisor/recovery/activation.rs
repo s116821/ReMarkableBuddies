@@ -169,7 +169,8 @@ impl InstalledReaderSelection {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(crate) fn has_installed_output(&self) -> bool {
+    /// A validated installation with the shared conversation page and Writer receiver.
+    pub fn has_installed_output(&self) -> bool {
         self.installed_output
     }
 
@@ -313,6 +314,16 @@ impl InstalledReaderSelection {
         }
     }
 
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    pub(crate) fn fixture_for_installed_output(
+        path: &Path,
+        runtime: &RuntimeIdentity,
+    ) -> Result<Self> {
+        let mut selection = Self::fixture_for_output(path, runtime)?;
+        selection.installed_output = true;
+        Ok(selection)
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture_for_output(path: &Path, runtime: &RuntimeIdentity) -> Result<Self> {
         use std::{io::Write, os::unix::fs::DirBuilderExt};
@@ -367,13 +378,62 @@ impl Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    pub(crate) fn writer_at_release(
+        &self,
+        released_boot_second: u64,
+    ) -> Result<super::super::writer_request::WriterAtRelease> {
+        super::super::writer_request::at_release(&self.pending.lease, released_boot_second)
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
+        selected: Option<&super::super::writer_request::GenerationPin>,
+    ) -> Result<Option<super::super::writer_request::InstalledRequest>> {
+        self.pending.lease.current()?;
+        super::super::writer_request::take(
+            self.pending.lease.record().activation(),
+            document,
+            page,
+            selected,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn writer_request_for_page(
+        &self,
+        document: crate::storage::Uuid,
+        page: crate::storage::Uuid,
+        selected: super::super::writer_request::SelectedRefinement,
+        action: super::super::writer_request::SlotAction,
     ) -> Result<Option<crate::writer::Request>> {
         self.pending.lease.current()?;
-        super::super::writer_request::take(self.pending.lease.record().activation(), document, page)
+        super::super::writer_request::request_for_page(
+            self.pending.lease.record().activation(),
+            document,
+            page,
+            selected,
+            action,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::super::writer_request::RegionalPin>> {
+        self.pending.lease.current()?;
+        super::super::writer_request::peek(self.pending.lease.record().activation())
     }
 
     /// Only the installed first-gesture caller may compose this with live source

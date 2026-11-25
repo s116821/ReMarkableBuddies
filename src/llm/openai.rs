@@ -1,10 +1,11 @@
-use super::LLMEngine;
+use super::{LLMEngine, ProviderRefused};
 use anyhow::{Context, Result};
 use log::{debug, info};
 use serde_json::json;
 use serde_json::Value as JsonValue;
 
 pub const DEFAULT_MODEL: &str = "gpt-5.6-terra";
+pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 pub struct OpenAI {
     timeout: std::time::Duration,
@@ -20,7 +21,7 @@ impl OpenAI {
         let base_url = base_url.unwrap_or_else(|| "https://api.openai.com".to_string());
 
         Self {
-            timeout: std::time::Duration::from_secs(90),
+            timeout: DEFAULT_TIMEOUT,
             model,
             base_url,
             api_key,
@@ -57,6 +58,9 @@ impl OpenAI {
 }
 
 impl LLMEngine for OpenAI {
+    fn guarded_timeout(&self) -> Option<std::time::Duration> {
+        Some(self.timeout)
+    }
     fn add_text_content(&mut self, text: &str) {
         self.add_content(json!({
             "type": "text",
@@ -65,13 +69,7 @@ impl LLMEngine for OpenAI {
     }
 
     fn add_image_content(&mut self, base64_image: &str) {
-        self.add_content(json!({
-            "type": "image_url",
-            "image_url": {
-                "url": format!("data:image/png;base64,{}", base64_image),
-                "detail": "high"
-            }
-        }));
+        self.add_content(image_part(base64_image));
     }
 
     fn clear_content(&mut self) {
@@ -85,6 +83,42 @@ impl LLMEngine for OpenAI {
     fn execute_with_progress(
         &mut self,
         progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        self.execute_guarded(progress, &mut |submit| submit(), None)
+    }
+    fn execute_with_handoff(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+    ) -> Result<String> {
+        self.execute_guarded(progress, handoff, None)
+    }
+    fn execute_with_deadline(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+        deadline: std::time::Instant,
+    ) -> Result<String> {
+        self.execute_guarded(progress, handoff, Some(deadline))
+    }
+}
+
+pub(crate) fn image_part(base64_image: &str) -> JsonValue {
+    json!({
+        "type": "image_url",
+        "image_url": {
+            "url": format!("data:image/png;base64,{}", base64_image),
+            "detail": "high"
+        }
+    })
+}
+
+impl OpenAI {
+    fn execute_guarded(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut super::ModelHandoff<'_>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<String> {
         // Refuse before dispatch if the caller has already canceled/lost admission.
         let preflight = std::time::Instant::now();
@@ -104,40 +138,76 @@ impl LLMEngine for OpenAI {
         let endpoint = format!("{}/v1/chat/completions", self.base_url);
         let api_key = self.api_key.clone();
         let timeout = self.timeout;
-        let single_request = self.single_request;
+        // An admitted deadline owns one submission. Transport redirects or
+        // retries must not create another POST outside that handoff.
+        let single_request = self.single_request || deadline.is_some();
         let (cancel, mut canceled) = tokio::sync::watch::channel(false);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        let worker = std::thread::Builder::new().name("buddy-provider-request".into()).spawn(move || {
+        let mut task = Some(move || {
             let _run = crate::measurement::Run::enter(run);
             let result = (|| -> Result<String> {
-                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
                     .context("Create provider runtime")?;
                 runtime.block_on(async {
                     let request = async {
+                        let timeout = match deadline {
+                            Some(deadline) => timeout
+                                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                            None => timeout,
+                        };
+                        anyhow::ensure!(
+                            !timeout.is_zero(),
+                            "model request expired before dispatch"
+                        );
                         let _timing = crate::measurement::Span::new("provider.request");
-                        let client = reqwest::Client::builder().timeout(timeout).hickory_dns(true);
+                        let client = reqwest::Client::builder()
+                            .timeout(timeout)
+                            .hickory_dns(true);
                         let client = if single_request {
-                            client.redirect(reqwest::redirect::Policy::none())
+                            client
+                                .redirect(reqwest::redirect::Policy::none())
                                 .retry(reqwest::retry::never())
                         } else {
                             client
                         };
                         #[cfg(test)]
-                        let client = if single_request { client.no_proxy() } else { client };
-                        let client = client.build()
+                        let client = if single_request {
+                            client.no_proxy()
+                        } else {
+                            client
+                        };
+                        let client = client
+                            .build()
                             .context("Create asynchronous provider transport")?;
-                        let mut response = client.post(endpoint).bearer_auth(api_key).json(&body).send().await
+                        let mut response = client
+                            .post(endpoint)
+                            .bearer_auth(api_key)
+                            .json(&body)
+                            .send()
+                            .await
                             .map_err(provider_error)?
-                            .error_for_status().map_err(|error| error.without_url()).context("Model response status")?;
+                            .error_for_status()
+                            .map_err(response_status_error)?;
                         // Preserve the previous bounded response behavior, including unknown lengths.
                         const MAX_RESPONSE: usize = 10 * 1024 * 1024;
-                        anyhow::ensure!(response.content_length().is_none_or(|size| size <= MAX_RESPONSE as u64), "Model response exceeds bound");
+                        anyhow::ensure!(
+                            response
+                                .content_length()
+                                .is_none_or(|size| size <= MAX_RESPONSE as u64),
+                            "Model response exceeds bound"
+                        );
                         let mut bytes = Vec::new();
                         while let Some(chunk) = response.chunk().await.map_err(provider_error)? {
-                            anyhow::ensure!(chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()), "Model response exceeds bound");
+                            anyhow::ensure!(
+                                chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()),
+                                "Model response exceeds bound"
+                            );
                             bytes.extend_from_slice(&chunk);
                         }
-                        let text = String::from_utf8(bytes).context("Decode model response text")?;
+                        let text =
+                            String::from_utf8(bytes).context("Decode model response text")?;
                         parse_response(&text)
                     };
                     tokio::pin!(request);
@@ -151,11 +221,24 @@ impl LLMEngine for OpenAI {
                 // is spawned or leaked via a shutdown timeout/background escape.
             })();
             let _ = sender.send(result);
-        }).context("Start provider request")?;
-        let mut owned = OwnedRequest {
-            cancel,
-            worker: Some(worker),
+        });
+        let mut owned = None;
+        let mut submit = || {
+            let task = task
+                .take()
+                .context("model request was already handed off")?;
+            let worker = std::thread::Builder::new()
+                .name("buddy-provider-request".into())
+                .spawn(task)
+                .context("Start provider request")?;
+            owned = Some(OwnedRequest {
+                cancel: cancel.clone(),
+                worker: Some(worker),
+            });
+            Ok(())
         };
+        handoff(&mut submit)?;
+        let mut owned = owned.context("model request was not handed off")?;
         let mut due = preflight
             + crate::workflow::indicator::next_deadline(
                 std::time::Duration::ZERO,
@@ -215,6 +298,29 @@ fn provider_error(error: reqwest::Error) -> anyhow::Error {
     }
 }
 
+fn is_definite_rejection(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode;
+    // Invalid request, invalid credentials, denied access, unavailable endpoint
+    // or model, and rejected input. Timeouts, conflicts, rate limits, and
+    // unknown statuses carry no definitive rejection for outcome recording.
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::NOT_FOUND
+            | StatusCode::UNPROCESSABLE_ENTITY
+    )
+}
+
+fn response_status_error(error: reqwest::Error) -> anyhow::Error {
+    if error.status().is_some_and(is_definite_rejection) {
+        ProviderRefused.into()
+    } else {
+        anyhow::Error::from(error.without_url()).context("Model response status")
+    }
+}
+
 fn parse_response(body_text: &str) -> Result<String> {
     let json: JsonValue = serde_json::from_str(body_text).context("Decode model response JSON")?;
     info!(
@@ -225,8 +331,18 @@ fn parse_response(body_text: &str) -> Result<String> {
     );
     debug!("Provider response decoded");
 
-    // Extract the response text
-    let response_text = json["choices"][0]["message"]["content"]
+    let message = &json["choices"][0]["message"];
+    let content = &message["content"];
+    let no_answer =
+        content.is_null() || content.as_str().is_some_and(|text| text.trim().is_empty());
+    if no_answer
+        && message["refusal"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+    {
+        return Err(ProviderRefused.into());
+    }
+    let response_text = content
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No response content found"))?
         .to_string();
@@ -236,7 +352,51 @@ fn parse_response(body_text: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_response;
+    use super::{is_definite_rejection, parse_response, ProviderRefused};
+    use reqwest::StatusCode;
+
+    #[test]
+    fn definite_refusal_is_typed_and_hides_provider_text() {
+        for message in [
+            r#"{"refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":null,"refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":"","refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+            r#"{"content":" \t\n","refusal":"PRIVATE_PROVIDER_DIAGNOSTIC"}"#,
+        ] {
+            let body = format!(r#"{{"choices":[{{"message":{message}}}]}}"#);
+            let error = parse_response(&body).unwrap_err();
+            assert!(error.is::<ProviderRefused>());
+            assert_eq!(
+                format!("{error:#}"),
+                "response service refused this request"
+            );
+        }
+        for body in [
+            r#"{"choices":[{"message":{"content":null}}]}"#,
+            r#"{"choices":[{"message":{"content":null,"refusal":" \t"}}]}"#,
+        ] {
+            assert!(!parse_response(body).unwrap_err().is::<ProviderRefused>());
+        }
+        assert_eq!(
+            parse_response(
+                r#"{"choices":[{"message":{"content":" Answer text ","refusal":"declined"}}]}"#
+            )
+            .unwrap(),
+            " Answer text "
+        );
+    }
+
+    #[test]
+    fn only_allowlisted_http_rejections_are_definite() {
+        for status in 100..=599 {
+            let expected = matches!(status, 400 | 401 | 403 | 404 | 422);
+            assert_eq!(
+                is_definite_rejection(StatusCode::from_u16(status).unwrap()),
+                expected,
+                "HTTP {status}",
+            );
+        }
+    }
 
     #[test]
     fn response_errors_do_not_panic_or_echo_response_content() {

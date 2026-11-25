@@ -274,6 +274,7 @@ mod tests {
                 evidence: vec![reference(Namespace::Source, Uuid::new_v4())],
                 media: vec![],
             }),
+            marked_question: None,
         }
     }
     fn envelope(record: Record, schema: u32, id: Uuid) -> Envelope {
@@ -307,6 +308,16 @@ mod tests {
         let legacy = envelope(Record::Receipt(old.clone()), 1, id);
         assert!(Ledger::decode(&legacy).is_ok());
         assert!(legacy.payload["record"].get("admitted_intent").is_none());
+        for existing in [&legacy, &good] {
+            assert!(existing.payload["record"].get("marked_question").is_none());
+            assert_eq!(
+                serde_json::to_value(Ledger::decode(existing).unwrap()).unwrap(),
+                existing.payload
+            );
+            let mut marked_null = existing.clone();
+            marked_null.payload["record"]["marked_question"] = serde_json::Value::Null;
+            assert!(Ledger::decode(&marked_null).is_err());
+        }
         assert!(Ledger::decode(&envelope(Record::Receipt(old), INTENT_SCHEMA, id)).is_err());
         for change in 0..9 {
             let mut bad = original.clone();

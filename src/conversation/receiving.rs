@@ -4,7 +4,8 @@ pub(crate) mod images;
 pub mod memory;
 use super::{
     resolution::{self, SourceDirective},
-    ContextBudget, ContextRefusal, Ledger, Mode, Outcome, Record, Role, Turn, TurnRange,
+    ContextBudget, ContextRefusal, ContextView, Ledger, Mode, Outcome, Record, Role, Turn,
+    TurnRange,
 };
 use crate::{
     retrieval::{IndexKey, Provider, Retrieved},
@@ -26,6 +27,10 @@ const RESULT_BYTES: usize = 16 * 1024;
 pub enum RequestSource {
     /// Explicit caller declaration, not an inferred blank-page observation.
     NoDocument,
+    CapturedPage {
+        origin_turn: Uuid,
+        source_record: Uuid,
+    },
     Original {
         origin_turn: Uuid,
         source_record: Uuid,
@@ -48,11 +53,51 @@ pub struct ReceivingBudget {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SourceAssociation {
     NoDocument,
+    CapturedPage {
+        origin_turn: Uuid,
+        source_record: Box<Record>,
+    },
     Original {
         origin_turn: Uuid,
         source_record: Box<Record>,
         expected: IndexKey,
     },
+}
+
+impl SourceAssociation {
+    pub(super) fn source_record(&self) -> Option<&Record> {
+        match self {
+            Self::NoDocument => None,
+            Self::CapturedPage { source_record, .. } | Self::Original { source_record, .. } => {
+                Some(source_record)
+            }
+        }
+    }
+
+    pub(super) fn request_source(&self) -> Result<RequestSource> {
+        let record_id = |record: &Record| -> Result<Uuid> {
+            source_id(record).ok_or_else(|| ReceivingRefusal::OriginalUnavailable.into())
+        };
+        Ok(match self {
+            Self::NoDocument => RequestSource::NoDocument,
+            Self::CapturedPage {
+                origin_turn,
+                source_record,
+            } => RequestSource::CapturedPage {
+                origin_turn: *origin_turn,
+                source_record: record_id(source_record)?,
+            },
+            Self::Original {
+                origin_turn,
+                source_record,
+                expected,
+            } => RequestSource::Original {
+                origin_turn: *origin_turn,
+                source_record: record_id(source_record)?,
+                expected: expected.clone(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -95,6 +140,12 @@ impl fmt::Display for ReceivingRefusal {
 }
 impl std::error::Error for ReceivingRefusal {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowupMedia {
+    All,
+    BoundPage,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Frame {
@@ -115,13 +166,26 @@ pub(super) fn recorded_source(json: &str) -> Result<SourceAssociation> {
     Ok(serde_json::from_str::<Frame>(json)?.source)
 }
 
-#[derive(Debug)]
 pub struct FrozenRequestContext {
     frame: Frame,
+    media_view: Option<ContextView>,
     encoded: String,
     tokens: usize,
 }
+impl fmt::Debug for FrozenRequestContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrozenRequestContext")
+            .field("frame", &self.frame)
+            .field("tokens", &self.tokens)
+            .finish_non_exhaustive()
+    }
+}
 impl FrozenRequestContext {
+    pub(crate) fn media_view(&self) -> Result<&ContextView> {
+        self.media_view
+            .as_ref()
+            .ok_or_else(|| ReceivingRefusal::InvalidHistory.into())
+    }
     pub fn request(&self) -> &Turn {
         &self.frame.request
     }
@@ -232,20 +296,20 @@ pub(super) fn validate_historical(
             ReceivingRefusal::InvalidSelection
         );
     }
-    let choice = match &frame.source {
-        SourceAssociation::NoDocument => RequestSource::NoDocument,
-        SourceAssociation::Original {
-            origin_turn,
-            source_record,
-            expected,
-        } => RequestSource::Original {
-            origin_turn: *origin_turn,
-            source_record: source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?,
-            expected: expected.clone(),
-        },
-    };
+    let allow_notebook = matches!(
+        &frame.source,
+        SourceAssociation::Original { source_record, .. }
+            if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_))
+    );
+    let choice = frame.source.request_source()?;
     ensure!(
-        original(records, request, choice, budget.max_encoded_bytes)? == frame.source,
+        original(
+            records,
+            request,
+            choice,
+            budget.max_encoded_bytes,
+            allow_notebook
+        )? == frame.source,
         ReceivingRefusal::AssociationMismatch
     );
     let mut view = Ledger::context_records(
@@ -270,7 +334,7 @@ pub(super) fn validate_historical(
         .chain(std::iter::once(request))
         .flat_map(|t| t.sources.iter().copied())
         .collect::<BTreeSet<_>>();
-    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+    if let Some(source_record) = frame.source.source_record() {
         source_ids.insert(source_id(source_record).ok_or(ReceivingRefusal::OriginalUnavailable)?);
     }
     let supplied = records
@@ -287,6 +351,7 @@ pub(super) fn validate_historical(
             Record::LegacyCapture(s) => (s.conversation, s.turn),
             Record::DevelopmentCapture(s) => (s.conversation, s.turn),
             Record::ResidentCapture(s) => (s.conversation, s.turn),
+            Record::ArchivedNormalizedSource(s) => (s.conversation, s.turn),
             _ => unreachable!(),
         };
         ensure!(owner == conversation && records.iter().any(|r| matches!(r, Record::Turn(t) if t.id == turn && t.sources.contains(&source_id(record).unwrap()))), "foreign historical source");
@@ -296,7 +361,7 @@ pub(super) fn validate_historical(
             }
         }
     }
-    if let SourceAssociation::Original { source_record, .. } = &frame.source {
+    if let Some(source_record) = frame.source.source_record() {
         for m in source_media(source_record)? {
             if frame.missing_media.contains(&m) && !view.missing_media.contains(&m) {
                 view.missing_media.push(m);
@@ -310,8 +375,15 @@ pub(super) fn validate_historical(
     let retrieval = frame.retrieval.take();
     let base = encoded(&frame, budget.max_encoded_bytes)?;
     match (&frame.source, retrieval) {
-        (SourceAssociation::NoDocument, None) => {}
-        (SourceAssociation::Original { expected, .. }, Some(result)) => {
+        (SourceAssociation::NoDocument | SourceAssociation::CapturedPage { .. }, None) => {}
+        (
+            SourceAssociation::Original {
+                expected,
+                source_record,
+                ..
+            },
+            Some(result),
+        ) => {
             let text = request
                 .text
                 .as_deref()
@@ -332,6 +404,7 @@ pub(super) fn validate_historical(
                 .min(budget.max_passage_bytes);
             ensure!(room >= 512, ReceivingRefusal::EncodedLimit);
             validate_retrieval(&result, expected, budget.max_passages, room)?;
+            validate_notebook_locators(source_record, &result)?;
         }
         _ => return Err(ReceivingRefusal::InvalidRetrieval.into()),
     }
@@ -367,7 +440,7 @@ fn validate_key(key: &IndexKey) -> Result<()> {
 }
 pub(super) fn source_id(record: &Record) -> Option<Uuid> {
     match record {
-        Record::ArchivedNormalizedSource(_) => None, // Host archive, not native source admission.
+        Record::ArchivedNormalizedSource(source) => Some(source.id),
         Record::Source(source) => Some(source.id),
         Record::Capture(source) => Some(source.id),
         Record::LegacyCapture(source) => Some(source.id),
@@ -378,7 +451,7 @@ pub(super) fn source_id(record: &Record) -> Option<Uuid> {
 }
 pub(super) fn source_media(record: &Record) -> Result<Vec<Media>> {
     match record {
-        Record::ArchivedNormalizedSource(_) => Err(ReceivingRefusal::OriginalUnavailable.into()),
+        Record::ArchivedNormalizedSource(source) => Ok(vec![source.media.clone()]),
         Record::Source(source) => Ok(std::iter::once(source.image.clone())
             .chain(source.parent.clone())
             .collect()),
@@ -394,16 +467,23 @@ pub(super) fn original(
     request: &Turn,
     choice: RequestSource,
     cap: usize,
+    allow_notebook: bool,
 ) -> Result<SourceAssociation> {
-    let RequestSource::Original {
-        origin_turn,
-        source_record,
-        expected,
-    } = choice
-    else {
-        return Ok(SourceAssociation::NoDocument);
+    let (origin_turn, source_record, expected) = match choice {
+        RequestSource::NoDocument => return Ok(SourceAssociation::NoDocument),
+        RequestSource::CapturedPage {
+            origin_turn,
+            source_record,
+        } => (origin_turn, source_record, None),
+        RequestSource::Original {
+            origin_turn,
+            source_record,
+            expected,
+        } => {
+            validate_key(&expected)?;
+            (origin_turn, source_record, Some(expected))
+        }
     };
-    validate_key(&expected)?;
     let origin = records
         .iter()
         .find_map(|record| match record {
@@ -422,6 +502,21 @@ pub(super) fn original(
         .iter()
         .find(|record| source_id(record) == Some(source_record))
         .ok_or(ReceivingRefusal::OriginalUnavailable)?;
+    let Some(expected) = expected else {
+        let Record::ResidentCapture(capture) = record else {
+            return Err(ReceivingRefusal::OriginalUnavailable.into());
+        };
+        capture.validate()?;
+        ensure!(
+            capture.conversation == request.conversation && capture.turn == origin.id,
+            ReceivingRefusal::AssociationMismatch
+        );
+        encoded(record, cap)?;
+        return Ok(SourceAssociation::CapturedPage {
+            origin_turn,
+            source_record: Box::new(record.clone()),
+        });
+    };
     let (conversation, turn, document) = match record {
         Record::Source(source) => (
             source.conversation,
@@ -435,6 +530,16 @@ pub(super) fn original(
         ),
         Record::ResidentCapture(source) => {
             (source.conversation, source.turn, source.before.document)
+        }
+        Record::ArchivedNormalizedSource(source) if allow_notebook => {
+            source.validate()?;
+            ensure!(
+                source.format == crate::retrieval::SourceFormat::Notebook
+                    && source.selection == super::TextScope::SuppliedNotebook
+                    && notebook_key_matches(source, &expected),
+                ReceivingRefusal::AssociationMismatch
+            );
+            (source.conversation, source.turn, source.document)
         }
         Record::DevelopmentCapture(source) => {
             let label = &source.expected_binding.document_id;
@@ -458,6 +563,30 @@ pub(super) fn original(
         source_record: Box::new(record.clone()),
         expected,
     })
+}
+
+fn validate_notebook_locators(source: &Record, result: &Retrieved) -> Result<()> {
+    if matches!(source, Record::ArchivedNormalizedSource(_)) {
+        ensure!(
+            result
+                .passages
+                .iter()
+                .all(|passage| passage.page.is_some() && passage.section.is_none()),
+            ReceivingRefusal::InvalidRetrieval
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn notebook_key_matches(
+    source: &super::ArchivedNormalizedSource,
+    key: &IndexKey,
+) -> bool {
+    key.document == source.document
+        && key.format == source.format
+        && key.source_sha256 == source.source_sha256
+        && key.extractor_revision == source.extractor_revision
+        && key.normalized_sha256 == source.units_sha256
 }
 
 pub(super) fn validate_retrieval(
@@ -556,7 +685,14 @@ impl Ledger {
         let records = self
             .inspect(conversation, false)
             .map_err(|_| ReceivingRefusal::InvalidHistory)?;
-        let source = resolution::for_frame(&records, conversation, request_turn, directive)?;
+        let source = resolution::for_frame(
+            &records,
+            conversation,
+            request_turn,
+            directive,
+            false,
+            false,
+        )?;
         self.assemble_request_context(
             conversation,
             request_turn,
@@ -579,6 +715,131 @@ impl Ledger {
         retrieval: Option<&dyn Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
+    ) -> Result<FrozenRequestContext> {
+        self.assemble_ordinary_request_context(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assemble_ordinary_request_context(
+        &self,
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        records: Vec<Record>,
+        followup_media: Option<FollowupMedia>,
+        verified_notebook: Option<&Media>,
+    ) -> Result<FrozenRequestContext> {
+        let bound_page = followup_media == Some(FollowupMedia::BoundPage);
+        let bound_media = if bound_page {
+            match &source {
+                RequestSource::NoDocument => Vec::new(),
+                RequestSource::CapturedPage { source_record, .. } => {
+                    let record = records
+                        .iter()
+                        .find(|record| source_id(record) == Some(*source_record))
+                        .ok_or(ReceivingRefusal::OriginalUnavailable)?;
+                    source_media(record)?
+                }
+                RequestSource::Original { .. } => {
+                    return Err(ReceivingRefusal::AssociationMismatch.into());
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let mut context = Self::assemble_request_data(
+            conversation,
+            request_turn,
+            selection,
+            source,
+            budget,
+            retrieval,
+            token_count,
+            records,
+            "ordinary-historical",
+            followup_media == Some(FollowupMedia::All),
+            verified_notebook.is_some(),
+            |media| {
+                // Keep the existing historical frame for replay. Its
+                // missing-media list records failures only within the
+                // media this answer actually needs to open.
+                (bound_page && !bound_media.contains(media))
+                    || verified_notebook == Some(media)
+                    || self
+                        .store
+                        .open_object(&ObjectRef {
+                            sha256: media.sha256.clone(),
+                            bytes: media.bytes,
+                        })
+                        .is_ok()
+            },
+        )?;
+        if let Some(view) = context.media_view.as_mut() {
+            // The target uses are frozen with the frame. Resolve only their
+            // exact historical objects, as the ordinary image path does.
+            self.complete_target_view(view)?;
+        }
+        Ok(context)
+    }
+
+    /// Only the live Attempt can construct this admitted data view. It carries
+    /// no authority to submit a model request or publish a result.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn selected_researched_context(
+        admitted: &crate::workflow::ResearchContext,
+        budget: ReceivingBudget,
+        retrieval: &dyn Provider,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenRequestContext> {
+        Self::assemble_request_data(
+            admitted.conversation(),
+            admitted.request_turn(),
+            None,
+            RequestSource::Original {
+                origin_turn: admitted.request_turn(),
+                source_record: admitted.capture(),
+                expected: admitted.index_key().clone(),
+            },
+            budget,
+            Some(retrieval),
+            token_count,
+            admitted.records().to_vec(),
+            "selected-historical",
+            false,
+            false,
+            |media| admitted.media_available(media),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_request_data(
+        conversation: Uuid,
+        request_turn: Uuid,
+        selection: Option<TurnRange>,
+        source: RequestSource,
+        budget: ReceivingBudget,
+        retrieval: Option<&dyn Provider>,
+        token_count: impl Fn(&str) -> Result<usize>,
+        records: Vec<Record>,
+        scope: &str,
+        keep_media: bool,
+        allow_notebook: bool,
+        media_available: impl Fn(&Media) -> bool,
     ) -> Result<FrozenRequestContext> {
         let token_limit = validate_budget(&budget)?;
         let request = records
@@ -607,7 +868,13 @@ impl Ledger {
                 ReceivingRefusal::InvalidSelection
             );
         }
-        let association = original(&records, request, source, budget.max_encoded_bytes)?;
+        let association = original(
+            &records,
+            request,
+            source,
+            budget.max_encoded_bytes,
+            allow_notebook,
+        )?;
         if matches!(association, SourceAssociation::Original { .. }) {
             let text = request
                 .text
@@ -636,48 +903,55 @@ impl Ledger {
             selection,
             &budget.context,
             |turns| count(&encoded(turns, budget.max_encoded_bytes)?, &token_count),
-            |media| {
-                self.store
-                    .open_object(&ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes,
-                    })
-                    .is_ok()
-            },
+            &media_available,
         )?;
         ensure!(
             view.turns.last().is_some_and(|turn| turn == &request),
             ReceivingRefusal::InvalidHistory
         );
         view.turns.pop();
-        if let SourceAssociation::Original { source_record, .. } = &association {
-            for media in source_media(source_record)? {
-                if self
-                    .store
-                    .open_object(&ObjectRef {
-                        sha256: media.sha256.clone(),
-                        bytes: media.bytes,
-                    })
-                    .is_err()
-                    && !view.missing_media.contains(&media)
+        if let Some(source_record) = association.source_record() {
+            if let Record::ArchivedNormalizedSource(archive) = source_record {
+                if !view
+                    .archived_sources
+                    .iter()
+                    .any(|source| source.id == archive.id)
                 {
+                    view.archived_sources.push((**archive).clone());
+                }
+            }
+            for media in source_media(source_record)? {
+                if !media_available(&media) && !view.missing_media.contains(&media) {
                     view.missing_media.push(media);
                 }
             }
         }
         let mut frame = Frame {
             schema: 1,
-            scope: "ordinary-historical".into(),
+            scope: scope.into(),
             conversation,
             request,
-            history: view.turns,
+            history: if keep_media {
+                view.turns.clone()
+            } else {
+                std::mem::take(&mut view.turns)
+            },
             selection,
             source: association,
             retrieval: None,
-            missing_media: view.missing_media,
+            missing_media: if keep_media {
+                view.missing_media.clone()
+            } else {
+                std::mem::take(&mut view.missing_media)
+            },
         };
         let base = encoded(&frame, budget.max_encoded_bytes)?;
-        let serialized = if let SourceAssociation::Original { expected, .. } = &frame.source {
+        let serialized = if let SourceAssociation::Original {
+            expected,
+            source_record,
+            ..
+        } = &frame.source
+        {
             let room = budget
                 .max_encoded_bytes
                 .checked_sub(base.len())
@@ -700,6 +974,7 @@ impl Ledger {
                 )
                 .map_err(|_| ReceivingRefusal::RetrievalUnavailable)?;
             validate_retrieval(&result, expected, budget.max_passages, room)?;
+            validate_notebook_locators(source_record, &result)?;
             frame.retrieval = Some(result);
             encoded(&frame, budget.max_encoded_bytes)?
         } else {
@@ -715,6 +990,7 @@ impl Ledger {
         );
         Ok(FrozenRequestContext {
             frame,
+            media_view: keep_media.then_some(view),
             encoded: serialized,
             tokens,
         })

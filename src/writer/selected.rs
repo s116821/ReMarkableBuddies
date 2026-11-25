@@ -6,6 +6,32 @@ use crate::conversation::{
 };
 use crate::storage::selection::{SelectionToken, SelectionTransaction};
 
+mod image;
+#[cfg(all(
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use image::fresh::FreshOperation;
+#[cfg(test)]
+pub(crate) use image::regional::{
+    advance_at_admission_recheck_for_test, advance_for_test, clock_for_test,
+};
+pub(crate) use image::{run_image, run_target};
+pub use image::{WriterImageRequest, WriterTargetRequest};
+
+pub(crate) fn normalization_preparations(operation: Uuid) -> [Uuid; 2] {
+    [
+        stage(operation, "source-normalization-admission"),
+        stage(operation, "target-normalization-admission"),
+    ]
+}
+
+pub(crate) fn normalization_prerequisites(operation: Uuid) -> [Uuid; 3] {
+    let [capture, regional] = normalization_preparations(operation);
+    [operation, capture, regional]
+}
+
 pub struct Selection {
     pub accepted: SelectionToken,
     pub root: IntentRecordRef,
@@ -36,6 +62,75 @@ pub fn run<E: LLMEngine>(
     memory: Option<&dyn crate::memory::Provider>,
     canceled: &mut dyn FnMut() -> bool,
 ) -> SelectedReport {
+    run_inner(
+        writer,
+        selection,
+        engine,
+        request,
+        Preferences {
+            personalization,
+            shared: None,
+        },
+        memory,
+        canceled,
+    )
+}
+pub(crate) fn run_with_preferences<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    selection: &Selection,
+    engine: &mut E,
+    request: &Request,
+    preferences: crate::storage::sync::selected::RequestPreferences,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> SelectedReport {
+    if !engine
+        .guarded_timeout()
+        .is_some_and(|timeout| !timeout.is_zero() && timeout <= crate::llm::openai::DEFAULT_TIMEOUT)
+    {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    if preferences.require_writer(writer).is_err() {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    if preferences.config().memory.enabled != memory.is_some() {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
+    let Ok(personalization) = preferences.config().personalization_snapshot() else {
+        return result(Report::refused(request, Failure::Storage));
+    };
+    run_inner(
+        writer,
+        selection,
+        engine,
+        request,
+        Preferences {
+            personalization: &personalization,
+            shared: Some(&preferences),
+        },
+        memory,
+        canceled,
+    )
+}
+struct Preferences<'a> {
+    personalization: &'a PersonalizationSnapshot,
+    shared: Option<&'a crate::storage::sync::selected::RequestPreferences>,
+}
+fn run_inner<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    selection: &Selection,
+    engine: &mut E,
+    request: &Request,
+    preferences: Preferences<'_>,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+) -> SelectedReport {
+    if preferences
+        .shared
+        .is_some_and(|p| !p.config().admits_writer(false))
+    {
+        return result(Report::refused(request, Failure::Unsupported));
+    }
     if let Err(failure) = request.preflight() {
         return result(Report::refused(request, failure));
     }
@@ -106,6 +201,32 @@ pub fn run<E: LLMEngine>(
         return result(Report::new(request, Status::Canceled));
     }
     let prepared = writer.prepare_selected_writer(&selection.accepted, prepare, now());
+    finish_run(
+        writer,
+        engine,
+        request,
+        preferences,
+        memory,
+        canceled,
+        &text,
+        prepared,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_run<E: LLMEngine>(
+    writer: &SelectedAdmission,
+    engine: &mut E,
+    request: &Request,
+    preferences: Preferences<'_>,
+    memory: Option<&dyn crate::memory::Provider>,
+    canceled: &mut dyn FnMut() -> bool,
+    text: &str,
+    prepared: Result<SelectedWriterPreparation>,
+    mut image: Option<image::Continuation<'_>>,
+) -> SelectedReport {
+    let personalization = preferences.personalization;
     let (prepared, permit) = match prepared {
         Ok(SelectedWriterPreparation::Fresh { prepared, model }) => (*prepared, model),
         Ok(SelectedWriterPreparation::Historical {
@@ -141,36 +262,48 @@ pub fn run<E: LLMEngine>(
         }
         Err(_) => return result(Report::refused(request, Failure::Storage)),
     };
-    let mut memory_view = None;
+    let mut memory_view = image.as_mut().and_then(image::Continuation::memory_view);
+    let mut regional_about = None;
     let mut failure = None;
     let mut was_canceled = false;
     let response = (|| -> Result<String> {
-        let input = writer.writer_input(&prepared)?;
+        let input = if let Some(image) = &image {
+            image.draft_input(writer, &prepared)?
+        } else {
+            writer.writer_input(&prepared)?
+        };
         // Bound the exact unmodified history sent below, including Generated,
         // Failed and Canceled Writer turns excluded by Reader context assembly.
         let history_bytes = input.history.iter().try_fold(0usize, |total, turn| {
             total.checked_add(turn.text.as_ref().map_or(0, String::len))
         });
+        regional_about = input.regional.as_ref().map(|r| r.about.clone());
         if input.history.len() > 64 || history_bytes.is_none_or(|bytes| bytes > MAX_HISTORY) {
             failure = Some(Failure::TooLarge);
             anyhow::bail!("selected Writer history bound");
         }
-        let view = writer.context_range(
-            &prepared.accepted,
-            request.conversation(),
-            None,
-            &crate::conversation::ContextBudget {
-                max_text_bytes: MAX_HISTORY,
-                max_turns: 64,
-                provider_token_limit: Some(MAX_HISTORY),
-            },
-            |turns| {
-                Ok(turns
-                    .iter()
-                    .map(|t| t.text.as_ref().map_or(0, String::len))
-                    .sum())
-            },
-        )?;
+        let context_budget = crate::conversation::ContextBudget {
+            max_text_bytes: MAX_HISTORY,
+            max_turns: 64,
+            provider_token_limit: Some(MAX_HISTORY),
+        };
+        let count = |turns: &[crate::conversation::Turn]| {
+            Ok(turns
+                .iter()
+                .map(|t| t.text.as_ref().map_or(0, String::len))
+                .sum())
+        };
+        let view = if let Some(image) = &image {
+            image.draft_context(writer, &prepared, &context_budget, count)?
+        } else {
+            writer.context_range(
+                &prepared.accepted,
+                request.conversation(),
+                None,
+                &context_budget,
+                count,
+            )?
+        };
         ensure!(
             view.missing_media.is_empty(),
             "selected Writer history media missing"
@@ -187,10 +320,13 @@ pub fn run<E: LLMEngine>(
                 failure = Some(Failure::TooLarge);
                 anyhow::bail!("selected Writer memory query bound");
             }
-            let mut query = crate::memory::Query::new(text.clone(), now());
+            let mut query = crate::memory::Query::new(text.to_owned(), now());
             query.document = Some(input.source.document.document);
             query.validate()?;
-            let view = provider.query(&query)?;
+            let view = match memory_view.take() {
+                Some(view) => view,
+                None => provider.query(&query)?,
+            };
             ensure!(
                 view.selected(),
                 "selected Writer requires sealed selected memory"
@@ -201,11 +337,20 @@ pub fn run<E: LLMEngine>(
         } else {
             None
         };
-        permit.consume(writer, &prepared)?;
+        if image.is_some() {
+            permit.require_prepared(writer, &prepared)?;
+        } else {
+            permit.consume(writer, &prepared)?;
+        }
         let mut progress = || {
             if canceled() {
                 was_canceled = true;
                 anyhow::bail!("selected Writer canceled");
+            }
+            if let Some(image) = &image {
+                return image.progress(writer, &prepared.accepted);
+            } else if let Some(preferences) = preferences.shared {
+                preferences.check_progress()?;
             }
             writer.writer_input(&prepared).map(|_| ())
         };
@@ -220,13 +365,38 @@ pub fn run<E: LLMEngine>(
             content.0.add_text_content(&part)
         }
         content.0.add_text_content(&payload);
-        if let (Some(provider), Some(view)) = (memory, memory_view.as_ref()) {
+        if let (None, Some(provider), Some(view)) = (&image, memory, memory_view.as_ref()) {
             provider.check_selected_writer(view, writer)?;
         }
-        let output = content.0.execute_with_progress(&mut progress);
+        let output = if let Some(image) = &image {
+            image.execute_draft(
+                &mut *content.0,
+                writer,
+                &prepared,
+                memory.zip(memory_view.as_ref()),
+                &mut progress,
+            )
+        } else if let Some(preferences) = preferences.shared {
+            content
+                .0
+                .execute_with_handoff(&mut progress, &mut |submit| {
+                    preferences.handoff(writer, &prepared, memory, memory_view.as_ref(), submit)
+                })
+        } else {
+            content.0.execute_with_progress(&mut progress)
+        };
         progress()?;
         output
     })();
+    let response = response.and_then(|body| {
+        if let Some(about) = &regional_about {
+            present_regional_draft(&body, about).inspect_err(|_| {
+                failure = Some(Failure::InvalidOutput);
+            })
+        } else {
+            Ok(body)
+        }
+    });
     let (outcome, body, status) = if was_canceled {
         (Outcome::Canceled, None, Status::Canceled)
     } else {
@@ -256,7 +426,11 @@ pub fn run<E: LLMEngine>(
         text: body,
         updated_ms: now(),
     };
-    let publication = if outcome == Outcome::Generated {
+    let publication = if let Some(image) = &image {
+        image.finish_draft(writer, finish, memory.zip(memory_view.as_ref()))
+    } else if let Some(preferences) = preferences.shared {
+        preferences.finish(writer, finish, memory, memory_view.as_ref())
+    } else if outcome == Outcome::Generated {
         if let (Some(provider), Some(view)) = (memory, memory_view.as_ref()) {
             provider.publish_selected_writer(view, writer, finish)
         } else {
@@ -293,7 +467,10 @@ pub fn run<E: LLMEngine>(
         }
     }
 }
-fn encode_memory(view: &crate::memory::QueryResult, document: Uuid) -> Result<Option<String>> {
+pub(super) fn encode_memory(
+    view: &crate::memory::QueryResult,
+    document: Uuid,
+) -> Result<Option<String>> {
     use crate::memory::Status as S;
     ensure!(
         !matches!(view.status, S::Unavailable | S::Disabled),

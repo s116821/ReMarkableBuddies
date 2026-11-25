@@ -66,7 +66,8 @@ fn valid_changes(changes: &Changes) -> bool {
                 Setting::ReaderEnabled | Setting::WriterEnabled => value.is_boolean(),
                 Setting::ExportDestination => value
                     .as_str()
-                    .is_some_and(|v| ["mem", "disabled"].contains(&v)),
+                    .and_then(super::product::ExportDestination::parse)
+                    .is_some(),
             },
         })
 }

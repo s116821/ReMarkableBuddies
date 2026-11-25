@@ -224,21 +224,12 @@ struct Target {
 }
 fn target(doc: &Document, artifact: &Value) -> std::result::Result<Target, Status> {
     let mut raw = doc.raw.clone();
-    for (name, imported) in artifact["settings"]
-        .as_object()
-        .ok_or(Status::InvalidInput)?
-    {
-        if let Some(children) = imported.as_object() {
-            if !raw[name].is_object() {
-                raw[name] = json!({});
-            }
-            for (key, value) in children {
-                raw[name][key] = value.clone();
-            }
-        } else {
-            raw[name] = imported.clone();
-        }
-    }
+    super::merge_settings(
+        raw.as_object_mut().ok_or(Status::InvalidInput)?,
+        artifact["settings"]
+            .as_object()
+            .ok_or(Status::InvalidInput)?,
+    );
     let mut changed: Vec<_> = SETTINGS
         .into_iter()
         .filter(|name| raw.get(*name) != doc.raw.get(*name))

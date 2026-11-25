@@ -686,6 +686,7 @@ fn completed_export_associations_are_retained_and_unsettled_exports_refuse() {
                     operation,
                     outcome: outcome.clone(),
                     attempt: None,
+                    capacities: None,
                 },
             )
             .unwrap();

@@ -285,85 +285,96 @@ impl Keyboard {
     }
 
     pub fn string_to_keypresses(&mut self, input: &str) -> Result<()> {
-        if let Some(device) = &mut self.device {
-            // make sure we are synced before we start; this might be paranoia
-            device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
-            thread::sleep(time::Duration::from_millis(10));
-
+        if self.device.is_some() {
+            self.start_keypresses()?;
             for c in input.chars() {
-                if let Some(&(key, shift)) = self.key_map.get(&c) {
-                    if self.rm2_keyboard && c == '^' {
-                        // Inline xochitl composition can anchor the dead key
-                        // before a still-pending preceding character. Let that
-                        // character commit before starting caret composition.
-                        thread::sleep(time::Duration::from_millis(50));
-                    }
-                    // Firmware 3.28 maps the equals sign through Alt+Shift.
-                    if self.rm2_keyboard && c == '=' {
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_LEFTALT.code(),
-                            1,
-                        )])?;
-                    }
-                    if shift {
-                        // Press Shift
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_LEFTSHIFT.code(),
-                            1,
-                        )])?;
-                    }
-
-                    thread::sleep(time::Duration::from_millis(10));
-                    // Press key
-                    device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 1)])?;
-
-                    thread::sleep(time::Duration::from_millis(10));
-                    // Release key
-                    device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 0)])?;
-
-                    thread::sleep(time::Duration::from_millis(10));
-                    if shift {
-                        // Release Shift
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_LEFTSHIFT.code(),
-                            0,
-                        )])?;
-                    }
-
-                    if self.rm2_keyboard && c == '=' {
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_LEFTALT.code(),
-                            0,
-                        )])?;
-                    }
-                    if self.rm2_keyboard && c == '^' {
-                        // RM2 treats Shift+6 as a dead superscript key. Space
-                        // commits a literal caret instead of consuming the next
-                        // exponent character (e.g. turning ^-11 into superscript
-                        // minus followed by baseline 11).
-                        thread::sleep(time::Duration::from_millis(10));
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_SPACE.code(),
-                            1,
-                        )])?;
-                        device.emit(&[InputEvent::new(
-                            EvdevEventType::KEY.0,
-                            EvdevKey::KEY_SPACE.code(),
-                            0,
-                        )])?;
-                        thread::sleep(time::Duration::from_millis(50));
-                    }
-                    // Sync event
-                    device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
-                    thread::sleep(time::Duration::from_millis(10));
-                }
+                self.character_to_keypresses(c)?;
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn start_keypresses(&mut self) -> Result<()> {
+        if let Some(device) = &mut self.device {
+            device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
+            thread::sleep(time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn character_to_keypresses(&mut self, c: char) -> Result<()> {
+        let (Some(device), Some(&(key, shift))) = (&mut self.device, self.key_map.get(&c)) else {
+            return Ok(());
+        };
+        if self.rm2_keyboard && c == '^' {
+            // Inline xochitl composition can anchor the dead key
+            // before a still-pending preceding character. Let that
+            // character commit before starting caret composition.
+            thread::sleep(time::Duration::from_millis(50));
+        }
+        // Firmware 3.28 maps the equals sign through Alt+Shift.
+        if self.rm2_keyboard && c == '=' {
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_LEFTALT.code(),
+                1,
+            )])?;
+        }
+        if shift {
+            // Press Shift
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_LEFTSHIFT.code(),
+                1,
+            )])?;
+        }
+
+        thread::sleep(time::Duration::from_millis(10));
+        // Press key
+        device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 1)])?;
+
+        thread::sleep(time::Duration::from_millis(10));
+        // Release key
+        device.emit(&[InputEvent::new(EvdevEventType::KEY.0, key.code(), 0)])?;
+
+        thread::sleep(time::Duration::from_millis(10));
+        if shift {
+            // Release Shift
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_LEFTSHIFT.code(),
+                0,
+            )])?;
+        }
+
+        if self.rm2_keyboard && c == '=' {
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_LEFTALT.code(),
+                0,
+            )])?;
+        }
+        if self.rm2_keyboard && c == '^' {
+            // RM2 treats Shift+6 as a dead superscript key. Space
+            // commits a literal caret instead of consuming the next
+            // exponent character (e.g. turning ^-11 into superscript
+            // minus followed by baseline 11).
+            thread::sleep(time::Duration::from_millis(10));
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_SPACE.code(),
+                1,
+            )])?;
+            device.emit(&[InputEvent::new(
+                EvdevEventType::KEY.0,
+                EvdevKey::KEY_SPACE.code(),
+                0,
+            )])?;
+            thread::sleep(time::Duration::from_millis(50));
+        }
+        // Sync event
+        device.emit(&[InputEvent::new(EvdevEventType::SYNCHRONIZATION.0, 0, 0)])?;
+        thread::sleep(time::Duration::from_millis(10));
         Ok(())
     }
 

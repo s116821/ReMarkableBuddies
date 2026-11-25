@@ -88,13 +88,44 @@ connections = set()
 handshakes = set()
 count = 0
 # Explicit owned source-handoff model, never native current-page authority.
-source_page = uuid.uuid4().bytes
+declared_source = root.parent / "declared-source.json"
+if declared_source.is_file():
+    source_document, source_page = [uuid.UUID(value).bytes for value in json.loads(declared_source.read_text())]
+else:
+    source_document, source_page = uuid.uuid4().bytes, uuid.uuid4().bytes
 source_order = [source_page]
-if mode == "reconnect-source-handoff-indeterminate-successor":
+declared_order = root.parent / "declared-source-order.json"
+if declared_order.is_file():
+    source_order = [uuid.UUID(value).bytes for value in json.loads(declared_order.read_text())]
+elif mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-source-handoff-text-refusal"):
     source_order.append(uuid.uuid4().bytes)
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
-source_facts = uuid.uuid4().bytes + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
+elif mode == "reconnect-source-handoff-research-pages":
+    source_order.append(uuid.UUID((root.parent / "research-successor").read_text()).bytes)
+source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
+inserted_target = None
+
+def current_source_facts():
+    if mode == "reconnect-source-handoff-open-first" and (root.parent / "source-switch").is_file():
+        if inserted_target is not None:
+            successor_index = source_order.index(source_page) + 1
+            order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
+            return source_document + source_page + struct.pack(">H", len(order)) + b"".join(order)
+        return source_facts
+    if inserted_target is not None:
+        successor_index = source_order.index(source_page) + 1
+        order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
+        return source_document + inserted_target + struct.pack(">H", len(order)) + b"".join(order)
+    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages", "reconnect-source-handoff-open-first") and (root.parent / "successor-position").is_file():
+        successor = source_order.index(source_page) + 1
+        return source_document + source_order[successor] + struct.pack(">H", len(source_order)) + b"".join(source_order)
+    order_change = root.parent / "ordinary-pdf-order-change"
+    if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
+        extra = uuid.UUID(order_change.read_text()).bytes
+        return source_document + source_page + struct.pack(">H", 2) + source_page + extra
+    return source_facts
+
 while True:
     peer, _ = listener.accept()
     # The companion-startup fixture must outlive its five-second readiness
@@ -170,6 +201,12 @@ while True:
                     response[146] ^= 1
                 send(response)
                 continue
+            if mode in ("reconnect-source-handoff-writer-insert", "reconnect-source-handoff-open-first") and request[202:204] == b"\x02\x01":
+                assert inserted_target is None and request[204:-16] == source_facts
+                inserted_target = request[-16:]
+                assert inserted_target != source_page
+                send(request[:202] + b"\x03" + digest + b"\x01" + current_source_facts())
+                continue
             if mode in ("reconnect-source-handoff-current-rejected", "reconnect-source-handoff-current-indeterminate") and request[202:204] == b"\x02\x01":
                 assert request[204:-16] == source_facts and request[-16:] != source_page
                 reply = b"\x03\x02" if mode.endswith("-rejected") else b"\x04"
@@ -183,7 +220,18 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                send(request[:202] + b"\x03" + digest + b"\x00" + source_facts)
+                temporary_source = root.parent / "temporary-source.json"
+                if mode == "reconnect-source-handoff-open-first" and temporary_source.is_file():
+                    document, pages, reject = json.loads(temporary_source.read_text())
+                    order = [uuid.UUID(page).bytes for page in pages]
+                    facts = uuid.UUID(document).bytes + order[-1] + struct.pack(">H", len(order)) + b"".join(order)
+                    reply = b"\x03\x03" if reject else b"\x00" + facts
+                    send(request[:202] + b"\x03" + digest + reply)
+                    continue
+                facts = current_source_facts()
+                if mode == "reconnect-source-handoff-open-first" and facts[16:32] != source_page:
+                    (root.parent / "observed-open-page").write_text(str(uuid.UUID(bytes=facts[16:32])))
+                send(request[:202] + b"\x03" + digest + b"\x00" + facts)
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
@@ -191,21 +239,35 @@ while True:
                 facts = request[204:]
                 assert not visual or not facts
                 if mode.startswith("reconnect-source-handoff"):
-                    assert facts == source_facts
+                    assert facts == current_source_facts()
                 (root / "capture-received").touch()
                 if mode in ("reconnect-capture-cancel", "reconnect-capture-timeout") and count == 1:
                     assert peer.recv(1) == b""
                     break
                 width, height = 192, 128
-                pixels = b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32))
+                ordinary_pdf = mode == "reconnect-source-handoff-ordinary-pdf"
+                seed = facts[16:32] if mode in ("reconnect-source-handoff-research-pages", "reconnect-source-handoff-open-first") else b""
+                pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
+                          b"".join(hashlib.sha256(seed + struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
+                if (root.parent / "edited-selection").is_file():
+                    # Represent fresh ink on the same native page and inside the left selection.
+                    pixels = bytearray(pixels)
+                    for y in range(30, 37):
+                        for x in range(30, 37):
+                            offset = (y * width + x) * 3
+                            pixels[offset:offset + 3] = b"\xff\x00\xf0"
                 def chunk(tag, data):
                     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
                 rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
                 png = (b"\x89PNG\r\n\x1a\n"
                        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-                       + chunk(b"IDAT", zlib.compress(rows))
+                       + chunk(b"IDAT", zlib.compress(rows, 0 if ordinary_pdf else -1))
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
+                displayed_writer = root.parent / "displayed-writer.png"
+                if displayed_writer.is_file():
+                    png = displayed_writer.read_bytes()
+                    width, height = struct.unpack_from(">II", png, 16)
                 image_hash = hashlib.sha256(png).digest()
                 if mode in ("reconnect-capture-corrupt", "reconnect-source-handoff-corrupt"):
                     png = png[:-1] + bytes([png[-1] ^ 1])

@@ -1,5 +1,12 @@
 //! Durable selected-record projections and a bounded background worker.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "isolated provider binding is unqualified")
+)]
+mod isolated;
+pub(crate) use isolated::provision as isolated_provision;
 pub mod mode;
+pub(crate) mod selected;
 use super::{drive::*, *};
 use crate::config::SyncPolicy;
 use serde_json::json;
@@ -47,6 +54,8 @@ struct State {
     policy_fingerprint: String,
     #[serde(default)]
     deferred: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected: Option<selected::SelectedState>,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -59,6 +68,9 @@ pub enum Status {
     AuthorizationRequired,
     RetryLater,
     UnsupportedOrCorrupt,
+    Joining,
+    CommittedNotApplied,
+    IncompleteMedia,
 }
 
 pub struct SyncEngine<T: DriveTransport> {
@@ -634,6 +646,28 @@ impl<T: DriveTransport> SyncEngine<T> {
     }
 }
 
+trait WorkerEngine: Send {
+    fn step(&mut self) -> Result<Status>;
+    fn health(&self, status: Status) -> serde_json::Value;
+}
+impl<T: DriveTransport> WorkerEngine for SyncEngine<T> {
+    fn step(&mut self) -> Result<Status> {
+        SyncEngine::step(self)
+    }
+    fn health(&self, status: Status) -> serde_json::Value {
+        json!({"status":status,"recovery_scope":"selected-records",
+            "policy_deferred_manifests":self.state.deferred.len(),"full_media_recovery":false})
+    }
+}
+impl WorkerEngine for selected::Engine {
+    fn step(&mut self) -> Result<Status> {
+        selected::Engine::step(self)
+    }
+    fn health(&self, status: Status) -> serde_json::Value {
+        selected::Engine::health(self, status)
+    }
+}
+
 pub struct Worker {
     cancel: Arc<AtomicBool>,
     wake: mpsc::SyncSender<()>,
@@ -651,51 +685,93 @@ impl Worker {
             return Ok(None);
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        let mut engine =
-            match SyncEngine::new(store.clone(), policy.clone(), transport, cancel.clone()) {
-                Ok(engine) => engine,
-                Err(_) => {
-                    let _ = files::atomic_json(
-                        &store.paths.data.join("sync/health.json"),
-                        &json!({"status":Status::RecoveryRequired}),
-                    );
-                    return Ok(None);
-                }
-            };
+        let engine = match SyncEngine::new(store.clone(), policy.clone(), transport, cancel.clone())
+        {
+            Ok(engine) => engine,
+            Err(_) => {
+                let _ = files::atomic_json(
+                    &store.paths.data.join("sync/health.json"),
+                    &json!({"status":Status::RecoveryRequired}),
+                );
+                return Ok(None);
+            }
+        };
+        Self::launch(store, policy, cancel, engine)
+    }
+    fn launch<E: WorkerEngine + 'static>(
+        store: Arc<Store>,
+        policy: SyncPolicy,
+        cancel: Arc<AtomicBool>,
+        mut engine: E,
+    ) -> Result<Option<Self>> {
         let (wake, receiver) = mpsc::sync_channel(1);
         let (done_sender, done) = mpsc::channel();
         store.set_wake(Some(wake.clone()));
-        let handle=thread::Builder::new().name("buddy-drive-sync".into()).spawn(move||{
-            let mut failures=0_u32;
-            while !engine.cancel.load(Ordering::Relaxed) {
-                let (status,retry)=match engine.step() {
-                    Ok(status)=>{failures=0;(status,None)},
-                    Err(error)=>{
-                        failures=failures.saturating_add(1);
-                        match error.downcast_ref::<TransportFailure>() {
-                            Some(e) if e.authorization_required=>(Status::AuthorizationRequired,None),
-                            Some(e) if e.retryable=>(Status::RetryLater,e.retry_after_seconds),
-                            Some(_)=>(Status::RecoveryRequired,None),
-                            None=>(Status::RetryLater,None),
+        let thread_store = store.clone();
+        let thread_cancel = cancel.clone();
+        let handle = thread::Builder::new()
+            .name("buddy-drive-sync".into())
+            .spawn(move || {
+                let mut failures = 0_u32;
+                while !thread_cancel.load(Ordering::Relaxed) {
+                    let (status, retry) = match engine.step() {
+                        Ok(status) => {
+                            failures = 0;
+                            (status, None)
+                        }
+                        Err(error) => {
+                            failures = failures.saturating_add(1);
+                            match error.downcast_ref::<TransportFailure>() {
+                                Some(e) if e.authorization_required => {
+                                    (Status::AuthorizationRequired, None)
+                                }
+                                Some(e) if e.retryable => {
+                                    (Status::RetryLater, e.retry_after_seconds)
+                                }
+                                Some(_) => (Status::RecoveryRequired, None),
+                                None => (Status::RetryLater, None),
+                            }
+                        }
+                    };
+                    let _ = files::atomic_json(
+                        &thread_store.paths.data.join("sync/health.json"),
+                        &engine.health(status),
+                    );
+                    if matches!(
+                        status,
+                        Status::AuthorizationRequired | Status::RecoveryRequired
+                    ) {
+                        break;
+                    }
+                    let jitter = u64::from(Uuid::new_v4().as_bytes()[0]) % 3;
+                    let delay = retry.unwrap_or_else(|| {
+                        if failures > 0 {
+                            2_u64.saturating_pow(failures.min(10)).min(3600)
+                        } else if matches!(status, Status::Pending | Status::Discovering) {
+                            1
+                        } else {
+                            policy.poll_seconds
+                        }
+                    }) + jitter;
+                    let deadline = std::time::Instant::now() + Duration::from_secs(delay);
+                    loop {
+                        if thread_cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() || receiver.recv_timeout(remaining).is_err() {
+                            break;
+                        }
+                        // New commits remain durable, but cannot bypass Retry-After or
+                        // backoff. Cancellation still wakes this wait immediately.
+                        if failures == 0 {
+                            break;
                         }
                     }
-                };
-                let _=files::atomic_json(&engine.store.paths.data.join("sync/health.json"),&json!({"status":status,"recovery_scope":"selected-records","policy_deferred_manifests":engine.state.deferred.len(),"full_media_recovery":false}));
-                if matches!(status,Status::AuthorizationRequired|Status::RecoveryRequired) {break;}
-                let jitter=u64::from(Uuid::new_v4().as_bytes()[0])%3;
-                let delay=retry.unwrap_or_else(|| if failures>0 {2_u64.saturating_pow(failures.min(10)).min(3600)} else if matches!(status,Status::Pending|Status::Discovering){1}else{policy.poll_seconds})+jitter;
-                let deadline=std::time::Instant::now()+Duration::from_secs(delay);
-                loop {
-                    if engine.cancel.load(Ordering::Relaxed){break;}
-                    let remaining=deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() || receiver.recv_timeout(remaining).is_err(){break;}
-                    // New commits remain durable, but cannot bypass Retry-After or
-                    // backoff. Cancellation still wakes this wait immediately.
-                    if failures==0 {break;}
                 }
-            }
-            let _=done_sender.send(());
-        })?;
+                let _ = done_sender.send(());
+            })?;
         Ok(Some(Self {
             cancel,
             wake,
@@ -705,6 +781,47 @@ impl Worker {
         }))
     }
     pub fn google(store: Arc<Store>, policy: SyncPolicy) -> Result<Option<Self>> {
+        // Persisted mode routing precedes credential loading, including when the
+        // old legacy enabled flag is false. No fixture context is configurable.
+        let snapshot = store.sync_mode_snapshot()?;
+        match snapshot.mode.as_ref() {
+            Some(mode::SyncMode::LocalOnly) => {
+                files::atomic_json(
+                    &store.paths.data.join("sync/health.json"),
+                    &json!({"status":Status::Disabled,"mode":"local-only"}),
+                )?;
+                return Ok(None);
+            }
+            Some(chosen @ mode::SyncMode::SharedGroup { .. }) => {
+                let binding = match selected::Binding::qualified(chosen) {
+                    Ok(binding) => binding,
+                    Err(_) => {
+                        files::atomic_json(
+                            &store.paths.data.join("sync/health.json"),
+                            &json!({"status":Status::UnsupportedOrCorrupt,
+                            "mode":"shared-group","reason":"provider-binding-unqualified"}),
+                        )?;
+                        return Ok(None);
+                    }
+                };
+                let transport = GoogleDrive::open(store.paths.credentials.join("drive.json"))?;
+                let cancel = Arc::new(AtomicBool::new(false));
+                let engine = selected::Engine::new(
+                    store.clone(),
+                    policy.clone(),
+                    transport,
+                    binding,
+                    cancel.clone(),
+                )?;
+                return Self::launch(store, policy, cancel, engine);
+            }
+            Some(mode::SyncMode::IsolatedBackup { backup, .. }) => {
+                // Saved Config custody is supplied by the ordinary entry point.
+                Self::isolated_unavailable(&store, snapshot.device, *backup);
+                return Ok(None);
+            }
+            None => {}
+        }
         if !policy.enabled {
             return Ok(None);
         }
@@ -727,6 +844,43 @@ impl Worker {
                 );
                 Ok(None)
             }
+        }
+    }
+
+    fn isolated_unavailable(store: &Store, device: Option<Uuid>, backup: Uuid) {
+        if files::atomic_json(
+            &store.paths.data.join("sync/health.json"),
+            &json!({"version":1,"status":Status::UnsupportedOrCorrupt,
+                "mode":"isolated-backup","reason":"provider-binding-unqualified",
+                "device":device,"backup":backup}),
+        )
+        .is_err()
+        {
+            log::warn!("Could not write isolated backup availability");
+        }
+    }
+
+    pub fn isolated(
+        store: Arc<Store>,
+        policy: SyncPolicy,
+        saved_config: &Path,
+    ) -> Result<Option<Self>> {
+        // Production provisioning must establish exact provider custody before
+        // any credential access or construction of the isolated upload engine.
+        let snapshot = store.sync_mode_snapshot()?;
+        let Some(mode::SyncMode::IsolatedBackup { backup, .. }) = snapshot.mode else {
+            return Ok(None);
+        };
+        ensure!(
+            !policy.enabled,
+            "isolated mode requires legacy sync disabled"
+        );
+        if isolated_provision::installed_eligible() {
+            let credentials = GoogleDrive::open(store.paths.credentials.join("drive.json"));
+            isolated_provision::launch_rooted(store, policy, saved_config, credentials)
+        } else {
+            Self::isolated_unavailable(&store, snapshot.device, backup);
+            Ok(None)
         }
     }
 }

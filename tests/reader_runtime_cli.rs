@@ -48,8 +48,13 @@ fn ordinary_local_startup_admits_ready_notebook_without_adopting_an_incomplete_o
     );
     let current = config.paths.data.join("CURRENT");
     let original = fs::read(&current).unwrap();
-    let StartupDecision::Ordinary(Some(store)) = reader_runtime::startup(&config) else {
-        panic!("ready notebook did not reach ordinary startup");
+    let store = match reader_runtime::startup(&config) {
+        StartupDecision::Ordinary(Some(store)) => store,
+        StartupDecision::Report(report) => panic!(
+            "ready notebook did not reach ordinary startup: {}",
+            serde_json::to_value(report).unwrap()["status"]
+        ),
+        StartupDecision::Ordinary(None) => panic!("ready notebook was mistaken for fresh startup"),
     };
     let store = reader_runtime::ordinary_store(&config, Some(store))
         .ok()
@@ -429,7 +434,7 @@ fn explicit_local_isolated_and_shared_modes_route_before_private_runtime_setup()
     )
     .unwrap();
     let output = fixture.command().output().unwrap();
-    assert_ordinary_refusal(output, "ordinary mode requires absent or LocalOnly choice");
+    assert_ordinary_refusal(output, "ordinary Reader startup unsupported");
 }
 
 #[test]

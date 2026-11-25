@@ -4,6 +4,7 @@ pub mod notebook;
 pub mod selected;
 pub mod selected_command;
 mod subject_memory;
+pub mod target;
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Mode, NormalizedTextSource, Outcome, Record, Role, TextScope, Turn},
@@ -18,6 +19,81 @@ use std::{
     sync::atomic::Ordering,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// A model slot under an admitted Writer operation. An attempted submission
+/// consumes its slot. The notebook runner opens a fresh slot for each batch or
+/// stage when it replaces the content, under the same operation deadline.
+pub(crate) struct ModelStage<'a, E> {
+    engine: &'a mut E,
+    deadline: Instant,
+    used: bool,
+    successive_inputs: bool,
+}
+impl<'a, E> ModelStage<'a, E> {
+    pub(crate) fn new(engine: &'a mut E, deadline: Instant) -> Self {
+        Self {
+            engine,
+            deadline,
+            used: false,
+            successive_inputs: false,
+        }
+    }
+
+    pub(crate) fn for_notebook(engine: &'a mut E, deadline: Instant) -> Self {
+        Self {
+            successive_inputs: true,
+            ..Self::new(engine, deadline)
+        }
+    }
+}
+impl<E: LLMEngine> LLMEngine for ModelStage<'_, E> {
+    fn guarded_timeout(&self) -> Option<Duration> {
+        self.engine.guarded_timeout()
+    }
+    fn add_text_content(&mut self, s: &str) {
+        self.engine.add_text_content(s)
+    }
+    fn add_image_content(&mut self, s: &str) {
+        self.engine.add_image_content(s)
+    }
+    fn clear_content(&mut self) {
+        self.engine.clear_content();
+        if self.successive_inputs {
+            self.used = false;
+        }
+    }
+    fn execute(&mut self) -> Result<String> {
+        self.execute_with_progress(&mut || Ok(()))
+    }
+    fn execute_with_progress(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<String> {
+        ensure!(
+            !std::mem::replace(&mut self.used, true) && Instant::now() < self.deadline,
+            "Writer model slot expired or consumed"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let deadline = self.deadline;
+            let original = std::cell::RefCell::new(progress);
+            self.engine.execute_with_deadline(
+                &mut || (original.borrow_mut())(),
+                &mut |submit| {
+                    ensure!(Instant::now() < deadline, "Writer model handoff expired");
+                    (original.borrow_mut())()?;
+                    submit()
+                },
+                deadline,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = progress;
+            anyhow::bail!("Writer owned model adapter unavailable")
+        }
+    }
+}
 
 const MAX_HISTORY: usize = 16 * 1024;
 const MAX_REQUEST: usize = 4096;
@@ -118,7 +194,7 @@ impl Request {
         Ok(())
     }
 }
-fn validate_request(request: &str) -> Result<()> {
+pub(crate) fn validate_request(request: &str) -> Result<()> {
     ensure!(
         !request.trim().is_empty() && request.len() <= MAX_REQUEST && !request.contains('\0'),
         "invalid Writer request"
@@ -255,7 +331,33 @@ pub fn parse_draft(text: &str) -> Result<(&str, &str)> {
     );
     Ok((title, body))
 }
-fn selected(ledger: &Ledger, conversation: Uuid, id: Uuid) -> Result<(Turn, NormalizedTextSource)> {
+/// Only the formatter's exact Markdown title/blank/About position is inline.
+pub(crate) fn regional_body_has_about(body: &str, about: &str) -> bool {
+    parse_draft(body).is_ok()
+        && body.split_once("\n\n").is_some_and(|(title, rest)| {
+            title.starts_with("# ")
+                && rest
+                    .strip_prefix(about)
+                    .is_some_and(|rest| rest.starts_with("\n\n"))
+        })
+}
+
+fn present_regional_draft(body: &str, about: &str) -> Result<String> {
+    let (title, markdown) = parse_draft(body)?;
+    ensure!(
+        !markdown.lines().any(|line| line.starts_with("About: ")),
+        "model supplied reserved About presentation"
+    );
+    let decorated = format!("# {title}\n\n{about}\n\n{markdown}");
+    parse_draft(&decorated)?;
+    Ok(decorated)
+}
+
+fn selected(
+    ledger: &Ledger,
+    conversation: Uuid,
+    id: Uuid,
+) -> Result<(Turn, crate::conversation::WriterSource)> {
     let records = ledger.inspect(conversation, false)?;
     let draft = records
         .iter()
@@ -274,30 +376,45 @@ fn selected(ledger: &Ledger, conversation: Uuid, id: Uuid) -> Result<(Turn, Norm
     parse_draft(draft.text.as_deref().context("draft text absent")?)?;
     let source = records
         .into_iter()
-        .find_map(|record| match record {
-            Record::NormalizedText(source) if draft.sources == vec![source.id] => Some(*source),
-            _ => None,
+        .find(|record| match record {
+            Record::NormalizedText(v) => draft.sources == vec![v.id],
+            Record::RegionSource(v) => draft.sources == vec![v.id],
+            _ => false,
         })
         .context("draft source absent")?;
+    let source = crate::conversation::WriterSource::decode(source)?;
     Ok((draft, source))
 }
-fn history(ledger: &Ledger, conversation: Uuid) -> Result<crate::conversation::ContextView> {
-    // Use the existing context contract. Counting UTF8 bytes is a conservative
-    // caller budget for this bounded text consumer, not provider tokenization proof.
-    let view = ledger.context(
-        conversation,
-        &crate::conversation::ContextBudget {
-            max_text_bytes: MAX_HISTORY,
-            max_turns: 64,
-            provider_token_limit: Some(MAX_HISTORY),
-        },
-        |turns| {
-            Ok(turns
-                .iter()
-                .map(|t| t.text.as_ref().map_or(0, String::len))
-                .sum())
-        },
-    )?;
+fn history(
+    ledger: &Ledger,
+    conversation: Uuid,
+    before: Option<u64>,
+) -> Result<crate::conversation::ContextView> {
+    // Count UTF-8 bytes conservatively for this bounded text consumer.
+    let budget = crate::conversation::ContextBudget {
+        max_text_bytes: MAX_HISTORY,
+        max_turns: 64,
+        provider_token_limit: Some(MAX_HISTORY),
+    };
+    let count = |turns: &[Turn]| {
+        Ok(turns
+            .iter()
+            .map(|t| t.text.as_ref().map_or(0, String::len))
+            .sum())
+    };
+    let view = match before {
+        Some(0) => Ledger::context_from_records(vec![], None, &budget, count, |_| false)?,
+        Some(end_exclusive) => ledger.context_range(
+            conversation,
+            Some(crate::conversation::TurnRange {
+                start: 0,
+                end_exclusive,
+            }),
+            &budget,
+            count,
+        )?,
+        None => ledger.context(conversation, &budget, count)?,
+    };
     ensure!(
         view.missing_media.is_empty(),
         "historical media unavailable"
@@ -414,7 +531,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         control,
     )
 }
-fn run_owned_with_memory<E: LLMEngine>(
+pub(crate) fn run_owned_with_memory<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     request: &Request,
@@ -423,6 +540,52 @@ fn run_owned_with_memory<E: LLMEngine>(
     canceled: &mut dyn FnMut() -> bool,
     control: OwnedRun<'_, '_>,
 ) -> Report {
+    run_owned_source(
+        ledger,
+        engine,
+        request,
+        ReceivingPreferences {
+            personalization,
+            memory,
+        },
+        canceled,
+        control,
+        None,
+    )
+}
+struct ReceivingPreferences<'a> {
+    personalization: &'a PersonalizationSnapshot,
+    memory: Option<&'a dyn crate::memory::Provider>,
+}
+struct RegionalInput<'a> {
+    proof: crate::conversation::target::RegionSource,
+    accepted: Option<&'a Turn>,
+}
+
+fn run_owned_source<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    request: &Request,
+    preferences: ReceivingPreferences<'_>,
+    canceled: &mut dyn FnMut() -> bool,
+    control: OwnedRun<'_, '_>,
+    regional: Option<RegionalInput<'_>>,
+) -> Report {
+    let accepted = regional.as_ref().and_then(|input| input.accepted);
+    let regional = regional.map(|input| input.proof);
+    let ReceivingPreferences {
+        personalization,
+        memory,
+    } = preferences;
+    let operation_started = Instant::now();
+    let mut policy_reads = crate::storage::selection::SelectedReadBudget::new(
+        0,
+        16384,
+        crate::storage::MAX_RECORD as u64 * 4096,
+        0,
+    );
+    let mode_pin = ledger.store().sync_mode_snapshot().map(|m| m.token);
+    let ready_pin = ledger.store().target_runtime_pin(&mut policy_reads);
     if !std::ptr::eq(control.owner.0, ledger.store().as_ref()) {
         return Report::refused(request, Failure::Storage);
     }
@@ -438,6 +601,9 @@ fn run_owned_with_memory<E: LLMEngine>(
     {
         let prepared = (|| -> Result<PreparedNote> {
             let (draft, source) = selected(ledger, *conversation, *draft)?;
+            if let Some(region) = &source.region {
+                ledger.regional_source_proof(region, &mut || Ok(()))?;
+            }
             note_from_draft(&draft, &source, *correlation, *effect_operation)
         })();
         return match prepared {
@@ -471,13 +637,26 @@ fn run_owned_with_memory<E: LLMEngine>(
                 ..
             } => (
                 request.clone(),
-                NormalizedTextSource::new(
-                    conversation,
-                    stage(operation, "user"),
-                    document.clone(),
-                    selection.clone(),
-                    guidance.clone(),
-                )?,
+                if let Some(region) = &regional {
+                    region.validate()?;
+                    ensure!(
+                        region.conversation == conversation
+                            && region.turn == stage(operation, "user"),
+                        "regional Writer identity differs"
+                    );
+                    crate::conversation::WriterSource {
+                        normalized: region.normalized.clone(),
+                        region: Some(region.clone()),
+                    }
+                } else {
+                    crate::conversation::WriterSource::ordinary(NormalizedTextSource::new(
+                        conversation,
+                        stage(operation, "user"),
+                        document.clone(),
+                        selection.clone(),
+                        guidance.clone(),
+                    )?)
+                },
                 None,
             ),
             Request::Refine { request, draft, .. } => {
@@ -486,13 +665,31 @@ fn run_owned_with_memory<E: LLMEngine>(
             }
             _ => unreachable!(),
         };
-        let history = history(ledger, conversation)?;
-        let images = if control.historical_images {
+        let history = history(ledger, conversation, accepted.map(|turn| turn.sequence))?;
+        let images = if control.historical_images && source.region.is_none() {
             crate::conversation::receiving::images::resolve(ledger, &history)?
         } else {
             crate::conversation::receiving::images::Images::default()
         };
         let mut payload = serde_json::json!({"history":history.turns,"request":text,"explicit_guidance":source.guidance,"source_provenance":{"document":source.document.document,"source_sha256":source.document.source_sha256,"extractor_revision":source.document.extractor_revision,"normalized_sha256":digest(&serde_json::to_vec(&source.document.units)?),"selection":source.selection,"coverage":"all selected supplied units; original notebook completeness unverified"},"source_units":source.selected(),"selected_draft":prior.as_ref().and_then(|t|t.text.as_deref())});
+        if let Some(region) = &source.region {
+            payload["source_provenance"] = serde_json::json!({"coverage":"all text recognized from exact masked region; unverified", "source_units_page_labels":"Regional normalization canvas labels only, not physical notebook page numbers", "region":region});
+        }
+        if source
+            .document
+            .extractor_revision
+            .starts_with(crate::retrieval::notebook::WRITER_DISPLAYED_VISUAL_REVISION)
+        {
+            payload["source_provenance"]["coverage"] =
+                serde_json::json!("visible content of one displayed source page; model interpretation remains unverified");
+        }
+        if !history.region_sources.is_empty() {
+            payload["regional_sources"] = serde_json::to_value(&history.region_sources)?;
+        }
+        if !history.target_uses.is_empty() {
+            payload["target_uses"] = serde_json::to_value(&history.target_uses)?;
+            payload["targets"] = serde_json::to_value(&history.targets)?;
+        }
         if control.historical_images {
             payload["historical_images"] = serde_json::to_value(&images.associations)?;
         }
@@ -531,7 +728,8 @@ fn run_owned_with_memory<E: LLMEngine>(
         source.id,
     );
     user.correction_of = prior.as_ref().map(|t| t.id);
-    let prepared = ledger.prepare_writer(operation, expected, user, source.clone(), prior);
+    let prepared =
+        ledger.prepare_writer(operation, expected, user, source.clone(), prior, accepted);
     let Ok(prepared) = prepared else {
         return Report::refused(request, Failure::Storage);
     };
@@ -552,9 +750,32 @@ fn run_owned_with_memory<E: LLMEngine>(
     let mut was_canceled = false;
     let mut was_stale = false;
     let mut progress = || {
-        if canceled() || started.elapsed() >= Duration::from_secs(95) {
+        if canceled()
+            || started.elapsed() >= Duration::from_secs(95)
+            || (source.region.is_some() && operation_started.elapsed() >= Duration::from_secs(150))
+        {
             was_canceled = true;
             anyhow::bail!("Writer canceled")
+        }
+        if ledger
+            .store()
+            .check_runtime_policy(&mut policy_reads)
+            .is_err()
+            || !mode_pin.as_ref().is_ok_and(|token| {
+                ledger
+                    .store()
+                    .sync_mode_snapshot()
+                    .is_ok_and(|m| m.token == *token)
+            })
+            || !ready_pin.as_ref().is_ok_and(|pin| {
+                ledger
+                    .store()
+                    .target_runtime_pin(&mut policy_reads)
+                    .is_ok_and(|current| current == *pin)
+            })
+        {
+            was_stale = true;
+            anyhow::bail!("Writer original policy changed");
         }
         if !ledger
             .writer_preparation_current(conversation, &prepared)
@@ -567,6 +788,9 @@ fn run_owned_with_memory<E: LLMEngine>(
     };
     let mut memory_failure = None;
     let response = (|| -> Result<String> {
+        if let Some(region) = &source.region {
+            ledger.regional_source_proof(region, &mut progress)?;
+        }
         let context = if let Some(provider) = memory {
             match subject_memory::context(provider, &text, source.document.document, now()) {
                 Ok(context) => context,
@@ -592,6 +816,23 @@ fn run_owned_with_memory<E: LLMEngine>(
         if let Some(context) = context {
             content.0.add_text_content(&context);
         }
+        if accepted.is_some() {
+            content.0.add_text_content("Ground the note only in source_units from the masked region. Use conversation history and preferences to understand the request and format. They do not supply facts about the selected content.");
+        }
+        use crate::retrieval::notebook::{VISUAL_SECTION, WRITER_DISPLAYED_VISUAL_REVISION};
+        if source
+            .document
+            .extractor_revision
+            .starts_with(WRITER_DISPLAYED_VISUAL_REVISION)
+            && source
+                .selected()
+                .iter()
+                .any(|unit| unit.section.as_deref() == Some(VISUAL_SECTION))
+        {
+            content.0.add_text_content(&format!(
+                "Source units labeled {VISUAL_SECTION} record unverified descriptions of depicted shapes or relationships. Include useful observations as depicted, separately from transcribed writing. Do not quote an observation as the user's words or infer facts beyond the supplied source."
+            ));
+        }
         content.0.add_text_content(&payload);
         for image in &images.attachments {
             content.0.add_image_content(image);
@@ -604,6 +845,28 @@ fn run_owned_with_memory<E: LLMEngine>(
         report.failure = Some(Failure::Storage);
         return report;
     }
+    if let Some(region) = &source.region {
+        // Original and derived objects are immutable commitments. Verify them
+        // again before publishing a result after a potentially long model wait.
+        if region.media().iter().any(|m| {
+            ledger
+                .store()
+                .open_object(&crate::storage::ObjectRef {
+                    sha256: m.sha256.clone(),
+                    bytes: m.bytes,
+                })
+                .is_err()
+        }) {
+            return Report::refused(request, Failure::Storage);
+        }
+    }
+    let response = response.and_then(|body| {
+        if let Some(region) = &source.region {
+            present_regional_draft(&body, &region.about)
+        } else {
+            Ok(body)
+        }
+    });
     let (outcome, body, failure, status) = if was_canceled {
         (Outcome::Canceled, None, None, Status::Canceled)
     } else {
@@ -652,7 +915,7 @@ fn run_owned_with_memory<E: LLMEngine>(
 
 pub(crate) fn note_from_draft(
     draft: &Turn,
-    source: &NormalizedTextSource,
+    source: &crate::conversation::WriterSource,
     correlation: Uuid,
     effect_operation: Uuid,
 ) -> Result<PreparedNote> {
@@ -661,14 +924,7 @@ pub(crate) fn note_from_draft(
         conversation: draft.conversation,
         correlation,
         effect_operation,
-        source_scope: format!(
-            "normalized-document:{}:{}",
-            source.document.document,
-            match source.selection {
-                TextScope::Page { page } => format!("page:{page}"),
-                TextScope::SuppliedNotebook => "supplied-notebook".into(),
-            }
-        ),
+        source_scope: source.scope(),
         source_revision: digest(&serde_json::to_vec(&(
             source,
             draft.id,

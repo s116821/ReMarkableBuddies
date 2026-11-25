@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(test)]
 enum ReadOnlyTransport {
     Unavailable,
+    OwnedFixture,
     Development(Option<Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>>),
     #[cfg(target_os = "linux")]
     Resident(std::collections::VecDeque<crate::device::request_input::ReleasedReaderInput>),
@@ -20,6 +21,15 @@ pub(in crate::workflow) struct RefusingBackend {
     output: Option<Box<dyn crate::workflow::resident_output::ResidentOutputBackend>>,
 }
 impl RefusingBackend {
+    #[cfg(test)]
+    pub(in crate::workflow) fn with_owned_fixture() -> Self {
+        Self {
+            transport: ReadOnlyTransport::OwnedFixture,
+            #[cfg(target_os = "linux")]
+            output: None,
+        }
+    }
+
     pub(in crate::workflow) fn new() -> Self {
         Self {
             #[cfg(test)]
@@ -101,6 +111,7 @@ impl DeviceBackend for RefusingBackend {
     #[cfg(all(test, target_os = "linux"))]
     fn wait_for_resident_reader(
         &mut self,
+        _timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<crate::device::request_input::ReleasedReaderInput> {
         progress()?;

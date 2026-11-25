@@ -238,10 +238,22 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "researched_pdf": {
+          "description": "Configuration for explicitly admitted original-PDF researched Reader requests. A selection chooses the registered shared document. Ordinary Reader keeps the original page scope. An absent search model does not authorize web research.",
+          "$ref": "#/$defs/researchedDocument"
+        },
+        "researched_epub": {
+          "description": "Configuration for the original EPUB research adapter. Passages cite EPUB spine sections when the adapter is explicitly admitted. Ordinary Reader does not index the open EPUB. A search model is needed for adapter web research.",
+          "$ref": "#/$defs/researchedDocument"
+        },
         "selection": {
           "anyOf": [
-            { "$ref": "#/$defs/readerSelection" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/readerSelection"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       }
@@ -267,6 +279,7 @@
             "export_destination": {
               "enum": [
                 "mem",
+                "capacities",
                 "disabled"
               ],
               "default": "mem"
@@ -279,18 +292,95 @@
         }
       ],
       "description": "Absent and explicit null parent remain distinct declarations even though both use effective defaults."
+    },
+    "handwriting": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {
+        "enabled": false,
+        "profile": null
+      },
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "description": "Enabled requires a nonnil active profile and ordinary local route; semantic admission remains typed/runtime checked."
+    },
+    "capacities_export": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schema_version", "space_id", "grant_id", "tags"],
+          "properties": {
+            "schema_version": {"const": 1},
+            "space_id": {"type": "string", "format": "uuid"},
+            "grant_id": {"type": "string", "format": "uuid"},
+            "tags": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {"type": "string", "format": "uuid"}
+            }
+          }
+        },
+        {"type": "null"}
+      ],
+      "description": "Local Capacities connection selection excluded from portable preferences. Contains identifiers only."
     }
   },
   "$defs": {
+    "researchedDocument": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "research_model": {
+              "type": ["string", "null"],
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        { "type": "null" }
+      ]
+    },
     "readerSelection": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "group": { "$ref": "#/$defs/uuid" },
-        "key_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "binding_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "group": {
+          "$ref": "#/$defs/uuid"
+        },
+        "key_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "binding_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
       },
-      "required": ["group", "key_sha256", "binding_sha256"]
+      "required": [
+        "group",
+        "key_sha256",
+        "binding_sha256"
+      ]
     },
     "uuid": {
       "type": "string",

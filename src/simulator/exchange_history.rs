@@ -7,8 +7,8 @@ use crate::{
     device::interaction::Interaction,
     storage::{digest, Media, Namespace, Uuid},
     workflow::exchange_history::{
-        self as history, Content, Edit, Effect, History, OutcomeStatus, PageBackend, PageOwner,
-        PageState, PresentationReceipt,
+        self as history, Content, Edit, EditAction, Effect, History, OutcomeStatus, PageBackend,
+        PageOwner, PageState, PresentationReceipt,
     },
 };
 use anyhow::{ensure, Result};
@@ -17,7 +17,7 @@ use std::io::Cursor;
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum Case {
+pub(super) enum Case {
     Repeat,
     Composer,
     Unrelated,
@@ -49,11 +49,12 @@ pub(super) struct Scenario {
     cases: Vec<Case>,
 }
 
-struct ModeledPage {
-    state: PageState,
-    receipt: Option<PresentationReceipt>,
-    fault: Option<Case>,
-    calls: usize,
+pub(super) struct ModeledPage {
+    pub(super) state: PageState,
+    pub(super) receipt: Option<PresentationReceipt>,
+    pub(super) fault: Option<Case>,
+    pub(super) calls: usize,
+    pub(super) pair_operation: Option<Uuid>,
 }
 
 impl PageBackend for ModeledPage {
@@ -82,10 +83,66 @@ impl PageBackend for ModeledPage {
         if matches!(self.fault, Some(Case::ChangedReadback)) {
             self.state.content.unrelated.push('!');
         }
+        if edit.action == EditAction::PresentAnswer {
+            let Some([_, answer]) = page
+                .content
+                .exchanges
+                .first()
+                .map(|exchange| exchange.turns.as_slice())
+            else {
+                return Effect::Unknown;
+            };
+            self.pair_operation = Some(result);
+            return Effect::VerifiedPair {
+                evidence: Box::new(CompletionEvidence {
+                    native_operation: result,
+                    exact_text: answer.text.clone(),
+                    observation: SourceObservation {
+                        document: page.owner.document,
+                        page: page.owner.page,
+                        visit: page.owner.visit.clone(),
+                        session: page.owner.session.clone(),
+                        content_revision: Some(page.seal.clone()),
+                        order_revision: None,
+                        capability_revision: "modeled-conditional-page-edit".into(),
+                        evidence_procedure: "modeled-page-owner-observation".into(),
+                    },
+                    procedure: history::MODELED_PAIR_PROCEDURE.into(),
+                }),
+                page: Box::new(page),
+            };
+        }
         Effect::Verified {
             operation: result,
             page: Box::new(page),
         }
+    }
+
+    fn bind_completed_answer(
+        &mut self,
+        operation: Uuid,
+        verified: &PageState,
+        draft: Uuid,
+        completed: Uuid,
+    ) -> bool {
+        if self.pair_operation != Some(operation) || &self.state != verified || completed == draft {
+            return false;
+        }
+        let Some([_, answer]) = self
+            .state
+            .content
+            .exchanges
+            .first_mut()
+            .map(|exchange| exchange.turns.as_mut_slice())
+        else {
+            return false;
+        };
+        if answer.revision != draft {
+            return false;
+        }
+        answer.revision = completed;
+        self.pair_operation = None;
+        true
     }
 }
 
@@ -217,6 +274,7 @@ fn seed(ledger: &Ledger, exchanges: usize) -> Result<(Uuid, PageOwner, Uuid, Uui
         operation: Uuid::new_v4(),
         outcome: Outcome::Completed,
         attempt: None,
+        capacities: None,
     };
     let export_id = export.id;
     ledger.associate_export(export.operation, root()?, Default::default(), export)?;
@@ -259,6 +317,7 @@ fn run_case(case: Case, composer: &str, exchanges: usize) -> Result<()> {
     let mut page = ModeledPage {
         state: before.clone(),
         calls: 0,
+        pair_operation: None,
         fault: None,
         receipt: Some(PresentationReceipt {
             operation: Uuid::new_v4(),

@@ -27,7 +27,9 @@ pub(crate) const ADAPTER: &str = "fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b
 const LEGACY_TITLE: &str = "=== Reader Buddy Answers ===";
 const LEGACY_INSTALLED_BINDING: &str = "installed-full-admission-fresh-observe-guarded-v1";
 const ADOPTED_BINDING: &str = "installed-explicit-legacy-adoption-v1";
-const UNIFIED_BINDING_PROCEDURE: &str = "installed-full-admission-fresh-observe-unified-display-v1";
+pub(in crate::workflow) const UNIFIED_BINDING_PROCEDURE: &str =
+    "installed-full-admission-fresh-observe-unified-display-v1";
+const KEYBOARD_MAX_CHARACTERS: usize = 512;
 pub(crate) const REPEAT_PROFILE: &str =
     "40b1ddfc7a85d856e8c0091f136196f57dbdef99df29886bcca0947911d68070";
 pub(crate) const REPEAT_ADAPTER: &str =
@@ -411,13 +413,9 @@ impl NativeOutputBackend {
     fn recognizes_ordinary_page(
         &self,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
     ) -> Result<bool> {
-        ensure!(
-            pixels.before() == facts && pixels.after() == facts,
-            "native capture changed"
-        );
         let root = Path::new("/home/root/.local/share/remarkable/xochitl");
         let content_path = root.join(format!("{}.content", facts.page().document));
         let raw = Self::read_native_file(&content_path, 1024 * 1024)?;
@@ -444,7 +442,7 @@ impl NativeOutputBackend {
         if page.get("deleted").is_some() {
             return Ok(false);
         }
-        let image = image::load_from_memory(pixels.png())?.into_rgba8();
+        let image = image::load_from_memory(pixels)?.into_rgba8();
         if image.dimensions() != (1404, 1872) {
             return Ok(false);
         }
@@ -649,6 +647,23 @@ impl NativeOutputBackend {
 }
 
 impl ResidentOutputBackend for NativeOutputBackend {
+    #[cfg(feature = "installed-resident-output")]
+    fn opens_submission_page(&self) -> bool {
+        matches!(self.pin.as_ref(), OutputPin::Installed(_))
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn bind_opened_page(
+        &mut self,
+        ledger: &Ledger,
+        conversation: Uuid,
+        target: &ReaderFacts,
+    ) -> Result<()> {
+        self.pin.current()?;
+        self.bind(ledger, conversation, target, true, None)?;
+        Ok(())
+    }
+
     fn selected_conversation_request(&self) -> Result<Option<SelectedConversationRequest>> {
         self.pin.current()?;
         Ok(self.plan.as_ref().and_then(|plan| {
@@ -666,14 +681,21 @@ impl ResidentOutputBackend for NativeOutputBackend {
     }
 
     fn validate_new_page_text(&self, text: &str) -> Result<()> {
+        ensure!(
+            self.supports_page_text(ResidentOutputText::Plain(text), true)?,
+            "development text/keyboard repertoire bound"
+        );
+        Ok(())
+    }
+
+    fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
         self.pin.current()?;
-        validate_text(
-            &self.keyboard.borrow(),
-            &self
-                .pin
-                .new_page_display()
-                .format(true, ResidentOutputText::Plain(text), |_| true),
-        )
+        let keyboard = self.keyboard.borrow();
+        Ok(self
+            .pin
+            .new_page_display()
+            .text_for_keyboard(new_page, text, |value| keyboard.supports_text(value))
+            .is_some())
     }
 
     fn admit(
@@ -808,7 +830,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         conversation: Uuid,
         runtime: &RuntimeIdentity,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
         end: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
@@ -829,7 +851,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
                 .create_new(true)
                 .mode(0o600)
                 .open(directory.join(format!("{stem}.png")))?;
-            file.write_all(pixels.png())?;
+            file.write_all(pixels)?;
             file.sync_all()?;
             let mut receipt = OpenOptions::new()
                 .write(true)
@@ -838,7 +860,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
                 .open(directory.join(format!("{stem}.json")))?;
             serde_json::to_writer(
                 &mut receipt,
-                &serde_json::json!({"runtime":format!("{runtime:?}"),"facts":format!("{facts:?}"),"png_sha256":hex(&pixels.sha256()),"page_authority":false}),
+                &serde_json::json!({"runtime":format!("{runtime:?}"),"facts":format!("{facts:?}"),"png_sha256":crate::storage::digest(pixels),"page_authority":false}),
             )?;
             receipt.sync_all()?;
         }
@@ -896,7 +918,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
             ) => return Ok(PageUse::Unresolved),
             _ => {}
         }
-        let image = image::load_from_memory(pixels.png())?.resize_exact(
+        let image = image::load_from_memory(pixels)?.resize_exact(
             768,
             1024,
             image::imageops::FilterType::Nearest,
@@ -912,7 +934,8 @@ impl ResidentOutputBackend for NativeOutputBackend {
         // The historical framebuffer header cache can differ from native pixels.
         if plan.is_some_and(|plan| {
             plan.adopt_legacy.iter().any(|p| {
-                p.page == stored(facts.page().page) && p.png_sha256 == hex(&pixels.sha256())
+                p.page == stored(facts.page().page)
+                    && p.png_sha256 == crate::storage::digest(pixels)
             })
         }) {
             log::info!("Explicit native legacy fixture matched; cached header match={cached_header_matches}");
@@ -977,7 +1000,7 @@ impl ResidentOutputBackend for NativeOutputBackend {
         // The ONLY negative shortcut is an explicit fixture proof matched to real
         // fresh native pixels; no binding/cache/header absence proves non-Buddy.
         let page = stored(facts.page().page);
-        let digest = hex(&pixels.sha256());
+        let digest = crate::storage::digest(pixels);
         let confirmed = match creation {
             Some(second) => second.source == page && second.png_sha256 == digest,
             None => plan.is_some_and(|plan| {
@@ -1182,19 +1205,24 @@ impl DisplayFormat {
         text: ResidentOutputText<'_>,
         admits_about: impl FnOnce(&str) -> bool,
     ) -> String {
-        let (content, subject) = match text {
-            ResidentOutputText::Plain(text) => (text.to_owned(), None),
+        let (content, about) = match text {
+            ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
+                (text.to_owned(), None)
+            }
+            ResidentOutputText::ReaderQuestion(question) => {
+                (super::format_question(question), None)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,
                 center,
-                subject,
+                about,
             } => {
                 let body = match self {
                     Self::Legacy => crate::workflow::Workflow::compose_qa(question, answer, center),
-                    Self::Unified => format!("Q: {question}\n\nA: {answer}\n"),
+                    Self::Unified => format_exchange(question, answer),
                 };
-                (body, subject)
+                (body, about)
             }
         };
         let heading = if new {
@@ -1206,25 +1234,71 @@ impl DisplayFormat {
         } else {
             String::new()
         };
-        if let Some(subject) = subject {
-            let description = match subject {
-                crate::analysis::ReaderSubject::Recognized(subject) => subject.as_str(),
-                crate::analysis::ReaderSubject::Uncertain => "Uncertain what the selection shows",
+        if let Some(about) = about {
+            let described = match about {
+                ReaderAbout::PreparedLine(line) => {
+                    let label = crate::conversation::target::about_display_text(line);
+                    format!("{heading}{label}\n{content}")
+                }
+                ReaderAbout::Subject(subject) => {
+                    let description = match subject {
+                        crate::analysis::ReaderSubject::Recognized(subject) => subject.as_str(),
+                        crate::analysis::ReaderSubject::Uncertain => {
+                            "Uncertain what the selection shows"
+                        }
+                    };
+                    format!("{heading}About: {description}\n{content}")
+                }
             };
-            let described = format!("{heading}About: {description}\n{content}");
             if admits_about(&described) {
                 return described;
             }
         }
         format!("{heading}{content}")
     }
+
+    fn text_for_keyboard(
+        self,
+        new: bool,
+        output: ResidentOutputText<'_>,
+        supports_keys: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let fits = |text: &str| {
+            text.len() <= 2048
+                && text.chars().count() <= KEYBOARD_MAX_CHARACTERS
+                && supports_keys(text)
+        };
+        let text = self.format(new, output, fits);
+        fits(&text).then_some(text)
+    }
 }
-fn validate_text(keyboard: &Keyboard, text: &str) -> Result<()> {
-    ensure!(
-        text.chars().count() <= 512 && text.len() <= 2048 && keyboard.supports_text(text),
-        "development text/keyboard repertoire bound"
-    );
-    Ok(())
+
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) fn new_unified_ascii_answer_space(
+    binding: &BindingReceipt,
+    empty_answer: ResidentOutputText<'_>,
+) -> Option<usize> {
+    let display =
+        DisplayFormat::Unified.for_binding(binding.acquisition, &binding.source.evidence_procedure);
+    if display != DisplayFormat::Unified {
+        return None;
+    }
+    let body = display.text_for_keyboard(true, empty_answer, |text| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\t' | b'\n'))
+    })?;
+    let space = KEYBOARD_MAX_CHARACTERS - body.len();
+    (space > 0).then_some(space)
+}
+
+#[cfg(all(test, feature = "installed-resident-output"))]
+pub(in crate::workflow) fn fits_test_keyboard(
+    text: ResidentOutputText<'_>,
+    new_page: bool,
+) -> bool {
+    DisplayFormat::Unified
+        .text_for_keyboard(new_page, text, str::is_ascii)
+        .is_some()
 }
 
 impl ResidentRenderer for Renderer {
@@ -1239,11 +1313,9 @@ impl ResidentRenderer for Renderer {
     ) -> Result<()> {
         let text = {
             let keyboard = self.keyboard.borrow();
-            let rendered = self.display.format(self.new, text, |candidate| {
-                validate_text(&keyboard, candidate).is_ok()
-            });
-            validate_text(&keyboard, &rendered)?;
-            rendered
+            self.display
+                .text_for_keyboard(self.new, text, |value| keyboard.supports_text(value))
+                .context("development text/keyboard repertoire bound")?
         };
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
             pulse()?;
@@ -1255,13 +1327,19 @@ impl ResidentRenderer for Renderer {
             pulse()
         })?;
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
+            let installed = matches!(self.pin.as_ref(), OutputPin::Installed(_));
             let result = (|| -> Result<()> {
-                for ch in text.chars() {
+                for (ch, start) in text_characters_with_start(&text, installed) {
                     pulse()?;
                     self.pin.current()?;
-                    self.keyboard
-                        .borrow_mut()
-                        .string_to_keypresses(&ch.to_string())?;
+                    {
+                        // End the borrow before the guard can re-enter the backend.
+                        let mut keyboard = self.keyboard.borrow_mut();
+                        if start {
+                            keyboard.start_keypresses()?;
+                        }
+                        keyboard.character_to_keypresses(ch)?;
+                    }
                     pulse()?;
                 }
                 Ok(())
@@ -1274,9 +1352,79 @@ impl ResidentRenderer for Renderer {
     }
 }
 
+fn text_characters_with_start(
+    text: &str,
+    installed: bool,
+) -> impl Iterator<Item = (char, bool)> + '_ {
+    text.chars()
+        .enumerate()
+        .map(move |(index, ch)| (ch, !installed || index == 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_text_starts_once_while_development_starts_each_character() {
+        assert_eq!(
+            text_characters_with_start("=^", true).collect::<Vec<_>>(),
+            [('=', true), ('^', false)]
+        );
+        assert_eq!(
+            text_characters_with_start("=^", false).collect::<Vec<_>>(),
+            [('=', true), ('^', true)]
+        );
+        assert_eq!(text_characters_with_start("", true).next(), None);
+    }
+
+    #[test]
+    fn page_text_checks_the_exact_destination_and_preserves_a_fitting_answer() {
+        let display = DisplayFormat::Unified;
+        let draft = "x".repeat(512);
+        let plain = ResidentOutputText::Plain(&draft);
+        assert_eq!(
+            display
+                .text_for_keyboard(false, plain, str::is_ascii)
+                .as_deref(),
+            Some(draft.as_str())
+        );
+        assert!(display
+            .text_for_keyboard(true, plain, str::is_ascii)
+            .is_none());
+        assert!(display
+            .text_for_keyboard(true, ResidentOutputText::Plain("π"), str::is_ascii)
+            .is_none());
+
+        let center =
+            crate::analysis::SelectionCenter::from_pixels(384.0, 256.0, 768, 1024).unwrap();
+        let subject = crate::analysis::ReaderSubject::Uncertain;
+        let question = "Why?";
+        let prefix = format!(
+            "{}\n\nQ: {question}\n\nA: ",
+            crate::conversation_layout::CONVERSATION_TITLE
+        );
+        let answer = "a".repeat(512 - prefix.len() - 1);
+        let longer = format!("{answer}!");
+        for about in [
+            ReaderAbout::Subject(&subject),
+            ReaderAbout::PreparedLine("About: 18 + 7"),
+        ] {
+            let reader = |answer| ResidentOutputText::Reader {
+                question,
+                answer,
+                center,
+                about: Some(about),
+            };
+            assert_eq!(
+                display.text_for_keyboard(true, reader(&answer), str::is_ascii),
+                Some(format!("{prefix}{answer}\n"))
+            );
+            assert!(display
+                .text_for_keyboard(true, reader(&longer), str::is_ascii)
+                .is_none());
+        }
+    }
 
     #[test]
     fn installed_display_uses_the_shared_title_and_exact_role_text() {
@@ -1288,11 +1436,11 @@ mod tests {
             crate::analysis::ReaderSourceSubject::try_from("24 / 6".to_owned()).unwrap(),
         );
         let uncertain = crate::analysis::ReaderSubject::Uncertain;
-        let reader = |subject| ResidentOutputText::Reader {
+        let reader = |about| ResidentOutputText::Reader {
             question,
             answer,
             center,
-            subject,
+            about,
         };
         let unified = DisplayFormat::Unified
             .for_binding(BindingAcquisition::Inserted, UNIFIED_BINDING_PROCEDURE);
@@ -1309,19 +1457,37 @@ mod tests {
             DisplayFormat::Legacy
         );
         assert_eq!(
-            unified.format(true, reader(Some(&subject)), |_| true),
+            unified.format(true, reader(None), |_| true),
+            "ReMarkableBuddies\n\nQ: What does <Start of Q-A block> mean?\n\nA: Keep this literal.\n(0.1, 0.2) is part of the answer.\n"
+        );
+        assert_eq!(
+            unified.format(false, reader(None), |_| true),
+            format!("Q: {question}\n\nA: {answer}\n")
+        );
+        assert_eq!(
+            unified.format(true, reader(Some(ReaderAbout::Subject(&subject))), |_| true),
             format!("ReMarkableBuddies\n\nAbout: 24 / 6\nQ: {question}\n\nA: {answer}\n")
         );
         assert_eq!(
-            unified.format(false, reader(Some(&subject)), |_| true),
+            unified.format(false, reader(Some(ReaderAbout::Subject(&subject))), |_| {
+                true
+            }),
             format!("About: 24 / 6\nQ: {question}\n\nA: {answer}\n")
         );
         assert_eq!(
-            unified.format(false, reader(Some(&uncertain)), |_| true),
+            unified.format(
+                false,
+                reader(Some(ReaderAbout::Subject(&uncertain))),
+                |_| true
+            ),
             format!("About: Uncertain what the selection shows\nQ: {question}\n\nA: {answer}\n")
         );
         let qa = format!("Q: {question}\n\nA: {answer}\n");
-        for about in [&subject, &uncertain] {
+        for about in [
+            ReaderAbout::Subject(&subject),
+            ReaderAbout::Subject(&uncertain),
+            ReaderAbout::PreparedLine("About: circled equation"),
+        ] {
             assert_eq!(
                 unified.format(false, reader(Some(about)), |body| body.len() <= qa.len()),
                 qa
@@ -1331,6 +1497,32 @@ mod tests {
             older.format(true, reader(None), |_| true),
             format!(
                 "=== Reader Buddy Answers ===\n\n{}",
+                crate::workflow::Workflow::compose_qa(question, answer, center)
+            )
+        );
+        let literal = r"V_1 [R] \_bias";
+        let expected = format!("ReMarkableBuddies\n\nAbout: {literal}\n{qa}");
+        let fits_exactly = |page: &str| page.len() <= expected.len();
+        let raw_subject = crate::analysis::ReaderSubject::Recognized(
+            crate::analysis::ReaderSourceSubject::try_from(literal.to_owned()).unwrap(),
+        );
+        for about in [
+            ReaderAbout::PreparedLine(r"About: V\_1 \[R\] \\\_bias"),
+            ReaderAbout::Subject(&raw_subject),
+        ] {
+            assert_eq!(
+                unified.format(true, reader(Some(about)), fits_exactly),
+                expected
+            );
+        }
+        assert_eq!(
+            older.format(
+                false,
+                reader(Some(ReaderAbout::PreparedLine("About: circled equation"))),
+                |_| true
+            ),
+            format!(
+                "About: circled equation\n{}",
                 crate::workflow::Workflow::compose_qa(question, answer, center)
             )
         );

@@ -4,7 +4,19 @@ pub mod history;
 pub mod indicator;
 mod navigation;
 pub mod orchestrator;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::assert_selected_policy_boundaries;
 mod reader_attempt;
+#[cfg(target_os = "linux")]
+pub(crate) use reader_attempt::ResearchContext;
+// The researched receiver joins parsed readings to its own selected admission.
+#[allow(dead_code)]
+mod reader_intent;
 pub mod resident_client;
 #[cfg(target_os = "linux")]
 pub mod resident_output;
@@ -14,11 +26,30 @@ pub mod resident_request;
 pub mod resident_runtime;
 #[cfg(target_os = "linux")]
 mod resident_source;
+#[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) use resident_source::original_pdf::assert_ordinary_pdf_reuse;
+#[cfg(all(target_os = "linux", feature = "development-resident-bootstrap"))]
+#[doc(hidden)]
+pub use resident_source::original_pdf::development_original_pdf;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub use resident_source::original_pdf::saved_notebook;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+pub(crate) use resident_source::tests::fresh_receiver_fixture;
+#[cfg(all(test, target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) use resident_source::tests::{ordinary_pdf_receiver_fixture, OrdinaryPdfFixtureRounds};
+
 #[cfg(target_os = "linux")]
 pub mod resident_supervisor;
 pub mod sdk_acquisition;
 pub mod sdk_buddy_decision;
 pub mod selected_buddy;
+#[cfg(target_os = "linux")]
+pub(crate) mod selected_resident_reader;
 #[cfg(test)]
 pub(crate) use reader_attempt::assert_attachment_behavior;
 #[cfg(test)]
@@ -47,8 +78,14 @@ pub enum AnswerPageType {
     Invalid,
 }
 pub enum AcquiredEvidence {
-    Legacy { images: Vec<Vec<u8>> },
-    Sdk(Box<remarkable_open_sdk::capture::CapturedBatch>),
+    Legacy {
+        images: Vec<Vec<u8>>,
+    },
+    Sdk {
+        batch: Box<remarkable_open_sdk::capture::CapturedBatch>,
+        marked_source: Option<Box<crate::device::backend::MarkedSourceBinding>>,
+        destination: Option<exchange_history::UserPresentationTarget>,
+    },
     Development(Box<remarkable_open_sdk::development_capture::ReadOnlyDevelopmentCapture>),
     ResidentHistorical(Box<crate::conversation::ResidentSourceCapture>),
 }
@@ -98,6 +135,15 @@ impl Workflow {
             Box::new(selected_backend::RefusingBackend::new()),
         );
         Self::with_selected(facade, debug_dump)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_owned_reader_fixture(
+        admission: std::sync::Arc<crate::conversation::SelectedAdmission>,
+    ) -> Self {
+        let mut workflow = Self::selected_runtime(admission, false);
+        workflow.device = Box::new(selected_backend::RefusingBackend::with_owned_fixture());
+        workflow
     }
     pub fn new(
         no_draw: bool,
@@ -257,7 +303,7 @@ impl Workflow {
             .context("development output requires the supervised health owner")?;
         owner.require_development_output(plan)?;
         if let Some(corner) = self.device.configure_development_resident_output(plan)? {
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_startup(corner, health, None, || Ok(()))?;
         }
         Ok(())
     }
@@ -297,11 +343,106 @@ impl Workflow {
         false
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn open_installed_submission(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        capture: &crate::conversation::ResidentSourceCapture,
+        fresh_conversation: crate::storage::Uuid,
+    ) -> Result<()> {
+        if !self.uses_installed_reader_history() {
+            return Ok(());
+        }
+        let Some(backend) = self.device.resident_output_backend() else {
+            return Ok(());
+        };
+        if !backend.opens_submission_page() {
+            return Ok(());
+        }
+        let owner = self
+            .resident_source
+            .as_mut()
+            .expect("installed owner absent");
+        let health = self
+            .service_health
+            .as_mut()
+            .expect("installed health absent");
+        let association = ledger.resident_answer_association(capture)?;
+        if association.is_none() {
+            use crate::storage::{Namespace, Uuid};
+            if ledger
+                .expected(Namespace::Conversation, fresh_conversation)?
+                .0
+                .is_empty()
+            {
+                let created_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                ledger.create(fresh_conversation, Uuid::new_v4(), created_ms)?;
+            }
+        }
+        let conversation = association
+            .as_ref()
+            .map_or(fresh_conversation, |binding| binding.receipt().conversation);
+        owner.open_submission_page(
+            health,
+            backend,
+            ledger,
+            conversation,
+            association.as_ref(),
+            capture.original_source_png(),
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn opened_submission(
+        &self,
+    ) -> Option<&crate::conversation::HistoricalPageAssociation> {
+        self.resident_source.as_ref()?.opened_association()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn opened_reader_ascii_answer_space(
+        &self,
+        question: &str,
+        center: crate::analysis::SelectionCenter,
+    ) -> Option<usize> {
+        let owner = self.resident_source.as_ref()?;
+        if !owner.opened_page_is_new() {
+            return None;
+        }
+        // The renderer can omit an optional About label to fit the complete answer.
+        let empty_answer = resident_output::ResidentOutputText::Reader {
+            question,
+            answer: "",
+            center,
+            about: None,
+        };
+        resident_output::development::new_unified_ascii_answer_space(
+            owner.opened_association()?.receipt(),
+            empty_answer,
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn installed_source_association(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        capture: &crate::conversation::ResidentSourceCapture,
+    ) -> Result<Option<crate::conversation::HistoricalPageAssociation>> {
+        match self.opened_submission() {
+            Some(opened) => Ok(Some(opened.clone())),
+            None => ledger.resident_answer_association(capture),
+        }
+    }
+
     /// Read-only request checks replace source-page progress drawing.
     #[cfg(target_os = "linux")]
     pub(super) fn selected_resident_conversation(
         &mut self,
         acquired: &AcquiredEvidence,
+        writer_enabled: bool,
     ) -> Result<Option<resident_output::SelectedConversationRequest>> {
         if self
             .resident_source
@@ -312,6 +453,9 @@ impl Workflow {
                 resident_output::SelectedConversationRequest::BlankStart(None),
             ));
         }
+        if !writer_enabled {
+            return Ok(None);
+        }
         #[cfg(all(
             feature = "development-resident-bootstrap",
             feature = "development-input-diagnostics"
@@ -319,6 +463,17 @@ impl Workflow {
         if let (Some(owner), AcquiredEvidence::ResidentHistorical(capture)) =
             (&self.resident_source, acquired)
         {
+            if let Some(request) = owner.installed_writer_for_page(
+                capture,
+                resident_supervisor::writer_request::SlotAction::Inspect,
+            )? {
+                return Ok(Some(
+                    resident_output::SelectedConversationRequest::WriterRefinement {
+                        request,
+                        require_current_draft: true,
+                    },
+                ));
+            }
             if let Some(request) = owner.take_installed_writer(capture)? {
                 return Ok(Some(request));
             }
@@ -335,11 +490,77 @@ impl Workflow {
     }
 
     #[cfg(target_os = "linux")]
-    pub(super) fn validate_resident_new_page_text(&mut self, text: &str) -> Result<()> {
-        self.device
+    pub(super) fn place_resident_writer_export(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        full: &str,
+        receipt: &str,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+    ) -> Result<()> {
+        use resident_output::ResidentOutputText::WriterSourceDraft;
+
+        let backend = self
+            .device
             .resident_output_backend()
-            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?
-            .validate_new_page_text(text)
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        #[cfg(feature = "installed-resident-output")]
+        let new = self
+            .resident_source
+            .as_ref()
+            .is_some_and(|owner| owner.opened_page_is_new());
+        #[cfg(not(feature = "installed-resident-output"))]
+        let new = false;
+        let full = WriterSourceDraft(full);
+        let output = if backend.supports_page_text(full, false)?
+            && ((!new && association.is_some()) || backend.supports_page_text(full, true)?)
+        {
+            full
+        } else {
+            WriterSourceDraft(receipt)
+        };
+        self.place_resident_writer_draft(ledger, conversation, output, association)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn place_resident_writer_draft(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: resident_output::ResidentOutputText<'_>,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+    ) -> Result<()> {
+        use resident_output::ResidentOutputOutcome;
+
+        let backend = self
+            .device
+            .resident_output_backend()
+            .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        anyhow::ensure!(
+            backend.supports_page_text(text, false)?,
+            "Writer draft cannot be typed on the tablet"
+        );
+        match self.render_resident_answer(
+            ledger,
+            conversation,
+            text,
+            association,
+            &mut || Ok(()),
+        )? {
+            ResidentOutputOutcome::SubmittedUnverified => {
+                info!("Writer draft submitted to the resident page");
+            }
+            ResidentOutputOutcome::Unavailable => {
+                anyhow::bail!("Writer draft saved. Page output is unavailable.");
+            }
+            ResidentOutputOutcome::InsertionRefused => {
+                anyhow::bail!("Writer draft generated, but page insertion was refused");
+            }
+            ResidentOutputOutcome::Unresolved | ResidentOutputOutcome::ReusedWithoutWrite => {
+                anyhow::bail!("Writer draft generated but native placement is unresolved");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -487,7 +708,7 @@ impl Workflow {
                 Ok(AcquiredEvidence::Development(Box::new(capture)))
             }
             AcquisitionKind::Sdk => {
-                let batch = self.device.capture_sdk()?;
+                let (batch, marked_source) = self.device.capture_sdk_with_marked_source()?;
                 self.check_request_progress()?;
                 let overview = batch
                     .images()
@@ -501,7 +722,170 @@ impl Workflow {
                     png: overview.bytes().to_vec(),
                     details: vec![],
                 };
-                Ok(AcquiredEvidence::Sdk(Box::new(batch)))
+                Ok(AcquiredEvidence::Sdk {
+                    batch: Box::new(batch),
+                    marked_source: marked_source.map(Box::new),
+                    destination: self.device.marked_question_destination(),
+                })
+            }
+        }
+    }
+
+    pub(super) fn present_marked_question(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        fresh: crate::conversation::marked_question::FreshMarkedQuestion,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+        target: exchange_history::UserPresentationTarget,
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection;
+        use exchange_history::OutcomeStatus;
+
+        let head = fresh.presentation_head();
+        let HistoricalPageAssociationInspection::HistoricalCandidate(binding) =
+            ledger.inspect_page_association(target.conversation, target.document, target.page)?
+        else {
+            anyhow::bail!("marked question presentation binding unavailable");
+        };
+        anyhow::ensure!(
+            self.device.marked_question_destination() == Some(target)
+                && target.conversation == user.conversation
+                && binding.root_revision() == head.0,
+            "marked question presentation destination unavailable"
+        );
+        self.check_request_progress()?;
+        let erase = fresh
+            .erase(ledger, &mut *self.device, source)
+            .map_err(|error| error.context("marked question erase refused before acceptance"))?;
+        self.navigate_after_marked_erase(erase)?;
+        let backend = self
+            .device
+            .exchange_page_backend()
+            .ok_or_else(|| anyhow::anyhow!("marked question Buddy page owner unavailable"))?;
+        match exchange_history::present_user(
+            ledger,
+            backend,
+            target,
+            user,
+            head,
+            binding.binding_revision(),
+        )? {
+            OutcomeStatus::Applied => Ok(()),
+            OutcomeStatus::ReconcileRequired => {
+                anyhow::bail!("marked question presentation is uncertain")
+            }
+            _ => anyhow::bail!("marked question presentation refused"),
+        }
+    }
+
+    fn navigate_after_marked_erase(
+        &mut self,
+        erase: crate::conversation::marked_question::EraseDisposition,
+    ) -> Result<()> {
+        use crate::conversation::marked_question::EraseDisposition;
+        use crate::device::backend::NavigationCompletion;
+        info!("Marked question erase: {erase:?}");
+        if erase == EraseDisposition::Uncertain {
+            self.invalidate_captured_viewport();
+            anyhow::bail!("marked question erase is uncertain");
+        }
+        self.check_request_progress()?;
+        anyhow::ensure!(
+            self.navigate_to_next_page()? == NavigationCompletion::Settled,
+            "marked question Buddy destination did not settle"
+        );
+        self.check_request_progress()
+    }
+
+    pub(super) fn marked_answer_binding(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        target: exchange_history::UserPresentationTarget,
+        root: crate::storage::Uuid,
+    ) -> Result<Option<crate::storage::Uuid>> {
+        if self.device.marked_answer_destination() != Some(target) {
+            return Ok(None);
+        }
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+        match ledger.inspect_page_association(target.conversation, target.document, target.page)? {
+            HistoricalCandidate(binding) if binding.root_revision() == root => {
+                Ok(Some(binding.binding_revision()))
+            }
+            _ => anyhow::bail!("marked answer binding changed"),
+        }
+    }
+
+    pub(super) fn present_marked_answer(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        user: &crate::conversation::Turn,
+        prepared: crate::conversation::marked_question::MarkedAnswer,
+        source: Option<&crate::device::backend::MarkedSourceBinding>,
+    ) -> Result<()> {
+        use crate::conversation::{AttemptReason, Outcome};
+        use exchange_history::PairPresentation;
+
+        self.check_request_progress()?;
+        if self.device.marked_answer_destination() != Some(prepared.target()) {
+            return prepared.refuse_output(ledger);
+        }
+        let (erase, output) = prepared.erase(ledger, &mut *self.device, source)?;
+        self.navigate_after_marked_erase(erase)?;
+        let mut output =
+            output.ok_or_else(|| anyhow::anyhow!("marked answer output unavailable"))?;
+        let Some(backend) = self.device.exchange_page_backend() else {
+            return output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            );
+        };
+        match exchange_history::present_answer(ledger, backend, &mut output, user)
+            .map_err(|error| error.context("marked answer pair refused before acceptance"))?
+        {
+            PairPresentation::Refused => output.record_uncompleted(
+                ledger,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+            ),
+            PairPresentation::Uncertain => {
+                self.input_failed = true;
+                output.record_uncompleted(
+                    ledger,
+                    Outcome::ReconcileRequired,
+                    AttemptReason::DeviceUncertain,
+                )?;
+                anyhow::bail!("marked answer presentation is uncertain")
+            }
+            PairPresentation::Verified(receipt) => {
+                let page = receipt.page().clone();
+                let operation = receipt.operation();
+                let draft = output.revisions().draft;
+                if !backend.observe().is_ok_and(|current| current == page) {
+                    self.input_failed = true;
+                    output.record_uncompleted(
+                        ledger,
+                        Outcome::ReconcileRequired,
+                        AttemptReason::DeviceUncertain,
+                    )?;
+                    anyhow::bail!("marked answer presentation changed before completion");
+                }
+                let completed = match output.complete_answer(ledger, receipt) {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        self.input_failed = true;
+                        return Err(error.context("marked answer completion is uncertain"));
+                    }
+                };
+                if !completed.bind_metadata(ledger, |revision| {
+                    backend.bind_completed_answer(operation, &page, draft, revision)
+                }) {
+                    log::warn!(
+                        "Marked answer completed without current presentation revision metadata"
+                    );
+                }
+                Ok(())
             }
         }
     }
@@ -570,6 +954,15 @@ impl Workflow {
     }
 
     fn wait_for_reader_until(&mut self, deadline: Option<std::time::Instant>) -> Result<()> {
+        while !self.wait_for_idle_batch(deadline, None)? {}
+        Ok(())
+    }
+
+    pub(super) fn wait_for_idle_batch(
+        &mut self,
+        deadline: Option<std::time::Instant>,
+        config: Option<&crate::config::Config>,
+    ) -> Result<bool> {
         #[cfg(target_os = "linux")]
         if self.resident_source.is_some() {
             anyhow::ensure!(
@@ -577,53 +970,45 @@ impl Workflow {
                 "Bounded legacy observation cannot select resident source"
             );
             self.invalidate_history();
-            loop {
-                anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
-                let health = self.service_health.as_mut().expect("selected health owner");
-                let owner = self.resident_source.as_mut().unwrap();
-                let released = match self
-                    .device
-                    .wait_for_resident_reader(&mut || owner.progress(health))
-                {
-                    Ok(released) => released,
-                    Err(error) => {
-                        owner.fail_idle(health);
-                        return Err(error);
-                    }
-                };
-                let result = owner.begin(released, health);
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(error) if owner.fatal() => return Err(error),
-                    Err(error) => {
-                        log::info!("Resident source handoff ended without acquisition: {error:#}");
-                        let _ = owner.finish(health);
-                        if owner.fatal() {
-                            return Err(error);
-                        }
+            anyhow::ensure!(!self.runtime_failed(), "Resident source health failed");
+            let health = self.service_health.as_mut().expect("selected health owner");
+            let owner = self.resident_source.as_mut().unwrap();
+            let writer_enabled = config.is_none_or(|settings| settings.admits_writer(false));
+            let released = match self
+                .device
+                .wait_for_resident_reader(writer_enabled, &mut || owner.progress(health))
+            {
+                Ok(released) => released,
+                Err(error) => {
+                    owner.fail_idle(health);
+                    return Err(error);
+                }
+            };
+            match owner.admits_release(&released, config) {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(error) => {
+                    owner.progress(health)?;
+                    log::warn!(
+                        "Could not select a pending Writer request for this gesture: {error:#}"
+                    );
+                    if config.is_some_and(|settings| !settings.reader_enabled()) {
+                        return Ok(false);
                     }
                 }
             }
-        }
-        while !self.wait_for_idle_batch(deadline, |_| true)? {}
-        Ok(())
-    }
-
-    pub(super) fn wait_for_idle_batch(
-        &mut self,
-        deadline: Option<std::time::Instant>,
-        admit_reader: impl FnOnce(&[crate::device::interaction::Interaction]) -> bool,
-    ) -> Result<bool> {
-        // Preserve the installed resident owner: its input/health handoff must
-        // never pass through the legacy device wait/preparation path.
-        #[cfg(target_os = "linux")]
-        if self.resident_source.is_some() {
-            anyhow::ensure!(
-                admit_reader(&[crate::device::interaction::Interaction::Reader]),
-                "Resident Reader dispatch disabled"
-            );
-            self.wait_for_reader_until(deadline)?;
-            return Ok(true);
+            return match owner.begin(released, health) {
+                Ok(()) => Ok(true),
+                Err(error) if owner.fatal() => Err(error),
+                Err(error) => {
+                    log::info!("Resident source handoff ended without acquisition: {error:#}");
+                    let _ = owner.finish(health);
+                    if owner.fatal() {
+                        return Err(error);
+                    }
+                    Ok(false)
+                }
+            };
         }
 
         use crate::device::interaction::Interaction;
@@ -650,7 +1035,10 @@ impl Workflow {
         }
         if events.contains(&Interaction::Reader) {
             self.invalidate_history();
-            let admitted = admit_reader(&events);
+            let admitted = config.is_none_or(|settings| {
+                conversation_dispatch::RuntimeRoute::for_config(settings)
+                    .reader_trigger(settings, &events)
+            });
             if admitted {
                 self.prepare_reader_trigger()?;
             }
@@ -1042,6 +1430,13 @@ impl Workflow {
         center: crate::analysis::SelectionCenter,
     ) -> String {
         format!("<Start of Q-A block for Q @ {center}>\nQ: {question}\n\nA: {answer}\n<End of Q-A block for Q @ {center}>\n")
+    }
+
+    fn with_source_description(body: String, about: Option<&str>) -> String {
+        match about {
+            Some(description) => format!("{description}\n{body}"),
+            None => body,
+        }
     }
 
     /// Save the header pattern for future fast detection

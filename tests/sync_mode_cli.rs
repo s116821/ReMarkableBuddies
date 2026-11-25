@@ -15,6 +15,166 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[test]
+fn create_group_requires_strict_stdin_and_refuses_unqualified_without_mutation() {
+    let fixture = Fixture::new();
+    let group = Uuid::new_v4();
+    let binding = storage::digest(b"unqualified cli");
+    let store = Store::open(fixture.paths()).unwrap();
+    let expected = serde_json::to_value(&store.sync_mode_snapshot().unwrap().token).unwrap();
+    let prep = storage::compound_generation::Request {
+        operation: Uuid::new_v4(),
+        actor: store.actor_id,
+        source_generation: serde_json::from_slice(
+            &fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        )
+        .unwrap(),
+        group,
+        binding_sha256: binding.clone(),
+        expected_mode: serde_json::from_value(expected.clone()).unwrap(),
+    };
+    drop(store);
+    drop(Store::prepare_shared_notebook(fixture.paths(), prep).unwrap());
+    let request = json!({"control_version":1,"operation":Uuid::new_v4(),"expected":expected,
+        "group":group,"binding_sha256":binding,"profile":Uuid::new_v4()});
+    let bytes = serde_json::to_vec(&request).unwrap();
+    let current = fs::read(fixture.paths().data.join("CURRENT")).unwrap();
+    assert_eq!(
+        fixture.run("create-group", None, false)["status"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(&bytes), true)["status"],
+        "invalid-input"
+    );
+    let mut unknown = request.clone();
+    unknown["root_id"] = json!("not-allowed");
+    assert_eq!(
+        fixture.run(
+            "create-group",
+            Some(&serde_json::to_vec(&unknown).unwrap()),
+            false
+        )["status"],
+        "invalid-input"
+    );
+    let duplicate = format!(
+        "{{\"control_version\":1,{}",
+        std::str::from_utf8(&bytes).unwrap().trim_start_matches('{')
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(duplicate.as_bytes()), false)["status"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("create-group", Some(&vec![b'x'; MAX_INPUT + 1]), false)["status"],
+        "invalid-input"
+    );
+    let report = fixture.run("create-group", Some(&bytes), false);
+    assert_eq!(report["status"], "unsupported");
+    assert_eq!(report["activation_performed"], false);
+    assert!(!fixture.paths().data.join("sync/state.json").exists());
+    assert!(!fixture.paths().data.join("sync/mode.json").exists());
+    assert!(!fixture.paths().credentials.join("drive.json").exists());
+    assert_eq!(
+        fs::read(fixture.paths().data.join("CURRENT")).unwrap(),
+        current
+    );
+    fixture.save_config(true);
+    assert_eq!(
+        fixture.run("create-group", Some(&bytes), false)["status"],
+        "unsupported"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn drive_credential_cli_uses_fixed_stdin_and_local_only_custody() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use remarkable_reader_buddy::storage::sync::mode::SyncModeChoice;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::new();
+    let store = Store::open(fixture.paths()).unwrap();
+    let token = store.sync_mode_snapshot().unwrap().token;
+    store
+        .set_sync_mode(&token, Uuid::new_v4(), SyncModeChoice::LocalOnly)
+        .unwrap();
+    let token = store.sync_mode_snapshot().unwrap().token;
+    drop(store);
+    let inspect = json!({"control_version":1,"action":"inspect","expected_mode":token});
+    let inspect_bytes = serde_json::to_vec(&inspect).unwrap();
+    let local_state = fixture.inventory();
+    assert_eq!(
+        fixture.run("drive-credential", None, false)["outcome"],
+        "invalid-input"
+    );
+    let initial = fixture.run("drive-credential", Some(&inspect_bytes), false);
+    assert_eq!(initial["outcome"], "observed");
+    assert_eq!(initial["current"]["slot"], json!({"kind":"absent"}));
+    assert_eq!(fixture.inventory(), local_state);
+    assert_eq!(
+        fixture.run("drive-credential", Some(&inspect_bytes), true)["outcome"],
+        "invalid-input"
+    );
+    let duplicate = format!(
+        "{{\"action\":\"inspect\",{}",
+        std::str::from_utf8(&inspect_bytes)
+            .unwrap()
+            .trim_start_matches('{')
+    );
+    assert_eq!(
+        fixture.run("drive-credential", Some(duplicate.as_bytes()), false)["outcome"],
+        "invalid-input"
+    );
+    assert_eq!(
+        fixture.run("drive-credential", Some(&vec![b'x'; 68 * 1024 + 1]), false)["outcome"],
+        "invalid-input"
+    );
+
+    let collection = Uuid::new_v4();
+    let client_id = "fixture.apps.googleusercontent.com";
+    let account = "PRIVATE_FIXTURE_ACCOUNT";
+    let binding = storage::digest(&serde_json::to_vec(&(client_id, account, collection)).unwrap());
+    let credential = serde_json::to_vec(&json!({
+        "credential_version":1,"client_id":client_id,"client_secret":null,
+        "access_token":"PRIVATE_FIXTURE_ACCESS","refresh_token":"PRIVATE_FIXTURE_REFRESH",
+        "expires_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()+1800,
+        "scopes":["https://www.googleapis.com/auth/drive.appdata"],
+        "account_permission_id":account,"collection":collection
+    }))
+    .unwrap();
+    let operation = Uuid::new_v4();
+    let apply = json!({"control_version":1,"action":"apply","operation":operation,
+        "original":initial["current"],"change":{"kind":"create","collection":collection,
+        "binding_sha256":binding,"credential_b64":STANDARD.encode(&credential)}});
+    let result = fixture.run(
+        "drive-credential",
+        Some(&serde_json::to_vec(&apply).unwrap()),
+        false,
+    );
+    assert_eq!(result["outcome"], "verified");
+    assert_eq!(result["operation"], operation.to_string());
+    assert_eq!(
+        result["current"]["mode_token"],
+        initial["current"]["mode_token"]
+    );
+    assert_eq!(
+        fs::read(fixture.paths().credentials.join("drive.json")).unwrap(),
+        credential
+    );
+    let after_apply = fixture.inventory();
+    let readback = json!({"control_version":1,"action":"readback","operation":operation,
+        "original":initial["current"],"desired":{"kind":"present","collection":collection,
+        "binding_sha256":binding,"sha256":storage::digest(&credential)}});
+    let result = fixture.run(
+        "drive-credential",
+        Some(&serde_json::to_vec(&readback).unwrap()),
+        false,
+    );
+    assert_eq!(result["outcome"], "desired-state-observed");
+    assert_eq!(fixture.inventory(), after_apply);
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -110,7 +270,9 @@ impl Fixture {
         assert!(output.stdout.ends_with(b"\n"));
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["report_version"], 1);
-        assert_eq!(value["activation_performed"], false);
+        if operation != "drive-credential" {
+            assert_eq!(value["activation_performed"], false);
+        }
         assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE_"));
         value
     }
@@ -397,12 +559,28 @@ fn assert_ordinary_refuses(f: &Fixture, expected: &str) {
 }
 
 #[test]
-fn actual_normal_startup_refuses_nonordinary_mode_before_runtime_constructors() {
-    for mode in [isolated(), shared(Uuid::new_v4())] {
+fn actual_normal_startup_refuses_incompatible_mode_before_runtime_constructors() {
+    // Ordinary isolated mode is now a supported local runtime. This negative
+    // CLI fixture covers the incompatible legacy-publisher combination instead.
+    // Positive isolated admission/Dispatch is exercised without device constructors
+    // by the mode-maintenance library fixtures.
+    for (mode, legacy_sync, refusal) in [
+        (
+            isolated(),
+            true,
+            "ordinary mode requires absent or LocalOnly choice",
+        ),
+        (
+            shared(Uuid::new_v4()),
+            false,
+            "ordinary Reader startup unsupported",
+        ),
+    ] {
         let f = Fixture::new();
         let initial = f.initialize();
         assert_eq!(f.choose(&request(&initial, mode))["status"], "ok");
-        assert_ordinary_refuses(&f, "ordinary mode requires absent or LocalOnly choice");
+        f.save_config(legacy_sync);
+        assert_ordinary_refuses(&f, refusal);
     }
     let f = Fixture::new();
     let initial = f.initialize();

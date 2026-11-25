@@ -1,6 +1,17 @@
 //! Real selected Workflow source route. Historical pixels confer no output lease.
+// The researched route is deliberately disabled pending intent admission.
+#[allow(dead_code)]
+pub(super) mod original_pdf;
+
 #[cfg(test)]
 use super::resident_runtime::ReadOnlyAdmission;
+#[cfg(all(
+    feature = "development-resident-bootstrap",
+    feature = "development-input-diagnostics"
+))]
+use super::resident_supervisor::writer_request::{
+    GenerationPin, SelectedRefinement, SlotAction, WriterAtRelease,
+};
 use super::{
     resident_request::{FailureKind, RequestFailure},
     resident_runtime::{ReadOnlyRequest as Request, ResidentRuntime},
@@ -16,7 +27,7 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use remarkable_open_sdk::{
-    native_adapter::{Reply, RuntimeIdentity},
+    native_adapter::{ReaderFacts, Reply, RuntimeIdentity},
     OperationId, Uuid,
 };
 use std::{
@@ -25,6 +36,25 @@ use std::{
 };
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
+// The pinned SDK's CaptureSource codec and capture validator share this bound.
+#[cfg(feature = "installed-resident-output")]
+const MAX_INSTALLED_CAPTURE_PAGES: usize = 17;
+#[cfg(feature = "installed-resident-output")]
+type OrdinaryBookCapture = (
+    ResidentSourceCapture,
+    Result<Option<original_pdf::OrdinaryBookSource>>,
+);
+
+#[derive(Debug)]
+pub(super) struct FinalizedCancellation;
+
+impl std::fmt::Display for FinalizedCancellation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Resident source request canceled")
+    }
+}
+
+impl std::error::Error for FinalizedCancellation {}
 fn operation() -> OperationId {
     OperationId(Uuid::parse(&uuid::Uuid::new_v4().to_string()).expect("OS UUID"))
 }
@@ -53,11 +83,41 @@ trait SourceSession {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    fn writer_at_release(&self, _released_boot_second: u64) -> Result<WriterAtRelease> {
+        Ok(WriterAtRelease::Empty)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn writer_request_for_page(
+        &self,
+        _document: crate::storage::Uuid,
+        _page: crate::storage::Uuid,
+        _selected: SelectedRefinement,
+        _action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        Ok(None)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         _document: crate::storage::Uuid,
         _page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
+        _selected: Option<&GenerationPin>,
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
+        Ok(None)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
         Ok(None)
     }
     fn reconnect(
@@ -96,6 +156,13 @@ trait SourceSession {
     }
 }
 impl SourceSession for Session {
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn writer_at_release(&self, released_boot_second: u64) -> Result<WriterAtRelease> {
+        Session::writer_at_release(self, released_boot_second)
+    }
     fn pulse(&mut self, health: &mut ServiceHealth) -> Result<()> {
         self.source_pulse(health)
     }
@@ -114,12 +181,35 @@ impl SourceSession for Session {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
+    fn writer_request_for_page(
+        &self,
+        document: crate::storage::Uuid,
+        page: crate::storage::Uuid,
+        selected: SelectedRefinement,
+        action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        Session::writer_request_for_page(self, document, page, selected, action)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     fn take_writer_request(
         &self,
         document: crate::storage::Uuid,
         page: crate::storage::Uuid,
-    ) -> Result<Option<crate::writer::Request>> {
-        Session::take_writer_request(self, document, page)
+        selected: Option<&GenerationPin>,
+    ) -> Result<Option<super::resident_supervisor::writer_request::InstalledRequest>> {
+        Session::take_writer_request(self, document, page, selected)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        Session::peek_regional_writer(self)
     }
     fn reconnect(
         &mut self,
@@ -185,6 +275,28 @@ impl Factory for InstalledFactory {
     }
 }
 
+#[derive(Clone, Copy)]
+enum OutputPurpose<'a> {
+    #[cfg(feature = "installed-resident-output")]
+    Open(&'a [u8]),
+    Render(super::resident_output::ResidentOutputText<'a>),
+}
+
+#[derive(Clone)]
+struct PlacedOutput {
+    target: ReaderFacts,
+    runtime: RuntimeIdentity,
+    newly_created: bool,
+}
+
+// A request-local binding to the page already opened, never a live write lease.
+#[derive(Clone)]
+struct OpenedOutput {
+    placement: PlacedOutput,
+    association: crate::conversation::HistoricalPageAssociation,
+    render_started: bool,
+}
+
 pub(super) struct ResidentSourceOwner {
     selection: InstalledReaderSelection,
     store: Arc<Store>,
@@ -192,11 +304,22 @@ pub(super) struct ResidentSourceOwner {
     session: Option<Box<dyn SourceSession>>,
     input: Option<RequestInput>,
     gesture: Option<ResidentGesture>,
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    writer_at_release: WriterAtRelease,
     deadline: Option<Instant>,
     reconnect: bool,
     canceled: bool,
     fatal: bool,
-    captured_source: Option<remarkable_open_sdk::native_adapter::ReaderFacts>,
+    captured_source: Option<ReaderFacts>,
+    #[cfg(feature = "installed-resident-output")]
+    opened_output: Option<OpenedOutput>,
+    #[cfg(all(test, feature = "installed-resident-output"))]
+    ordinary_pdf_fixture: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    #[cfg(all(feature = "installed-resident-output", test))]
+    original_book_fixture_selected: bool,
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
@@ -212,11 +335,22 @@ impl ResidentSourceOwner {
             session: None,
             input: None,
             gesture: None,
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            writer_at_release: WriterAtRelease::Unobserved,
             deadline: None,
             reconnect: false,
             canceled: false,
             fatal: false,
             captured_source: None,
+            #[cfg(feature = "installed-resident-output")]
+            opened_output: None,
+            #[cfg(all(test, feature = "installed-resident-output"))]
+            ordinary_pdf_fixture: None,
+            #[cfg(all(feature = "installed-resident-output", test))]
+            original_book_fixture_selected: false,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
@@ -284,20 +418,45 @@ impl ResidentSourceOwner {
         &mut self,
         corner: crate::device::touch::TriggerCorner,
         health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.activate_at_startup_with_input(
+            health,
+            deadline,
+            || RequestInput::new(corner, None),
+            check,
+        )
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    fn activate_at_startup_with_input(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        input: impl FnOnce() -> Result<RequestInput>,
+        check: impl FnOnce() -> Result<()>,
     ) -> Result<()> {
         ensure!(
             !self.fatal && self.session.is_none() && self.input.is_none(),
             "resident startup activation requires an unused owner"
         );
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
         // Startup observes quiet input without creating a released Reader request.
-        let mut input = RequestInput::new(corner, None)?;
+        let mut input = input()?;
         input.require_quiet()?;
+        check()?;
         let mut session = self.factory.activate(
             &self.selection,
             self.store.clone(),
             health,
             &mut input,
-            Instant::now() + ACQUISITION,
+            deadline.unwrap_or_else(|| Instant::now() + ACQUISITION),
         )?;
         session.finish();
         self.session = Some(session);
@@ -317,6 +476,41 @@ impl ResidentSourceOwner {
     }
     pub(super) fn blank_start_requested(&self) -> bool {
         self.gesture == Some(ResidentGesture::BlankStart)
+    }
+
+    pub(super) fn admits_release(
+        &mut self,
+        released: &ReleasedReaderInput,
+        config: Option<&crate::config::Config>,
+    ) -> Result<bool> {
+        let reader = config.is_none_or(|settings| settings.reader_enabled());
+        let writer = config.is_none_or(|settings| settings.admits_writer(false));
+        if released.gesture == ResidentGesture::BlankStart {
+            return Ok(reader || writer);
+        }
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        if writer && self.selection.has_installed_output() {
+            // A failed read cannot carry over a previously observed request.
+            self.writer_at_release = WriterAtRelease::Unavailable;
+            self.writer_at_release = match (&self.session, released.released_boot_second) {
+                (Some(session), Some(second)) => session.writer_at_release(second)?,
+                _ => WriterAtRelease::Unobserved,
+            };
+            return Ok(reader
+                || (cfg!(feature = "installed-resident-output")
+                    && config.is_some_and(|settings| {
+                        super::conversation_dispatch::RuntimeRoute::for_config(settings)
+                            == super::conversation_dispatch::RuntimeRoute::OrdinaryLocal
+                    }))
+                || matches!(
+                    self.writer_at_release,
+                    WriterAtRelease::Refinement(_) | WriterAtRelease::Generation(_)
+                ));
+        }
+        Ok(reader)
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -339,10 +533,14 @@ impl ResidentSourceOwner {
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
     ))]
-    pub(super) fn take_installed_writer(
+    pub(super) fn installed_writer_for_page(
         &self,
         capture: &ResidentSourceCapture,
-    ) -> Result<Option<super::resident_output::SelectedConversationRequest>> {
+        action: SlotAction,
+    ) -> Result<Option<crate::writer::Request>> {
+        let WriterAtRelease::Refinement(selected) = self.writer_at_release else {
+            return Ok(None);
+        };
         if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
             return Ok(None);
         }
@@ -350,30 +548,106 @@ impl ResidentSourceOwner {
             .session
             .as_ref()
             .context("resident Writer session absent")?;
+        session.writer_request_for_page(capture.document(), capture.page(), selected, action)
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn take_installed_writer(
+        &self,
+        capture: &ResidentSourceCapture,
+    ) -> Result<Option<super::resident_output::SelectedConversationRequest>> {
+        if self.gesture != Some(ResidentGesture::Reader) || !self.selection.has_installed_output() {
+            return Ok(None);
+        }
+        let selected = match &self.writer_at_release {
+            WriterAtRelease::Generation(pin) => Some(pin),
+            // A first Reader gesture can start the session that owns the slot.
+            WriterAtRelease::Unobserved => None,
+            _ => return Ok(None),
+        };
+        use super::{
+            resident_output::SelectedConversationRequest,
+            resident_supervisor::writer_request::InstalledRequest,
+        };
+
+        let session = self
+            .session
+            .as_ref()
+            .context("resident Writer session absent")?;
         Ok(session
-            .take_writer_request(capture.document(), capture.page())?
-            .map(
-                |request| super::resident_output::SelectedConversationRequest::WriterRefinement {
-                    request,
-                    require_current_draft: true,
-                },
-            ))
+            .take_writer_request(capture.document(), capture.page(), selected)?
+            .map(|request| match request {
+                InstalledRequest::GenerateRegion(_) => {
+                    SelectedConversationRequest::UnsupportedRegionalWriter
+                }
+                InstalledRequest::GenerateCurrentTarget(request) => {
+                    SelectedConversationRequest::WriterCurrentTarget(
+                        crate::writer::target::CurrentRequest {
+                            operation: request.operation,
+                            request: request.request,
+                            guidance: request.guidance,
+                        },
+                    )
+                }
+            }))
+    }
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn peek_regional_writer(
+        &self,
+    ) -> Result<Option<super::resident_supervisor::writer_request::RegionalPin>> {
+        if !self.selection.has_installed_output() {
+            return Ok(None);
+        }
+        self.session
+            .as_ref()
+            .map(|session| session.peek_regional_writer())
+            .transpose()
+            .map(Option::flatten)
     }
     pub(super) fn begin(
         &mut self,
         released: ReleasedReaderInput,
         health: &mut ServiceHealth,
     ) -> Result<()> {
+        self.begin_with_check(released, health, || Ok(()))
+    }
+
+    pub(super) fn begin_with_check(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.begin_until(released, health, ACQUISITION, check)
+    }
+
+    pub(super) fn begin_until(
+        &mut self,
+        released: ReleasedReaderInput,
+        health: &mut ServiceHealth,
+        acquisition: Duration,
+        check: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        ensure!(
+            acquisition <= ACQUISITION,
+            "resident acquisition may only be clamped"
+        );
         ensure!(
             !self.fatal && self.input.is_none(),
             "Resident source request cannot restart"
         );
-        self.deadline = Some(released.released_at + ACQUISITION);
+        self.deadline = Some(released.released_at + acquisition);
         self.input = Some(released.input);
         self.gesture = Some(released.gesture);
         self.canceled = false;
         self.captured_source = None;
         self.progress(health)?;
+        check()?;
         let deadline = self.deadline.unwrap();
         before(deadline)?;
         let input = self.input.as_mut().unwrap();
@@ -445,8 +719,223 @@ impl ResidentSourceOwner {
         admitted_progress(deadline, || self.progress(health))
     }
     pub(super) fn acquire(&mut self, health: &mut ServiceHealth) -> Result<ResidentSourceCapture> {
+        self.acquire_with_check(health, |_| Ok(()))
+    }
+
+    pub(super) fn acquire_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+    ) -> Result<ResidentSourceCapture> {
+        self.acquire_with_source(health, None, check, |_, _, _| Ok(()))
+            .map(|(capture, ())| capture)
+    }
+
+    /// Acquire the original PDF under the existing released-input owner. The
+    /// caller supplies short selected boundaries and a separate progress check.
+    /// Neither callback may retain a gate across source I/O or worker waits.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(super) fn acquire_original_pdf_with_check(
+        &mut self,
+        health: &mut ServiceHealth,
+        admitted_document: crate::storage::Uuid,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        mut progress: impl FnMut() -> Result<()>,
+    ) -> Result<(ResidentSourceCapture, original_pdf::CapturedOriginalPdf)> {
+        let deadline = self.original_pdf_deadline(acquisition_deadline, request_deadline)?;
+        self.acquire_original_pdf_using(
+            health,
+            deadline,
+            request_deadline,
+            check,
+            |facts, pulse| {
+                original_pdf::ObservedOriginalPdf::observe(
+                    facts,
+                    admitted_document,
+                    deadline,
+                    pulse,
+                )
+            },
+            &mut progress,
+            original_pdf::ObservedOriginalPdf::captured_by_owner,
+        )
+    }
+
+    #[cfg(all(feature = "installed-resident-output", test))]
+    pub(super) fn original_book_fixture_selected(&self) -> bool {
+        self.original_book_fixture_selected
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn acquire_ordinary_book(
+        &mut self,
+        health: &mut ServiceHealth,
+        pdf: bool,
+        epub: bool,
+    ) -> Result<OrdinaryBookCapture> {
+        if self.gesture != Some(ResidentGesture::Reader) {
+            return Ok((self.acquire(health)?, Ok(None)));
+        }
+        let deadline = self.deadline.context("Resident source deadline absent")?;
+        self.acquire_with_source(
+            health,
+            Some(deadline),
+            |_| Ok(()),
+            |_owner, _, facts| {
+                // Only metadata is sampled here. Writer arbitration precedes
+                // every byte read from either asset.
+                #[cfg(test)]
+                if let Some((root, _)) = &_owner.ordinary_pdf_fixture {
+                    return Ok(original_pdf::OrdinaryBookSource::pin_fixture(
+                        root, facts, pdf, epub,
+                    )
+                    .map(Some));
+                }
+                Ok(original_pdf::OrdinaryBookSource::pin(facts, pdf, epub).map(Some))
+            },
+        )
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn read_ordinary_book(
+        &mut self,
+        health: &mut ServiceHealth,
+        mut source: original_pdf::OrdinaryBookSource,
+    ) -> Result<Option<original_pdf::ObservedOriginalBook>> {
+        let facts = self.current_source_order()?;
+        let deadline = self.deadline.context("Resident source deadline absent")?;
         self.acquisition_current(health)?;
-        let deadline = self.deadline.unwrap();
+        if self.opened_output.is_some() {
+            source.after_opening(&facts)?;
+        }
+        source.read(&facts, deadline, &mut || {
+            self.original_pdf_progress(health, deadline, &mut || Ok(()))
+        })
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn complete_ordinary_book(
+        &mut self,
+        health: &mut ServiceHealth,
+        observed: original_pdf::ObservedOriginalBook,
+        deadline: Instant,
+        retained: Option<original_pdf::OrdinaryBookCache>,
+    ) -> Result<(
+        original_pdf::CapturedOriginalBook,
+        Option<original_pdf::OrdinaryBookCache>,
+    )> {
+        let facts = self.current_source_order()?;
+        let acquired = self.deadline.context("Resident source deadline absent")?;
+        let executable = std::path::Path::new(original_pdf::INSTALLED_EXECUTABLE);
+        #[cfg(test)]
+        let fixture = self.ordinary_pdf_fixture.clone();
+        #[cfg(test)]
+        let executable = fixture
+            .as_ref()
+            .map_or(executable, |(_, path)| path.as_path());
+        observed.complete_ordinary(&facts, executable, deadline, retained, &mut || {
+            self.original_pdf_progress(health, acquired, &mut || Ok(()))
+        })
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn ordinary_book_deadline(&self) -> Result<Instant> {
+        let acquired = self.deadline.context("Resident source deadline absent")?;
+        // Bound both readings, optional research and the final answer using
+        // the original release's acquisition deadline.
+        Ok(acquired + Duration::from_secs(270))
+    }
+
+    fn original_pdf_deadline(
+        &self,
+        acquisition_deadline: Instant,
+        request_deadline: Instant,
+    ) -> Result<Instant> {
+        ensure!(
+            !self.reconnect
+                && self.captured_source.is_none()
+                && self.gesture == Some(ResidentGesture::Reader)
+                && acquisition_deadline <= request_deadline,
+            "Original PDF capture is unavailable for this release"
+        );
+        let owner_deadline = self
+            .deadline
+            .context("Resident source requires a released gesture")?;
+        Ok(owner_deadline.min(acquisition_deadline))
+    }
+
+    fn original_pdf_progress(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        admitted_progress(deadline, || {
+            self.progress(health)?;
+            progress()
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_original_pdf_using<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+        request_deadline: Instant,
+        check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observe: impl FnOnce(
+            &ReaderFacts,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<original_pdf::ObservedOriginalPdf>,
+        progress: &mut dyn FnMut() -> Result<()>,
+        complete: impl FnOnce(
+            original_pdf::ObservedOriginalPdf,
+            &ReaderFacts,
+            Instant,
+            &mut dyn FnMut() -> Result<()>,
+        ) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
+        let result =
+            self.acquire_with_source(health, Some(deadline), check, |owner, health, facts| {
+                let mut pulse = || owner.original_pdf_progress(health, deadline, progress);
+                observe(facts, &mut pulse)
+            });
+        if result.is_err() && !self.reconnect {
+            // Refuse any retry against this release, even if local PDF
+            // admission failed before the capture request reached the SDK.
+            if let Some(session) = self.session.as_mut() {
+                session.finish();
+            }
+            self.reconnect = true;
+        }
+        let (capture, pdf) = result?;
+        let verified = self
+            .captured_source
+            .clone()
+            .context("Resident PDF capture facts absent")?;
+        let mut pulse = || self.original_pdf_progress(health, deadline, progress);
+        Ok((
+            capture,
+            complete(pdf, &verified, request_deadline, &mut pulse)?,
+        ))
+    }
+
+    fn acquire_with_source<T>(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Option<Instant>,
+        mut check: impl FnMut(Option<&ReaderFacts>) -> Result<()>,
+        observed_source: impl FnOnce(&mut Self, &mut ServiceHealth, &ReaderFacts) -> Result<T>,
+    ) -> Result<(ResidentSourceCapture, T)> {
+        self.acquisition_current(health)?;
+        let prepare_source = deadline.is_some();
+        if let Some(deadline) = deadline {
+            before(deadline)?;
+        }
+        check(None)?;
+        let deadline = deadline.unwrap_or_else(|| self.deadline.unwrap());
         let observation = operation();
         let capture = operation();
         let session = self.session.as_mut().context("Resident Session absent")?;
@@ -466,7 +955,11 @@ impl ResidentSourceOwner {
                     feature = "development-resident-bootstrap",
                     feature = "development-input-diagnostics"
                 ))]
-                if let Some(directory) = &self.development_diagnostics {
+                if let Some(directory) = self
+                    .development_diagnostics
+                    .as_ref()
+                    .filter(|_| !prepare_source)
+                {
                     // Explicit installed development profile only. A visual sample
                     // permits fixture setup inspection, never page authority.
                     let visual = session.request(
@@ -502,7 +995,20 @@ impl ResidentSourceOwner {
                 return self.failure(health, error);
             }
         };
+        check(Some(&facts))?;
+        #[cfg(feature = "installed-resident-output")]
+        ensure!(
+            !self.installed_output_selected() || facts.order().len() <= MAX_INSTALLED_CAPTURE_PAGES,
+            "Resident source capture supports at most {MAX_INSTALLED_CAPTURE_PAGES} pages (observed {})",
+            facts.order().len()
+        );
+        let source = observed_source(self, health, &facts)?;
+        if prepare_source {
+            check(Some(&facts))?;
+        }
         before(deadline)?;
+        let session = self.session.as_mut().context("Resident Session absent")?;
+        let input = self.input.as_mut().unwrap();
         let reply = session.request(
             health,
             input,
@@ -523,7 +1029,7 @@ impl ResidentSourceOwner {
         // Retain only information actually supplied/validated by this route.
         match ResidentSourceCapture::from_session(&runtime, observation, capture, facts, historical)
         {
-            Ok(value) => Ok(value),
+            Ok(value) => Ok((value, source)),
             Err(error) => {
                 self.fatal = true;
                 Err(error)
@@ -531,6 +1037,12 @@ impl ResidentSourceOwner {
         }
     }
     pub(super) fn deliver(&mut self, health: &mut ServiceHealth) -> Result<()> {
+        self.check_source_delivery(health)?;
+        self.deadline = None;
+        Ok(())
+    }
+
+    pub(super) fn check_source_delivery(&mut self, health: &mut ServiceHealth) -> Result<Instant> {
         self.acquisition_current(health)?;
         let deadline = self.deadline.unwrap();
         let result = self
@@ -548,23 +1060,38 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         self.acquisition_current(health)?;
-        self.deadline = None;
-        Ok(())
+        Ok(deadline)
     }
     pub(super) fn finish(&mut self, health: &mut ServiceHealth) -> Result<()> {
         let result = self.progress(health);
+        let canceled = result.is_err() && self.canceled && !self.fatal && !health.failed();
         if let Some(session) = &mut self.session {
             session.finish();
             self.reconnect = true;
         }
         self.input = None;
         self.gesture = None;
+        #[cfg(all(
+            feature = "development-resident-bootstrap",
+            feature = "development-input-diagnostics"
+        ))]
+        {
+            self.writer_at_release = WriterAtRelease::Unobserved;
+        }
         self.deadline = None;
         self.captured_source = None;
+        #[cfg(feature = "installed-resident-output")]
+        {
+            self.opened_output = None;
+        }
         self.canceled = false;
         // The old guard is gone, never renewed. Cancellation stayed sticky
         // throughout its request; only a distinct release can begin another.
-        result
+        if canceled {
+            Err(FinalizedCancellation.into())
+        } else {
+            result
+        }
     }
 }
 
@@ -621,6 +1148,94 @@ fn unsettled_output_insertion(
 }
 
 impl ResidentSourceOwner {
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn require_ordinary_book_current(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+    ) -> Result<()> {
+        ensure!(
+            self.captured_page_matches(health, deadline)?,
+            "Reader source or page order changed"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn require_writer_page_current(&mut self, health: &mut ServiceHealth) -> Result<()> {
+        let deadline = self.deadline.context("Writer source deadline absent")?;
+        ensure!(
+            self.captured_page_matches(health, deadline)?,
+            "Writer source page or page order changed before claiming the draft"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(super) fn captured_page_matches(
+        &mut self,
+        health: &mut ServiceHealth,
+        deadline: Instant,
+    ) -> Result<bool> {
+        let original = self
+            .captured_source
+            .as_ref()
+            .context("Resident capture facts absent")?;
+        #[cfg(feature = "installed-resident-output")]
+        let opened = self
+            .opened_output
+            .as_ref()
+            .map(|opened| &opened.placement.target);
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opened: Option<&ReaderFacts> = None;
+        let expected = opened.unwrap_or(original).clone();
+        let already_open = opened.is_some();
+        self.reconnect_for_observation(health, deadline)?;
+        let current = self.output_observe(health, deadline)?;
+        if current != expected && already_open {
+            self.canceled = true;
+        }
+        // Provider and indexing work can outlast an idle client connection.
+        // Retain the same owner and open a fresh read-only connection when needed.
+        self.session
+            .as_mut()
+            .context("resident Session absent")?
+            .finish();
+        self.reconnect = true;
+        Ok(current == expected)
+    }
+
+    fn reconnect_for_observation(
+        &mut self,
+        health: &mut ServiceHealth,
+        end: Instant,
+    ) -> Result<()> {
+        admitted_progress(end, || self.progress(health))?;
+        if self.reconnect {
+            let reconnect_end = end.min(Instant::now() + Duration::from_secs(30));
+            let result = self
+                .session
+                .as_mut()
+                .context("resident Session absent")?
+                .reconnect(
+                    health,
+                    self.input.as_mut().context("resident input guard absent")?,
+                    reconnect_end,
+                );
+            if let Err(error) = result {
+                return self.failure(health, error);
+            }
+            self.reconnect = false;
+        }
+        Ok(())
+    }
+
     fn output_observe(
         &mut self,
         health: &mut ServiceHealth,
@@ -689,21 +1304,35 @@ impl ResidentSourceOwner {
         conversation: crate::storage::Uuid,
         expected: &remarkable_open_sdk::native_adapter::ReaderFacts,
         blank_start_source: bool,
+        protect_source: bool,
+        retained: Option<&[u8]>,
         end: Instant,
         before_effect: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::resident_output::PageUse> {
         let runtime = self.session.as_ref().unwrap().identity();
-        let image = self.output_capture(health, expected, end)?;
+        let fresh;
+        let pixels = if let Some(retained) = retained {
+            retained
+        } else {
+            fresh = self.output_capture(health, expected, end)?;
+            fresh.png()
+        };
         let mut role = backend.classify(
             ledger,
             conversation,
             &runtime,
             expected,
-            &image,
+            pixels,
             blank_start_source,
             end,
             &mut || admitted_progress(end, || self.progress(health)),
         )?;
+        if protect_source {
+            ensure!(
+                role == super::resident_output::PageUse::ConfirmedNonBuddy,
+                "Writer source page cannot be used for draft placement"
+            );
+        }
         if role == super::resident_output::PageUse::LegacyBuddy {
             admitted_progress(end, || self.progress(health))?;
             before_effect()?;
@@ -720,7 +1349,7 @@ impl ResidentSourceOwner {
                 conversation,
                 &runtime,
                 expected,
-                &image,
+                image.png(),
                 blank_start_source,
                 end,
                 &mut || admitted_progress(end, || self.progress(health)),
@@ -761,27 +1390,141 @@ impl ResidentSourceOwner {
         }
         admitted_progress(end, || self.progress(health))
     }
+    #[cfg(feature = "installed-resident-output")]
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_answer(
+    pub(super) fn open_submission_page(
         &mut self,
         health: &mut ServiceHealth,
         backend: &mut dyn super::resident_output::ResidentOutputBackend,
         ledger: &crate::conversation::Ledger,
         conversation: crate::storage::Uuid,
-        text: super::resident_output::ResidentOutputText<'_>,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+        retained: &[u8],
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+
+        ensure!(
+            self.opened_output.is_none(),
+            "Buddy page already opened for this request"
+        );
+        let end = self.deadline.context("Resident source deadline absent")?;
+        let placement = self
+            .place_output(
+                health,
+                backend,
+                ledger,
+                conversation,
+                OutputPurpose::Open(retained),
+                association,
+                &mut || Ok(()),
+                end,
+            )?
+            .map_err(|outcome| anyhow::anyhow!("Buddy page opening: {outcome:?}"))?;
+        admitted_progress(end, || self.progress(health))?;
+        if placement.newly_created {
+            backend.bind_opened_page(ledger, conversation, &placement.target)?;
+        }
+        admitted_progress(end, || self.progress(health))?;
+        let document =
+            crate::storage::Uuid::from_bytes(*placement.target.page().document.as_bytes());
+        let page = crate::storage::Uuid::from_bytes(*placement.target.page().page.as_bytes());
+        let HistoricalCandidate(binding) =
+            ledger.inspect_page_association(conversation, document, page)?
+        else {
+            anyhow::bail!("opened Buddy page binding unavailable");
+        };
+        self.opened_output = Some(OpenedOutput {
+            placement,
+            association: *binding,
+            render_started: false,
+        });
+        self.session
+            .as_mut()
+            .context("resident Session absent")?
+            .finish();
+        self.reconnect = true;
+        log::info!("Buddy conversation page observed before model submission");
+        Ok(())
+    }
+
+    fn check_opened_binding(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        binding: &crate::conversation::HistoricalPageAssociation,
+    ) -> Result<()> {
+        use crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate;
+        let receipt = binding.receipt();
+        ensure!(
+            matches!(ledger.inspect_page_association(receipt.conversation, receipt.observed_document, receipt.observed_page)?,
+                HistoricalCandidate(current) if current.binding_revision() == binding.binding_revision()),
+            "opened Buddy page binding changed"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_render_started(&self) -> bool {
+        self.opened_output
+            .as_ref()
+            .is_some_and(|output| output.render_started)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_page_is_new(&self) -> bool {
+        self.opened_output
+            .as_ref()
+            .is_some_and(|output| output.placement.newly_created)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_association(
+        &self,
+    ) -> Option<&crate::conversation::HistoricalPageAssociation> {
+        self.opened_output
+            .as_ref()
+            .map(|output| &output.association)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn current_source_order(&self) -> Result<ReaderFacts> {
+        let source = self
+            .captured_source
+            .as_ref()
+            .context("Resident source absent")?;
+        if let Some(opened) = &self.opened_output {
+            return ReaderFacts::new(source.page(), opened.placement.target.order().to_vec())
+                .map_err(|error| anyhow::anyhow!("opened document order: {error:?}"));
+        }
+        Ok(source.clone())
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(super) fn opened_source_order(&self) -> Result<Option<ReaderFacts>> {
+        self.opened_output
+            .as_ref()
+            .map(|_| self.current_source_order())
+            .transpose()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_output(
+        &mut self,
+        health: &mut ServiceHealth,
+        backend: &mut dyn super::resident_output::ResidentOutputBackend,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        purpose: OutputPurpose<'_>,
         association: Option<&crate::conversation::HistoricalPageAssociation>,
         before_effect: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<super::resident_output::ResidentOutputOutcome> {
-        use super::resident_output::{exact, PageUse, ResidentOutputOutcome as Outcome};
-        use remarkable_open_sdk::{
-            native_adapter::{InsertAfter, ReaderFacts},
-            navigation::LogicalDirection,
-            PageKey,
+        end: Instant,
+    ) -> Result<std::result::Result<PlacedOutput, super::resident_output::ResidentOutputOutcome>>
+    {
+        use super::resident_output::{
+            exact, PageUse, ResidentOutputOutcome as Outcome, ResidentOutputText,
         };
-        // One original output deadline. Provider work cannot refresh this window;
-        // later stages only clamp it, and synchronous work is checked on return.
-        let placement_started = Instant::now();
-        let end = placement_started + Duration::from_secs(90);
+        use remarkable_open_sdk::{
+            native_adapter::InsertAfter, navigation::LogicalDirection, PageKey,
+        };
         self.selection.current(end)?;
         admitted_progress(end, || self.progress(health))?;
         let original = self
@@ -802,32 +1545,27 @@ impl ResidentSourceOwner {
                 .bind_owned_keyboard(&keyboard)?;
         }
 
-        admitted_progress(end, || self.progress(health))?;
-        if self.reconnect {
-            let reconnect_end = end.min(Instant::now() + Duration::from_secs(30));
-            let result = self.session.as_mut().unwrap().reconnect(
-                health,
-                self.input
-                    .as_mut()
-                    .context("resident output guard absent")?,
-                reconnect_end,
-            );
-            if let Err(error) = result {
-                return self.failure(health, error);
-            }
-            self.reconnect = false;
-        }
+        self.reconnect_for_observation(health, end)?;
         let fresh = self.output_observe(health, end)?;
         exact(&fresh, &original)?;
-        let reader_boot = matches!(
-            text,
-            super::resident_output::ResidentOutputText::Reader { .. }
-        )
+        // The capture before opening already bracketed these same source facts.
+        // An actual navigation or insertion still gets its own fresh observation.
+        #[cfg(feature = "installed-resident-output")]
+        let opening = matches!(purpose, OutputPurpose::Open(_));
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opening = false;
+        let reader_boot = (opening
+            || matches!(
+                purpose,
+                OutputPurpose::Render(
+                    ResidentOutputText::Reader { .. } | ResidentOutputText::ReaderQuestion(_)
+                )
+            ))
         .then_some(runtime.boot);
         if let Some(target) = unsettled_output_insertion(ledger, &fresh, conversation, reader_boot)?
         {
             log::info!("Resident output requires reconciliation for historical insertion {target}");
-            return Ok(Outcome::Unresolved);
+            return Ok(Err(Outcome::Unresolved));
         }
         let association_current = || -> Result<bool> {
             let Some(expected) = association else {
@@ -841,7 +1579,7 @@ impl ResidentSourceOwner {
             ))
         };
         if !association_current()? {
-            return Ok(Outcome::Unresolved);
+            return Ok(Err(Outcome::Unresolved));
         }
         let blank_start_source = self.blank_start_requested();
         let current = self.output_role(
@@ -851,6 +1589,15 @@ impl ResidentSourceOwner {
             conversation,
             &original,
             blank_start_source,
+            matches!(
+                purpose,
+                OutputPurpose::Render(ResidentOutputText::WriterSourceDraft(_))
+            ),
+            match purpose {
+                #[cfg(feature = "installed-resident-output")]
+                OutputPurpose::Open(retained) => Some(retained),
+                OutputPurpose::Render(_) => None,
+            },
             end,
             before_effect,
         )?;
@@ -859,7 +1606,7 @@ impl ResidentSourceOwner {
             original.clone() // current-first reuse: do not inspect a successor
         } else {
             if current != PageUse::ConfirmedNonBuddy {
-                return Ok(Outcome::Unresolved);
+                return Ok(Err(Outcome::Unresolved));
             }
             let source_index = original
                 .order()
@@ -886,6 +1633,8 @@ impl ResidentSourceOwner {
                     conversation,
                     &expected,
                     false,
+                    false,
+                    None,
                     end,
                     before_effect,
                 )?;
@@ -910,7 +1659,7 @@ impl ResidentSourceOwner {
                             "Resident output refused after restoring source {}",
                             original.page().page
                         );
-                        return Ok(Outcome::Unresolved);
+                        return Ok(Err(Outcome::Unresolved));
                     }
                 }
             }
@@ -918,7 +1667,14 @@ impl ResidentSourceOwner {
                 existing
             } else {
                 if association.is_some() {
-                    return Ok(Outcome::Unresolved);
+                    return Ok(Err(Outcome::Unresolved));
+                }
+                if match purpose {
+                    #[cfg(feature = "installed-resident-output")]
+                    OutputPurpose::Open(_) => false,
+                    OutputPurpose::Render(text) => !backend.supports_page_text(text, true)?,
+                } {
+                    return Ok(Err(Outcome::Unavailable));
                 }
                 ensure!(original.order().len() <= 16, "native insertion order bound");
                 let observed = self.output_observe(health, end)?;
@@ -951,7 +1707,7 @@ impl ResidentSourceOwner {
                     }
                     Ok(Reply::Rejected(reason)) => {
                         log::info!("Resident page insertion refused: {reason:?}");
-                        return Ok(Outcome::InsertionRefused);
+                        return Ok(Err(Outcome::InsertionRefused));
                     }
                     Ok(other) => {
                         anyhow::bail!("resident insertion unresolved; no retry: {other:?}")
@@ -991,9 +1747,73 @@ impl ResidentSourceOwner {
             if expected.receipt().observed_page.as_bytes() != target.page().page.as_bytes()
                 || !association_current()?
             {
-                return Ok(Outcome::Unresolved);
+                return Ok(Err(Outcome::Unresolved));
             }
         }
+        Ok(Ok(PlacedOutput {
+            target,
+            runtime,
+            newly_created,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_answer(
+        &mut self,
+        health: &mut ServiceHealth,
+        backend: &mut dyn super::resident_output::ResidentOutputBackend,
+        ledger: &crate::conversation::Ledger,
+        conversation: crate::storage::Uuid,
+        text: super::resident_output::ResidentOutputText<'_>,
+        association: Option<&crate::conversation::HistoricalPageAssociation>,
+        before_effect: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<super::resident_output::ResidentOutputOutcome> {
+        use super::resident_output::{exact, ResidentOutputOutcome as Outcome};
+        let placement_started = Instant::now();
+        let end = placement_started + Duration::from_secs(90);
+        #[cfg(feature = "installed-resident-output")]
+        let opened = self.opened_output.clone();
+        #[cfg(not(feature = "installed-resident-output"))]
+        let opened: Option<OpenedOutput> = None;
+        let already_open = opened.is_some();
+        let PlacedOutput {
+            target,
+            runtime,
+            newly_created,
+        } = if let Some(opened) = opened {
+            ensure!(
+                opened.association.receipt().conversation == conversation
+                    && association.is_some_and(|association| {
+                        association.binding_revision() == opened.association.binding_revision()
+                    }),
+                "opened Buddy page belongs to another request"
+            );
+            self.check_opened_binding(ledger, &opened.association)?;
+            self.selection.current(end)?;
+            self.reconnect_for_observation(health, end)?;
+            ensure!(
+                self.session.as_ref().unwrap().identity() == opened.placement.runtime,
+                "opened Buddy runtime changed"
+            );
+            if !backend.supports_page_text(text, opened.placement.newly_created)? {
+                return Ok(Outcome::Unavailable);
+            }
+            opened.placement
+        } else {
+            match self.place_output(
+                health,
+                backend,
+                ledger,
+                conversation,
+                OutputPurpose::Render(text),
+                association,
+                before_effect,
+                end,
+            )? {
+                Ok(placed) => placed,
+                Err(outcome) => return Ok(outcome),
+            }
+        };
         if text.is_empty() && !newly_created {
             return Ok(Outcome::ReusedWithoutWrite);
         }
@@ -1009,6 +1829,9 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         let observed = self.output_observe(health, end)?;
+        if already_open && observed != target {
+            self.canceled = true;
+        }
         exact(&observed, &target)?;
         before_effect()?;
         admitted_progress(end, || self.progress(health))?;
@@ -1034,8 +1857,21 @@ impl ResidentSourceOwner {
             return self.failure(health, error);
         }
         let final_target = self.output_observe(health, end)?;
+        if already_open && final_target != target {
+            self.canceled = true;
+        }
         exact(&final_target, &target)?;
+        if already_open {
+            self.check_opened_binding(
+                ledger,
+                association.context("opened output binding absent")?,
+            )?;
+        }
         admitted_progress(end, || self.progress(health))?;
+        #[cfg(feature = "installed-resident-output")]
+        if let Some(opened) = &mut self.opened_output {
+            opened.render_started = true;
+        }
         let mut lease = DevelopmentTargetLease {
             owner: self,
             health,
@@ -1126,13 +1962,16 @@ impl DevelopmentTargetLease<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::workflow::resident_runtime::tests::Fixture;
+    #[cfg(feature = "installed-resident-output")]
+    use crate::workflow::resident_supervisor::writer_request::RefinementFixtureSlot;
     use crate::workflow::{
         resident_client,
         resident_output::{
-            PageUse, ResidentOutputBackend, ResidentOutputOutcome, ResidentRenderer,
+            PageUse, ResidentOutputBackend, ResidentOutputOutcome, ResidentOutputText,
+            ResidentRenderer,
         },
     };
     use crate::{
@@ -1142,10 +1981,7 @@ mod tests {
     };
     use nix::libc;
     use remarkable_open_sdk::{
-        native_adapter::{
-            Command, ConnectionIdentity, Frame, HistoricalCapture, InsertAfter, Message,
-            ReaderFacts,
-        },
+        native_adapter::{Command, ConnectionIdentity, Frame, InsertAfter, Message, ReaderFacts},
         navigation::LogicalDirection,
     };
     use std::{
@@ -1155,16 +1991,30 @@ mod tests {
         rc::Rc,
     };
     type Events = Rc<RefCell<Vec<&'static str>>>;
+
+    struct ObserveFileChange {
+        pdf: PathBuf,
+        armed: Rc<Cell<bool>>,
+    }
+
     struct OwnedSession {
         runtime: ResidentRuntime,
         _fixture: Fixture,
         events: Events,
         delivery_fault: bool,
+        observe_file_change: Option<ObserveFileChange>,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot: Option<Rc<super::super::resident_supervisor::writer_request::FixtureSlot>>,
+        #[cfg(feature = "installed-resident-output")]
+        writer_slot_fault: bool,
+        #[cfg(feature = "installed-resident-output")]
+        refinement_slot: Option<Rc<RefinementFixtureSlot>>,
     }
     struct OwnedAdmission<'a> {
         health: &'a mut ServiceHealth,
         input: &'a mut RequestInput,
         policy_fault: bool,
+        observe_file_change: Option<&'a ObserveFileChange>,
     }
     impl ReadOnlyAdmission for OwnedAdmission<'_> {
         fn pulse(&mut self, deadline: Instant) -> Result<()> {
@@ -1183,8 +2033,97 @@ mod tests {
             }
             Ok(())
         }
+        fn reply_observed(&mut self) {
+            if let Some(change) = self
+                .observe_file_change
+                .filter(|change| change.armed.replace(false))
+            {
+                // The SDK returned the original native facts, but the request
+                // still owns the observation boundary until it returns.
+                std::fs::write(&change.pdf, b"changed during native Observe").unwrap();
+            }
+        }
     }
     impl SourceSession for OwnedSession {
+        #[cfg(feature = "installed-resident-output")]
+        fn writer_at_release(&self, released: u64) -> Result<WriterAtRelease> {
+            if self.writer_slot_fault {
+                self.events.borrow_mut().push("writer slot unavailable");
+                anyhow::bail!("Writer slot replaced while reading");
+            }
+            if let Some(slot) = &self.writer_slot {
+                return slot.at_release(released);
+            }
+            let selected = self
+                .refinement_slot
+                .as_ref()
+                .map(|slot| slot.at_release(released))
+                .transpose()?
+                .flatten();
+            Ok(selected.map_or(WriterAtRelease::Empty, WriterAtRelease::Refinement))
+        }
+        #[cfg(feature = "installed-resident-output")]
+        fn writer_request_for_page(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+            selected: SelectedRefinement,
+            action: SlotAction,
+        ) -> Result<Option<crate::writer::Request>> {
+            let Some(slot) = &self.refinement_slot else {
+                return Ok(None);
+            };
+            if action == SlotAction::Inspect
+                && self
+                    .events
+                    .borrow()
+                    .contains(&"change order on Writer inspect")
+            {
+                std::fs::write(
+                    self._fixture.ordinary_pdf_order_change(),
+                    ConversationId::new_v4().to_string(),
+                )?;
+            }
+            self.events.borrow_mut().push(match action {
+                SlotAction::Inspect => "writer inspect",
+                SlotAction::Claim => "writer claim",
+            });
+            slot.for_page(document, page, selected, action, 121)
+        }
+        #[cfg(feature = "installed-resident-output")]
+        fn take_writer_request(
+            &self,
+            document: ConversationId,
+            page: ConversationId,
+            selected: Option<&GenerationPin>,
+        ) -> Result<Option<super::super::resident_supervisor::writer_request::InstalledRequest>>
+        {
+            use super::super::resident_supervisor::writer_request::{
+                InstalledRequest, RegionalRequest,
+            };
+            if let Some(slot) = &self.writer_slot {
+                return slot.take_on_page(document, page, selected);
+            }
+            let mut events = self.events.borrow_mut();
+            let Some(index) = events
+                .iter()
+                .position(|event| *event == "current-target-writer-queued")
+            else {
+                return Ok(None);
+            };
+            events.remove(index);
+            events.push("current-target-writer-received");
+            Ok(Some(InstalledRequest::GenerateCurrentTarget(
+                RegionalRequest {
+                    document,
+                    page,
+                    operation: ConversationId::new_v4(),
+                    request: "Make a note about the current selected source".into(),
+                    guidance: None,
+                },
+            )))
+        }
+
         fn companion_pid(&self) -> Option<u32> {
             self.runtime.fixture_companion_pid()
         }
@@ -1204,6 +2143,7 @@ mod tests {
                     health,
                     input,
                     policy_fault: self.delivery_fault,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1225,6 +2165,7 @@ mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1238,11 +2179,12 @@ mod tests {
             deadline: Instant,
         ) -> std::result::Result<Reply, RequestFailure> {
             assert!(deadline.saturating_duration_since(Instant::now()) <= Duration::from_secs(10));
-            self.events.borrow_mut().push(match &request {
-                Request::Observe => "observe",
-                Request::CaptureSource(_) => "capture",
+            let (event, observe_file_change) = match &request {
+                Request::Observe => ("observe", self.observe_file_change.as_ref()),
+                Request::CaptureSource(_) => ("capture", None),
                 _ => panic!("effect request"),
-            });
+            };
+            self.events.borrow_mut().push(event);
             let result = self.runtime.request_read_only(
                 operation,
                 request,
@@ -1251,6 +2193,7 @@ mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1274,6 +2217,7 @@ mod tests {
                     health,
                     input,
                     policy_fault: false,
+                    observe_file_change: None,
                 },
             );
             super::super::resident_request::finish(&mut self.runtime, result)
@@ -1283,6 +2227,7 @@ mod tests {
         }
     }
     struct OwnedFactory {
+        source: Option<(ConversationId, ConversationId)>,
         events: Events,
         mode: &'static str,
         delay: Duration,
@@ -1303,6 +2248,9 @@ mod tests {
             std::thread::sleep(self.delay);
             before(deadline)?;
             let fixture = Fixture::new();
+            if let Some((document, page)) = self.source {
+                fixture.declare_source(document, page);
+            }
             let runtime = if self.mode == "source-handoff-companion" {
                 fixture.start_source_companion_with_store(
                     store,
@@ -1322,6 +2270,13 @@ mod tests {
                 _fixture: fixture,
                 events: self.events.clone(),
                 delivery_fault: self.mode == "reconnect-source-handoff-delivery-policy",
+                observe_file_change: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }))
         }
     }
@@ -1333,6 +2288,7 @@ mod tests {
     fn released(at: Instant) -> ReleasedReaderInput {
         ReleasedReaderInput {
             released_at: at,
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: quiet_guard(),
         }
@@ -1351,6 +2307,16 @@ mod tests {
             })
             .unwrap(),
         );
+        let (workflow, events, receiver) = workflow_with_store(mode, releases, delay, &store);
+        (workflow, store, base, events, receiver)
+    }
+
+    fn workflow_with_store(
+        mode: &'static str,
+        releases: Vec<ReleasedReaderInput>,
+        delay: Duration,
+        store: &Arc<Store>,
+    ) -> (Workflow, Events, UnixDatagram) {
         let events = Rc::new(RefCell::new(vec![]));
         let backend =
             super::super::selected_backend::RefusingBackend::with_resident_releases(releases);
@@ -1363,11 +2329,807 @@ mod tests {
             .configure_resident_source(InstalledReaderSelection::fixture(), store.clone())
             .unwrap();
         workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: None,
             events: events.clone(),
             mode,
             delay,
         });
-        (workflow, store, base, events, receiver)
+        (workflow, events, receiver)
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn ordinary_installed_current_target_reaches_writer_without_reading_the_pdf() {
+        use std::{
+            ffi::CString,
+            fs::{self, File},
+            io::Read,
+            os::{
+                fd::{AsRawFd, FromRawFd},
+                unix::{ffi::OsStrExt, fs::DirBuilderExt},
+            },
+        };
+
+        let mode = "reconnect-source-handoff";
+        let (mut workflow, store, base, events, _notify) =
+            workflow(mode, vec![released(Instant::now())], Duration::ZERO);
+        let document = ConversationId::new_v4();
+        let page = ConversationId::new_v4();
+        let root = base.join("writer-pdf");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let table = root.join(format!("{document}.content"));
+        let pdf = root.join(format!("{document}.pdf"));
+        crate::storage::files::atomic_json(
+            &table,
+            &serde_json::json!({
+                "fileType": "pdf",
+                "cPages": {"original": {"value": 1}, "pages": [
+                    {"id": page, "idx": {"value": "a"}, "redir": {"value": 0}}
+                ]}
+            }),
+        )
+        .unwrap();
+        fs::write(&pdf, vec![0; 256 * 1024]).unwrap();
+
+        // Observe content access at the filesystem boundary. The Writer must
+        // reach dispatch even when either read would outlast its budget.
+        let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        assert!(fd >= 0);
+        let mut watch = unsafe { File::from_raw_fd(fd) };
+        for path in [&table, &pdf] {
+            let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert!(
+                unsafe {
+                    libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS)
+                } >= 0
+            );
+        }
+
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.ordinary_pdf_fixture = Some((root, PathBuf::new()));
+        owner.original_book_fixture_selected = true;
+        owner.factory = Box::new(OwnedFactory {
+            source: Some((document, page)),
+            events: events.clone(),
+            mode,
+            delay: Duration::ZERO,
+        });
+        events.borrow_mut().push("current-target-writer-queued");
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": store.paths,
+            "reader": { "researched_pdf": {} }
+        }))
+        .unwrap();
+        let ledger = Ledger::new(store.clone());
+        let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .unwrap()
+            .with_regional_writer_model("fixture".into());
+        let calls = Rc::new(Cell::new(0));
+        let provider = Provider {
+            calls: calls.clone(),
+            batches: Rc::new(RefCell::new(vec![])),
+            images: vec![],
+            payload_delay: Duration::ZERO,
+            kill_pid: None,
+            selection_subject: Some("24 / 6"),
+        };
+        let mut reader = Orchestrator::new(workflow, provider, ledger);
+        let error = reader
+            .run_iteration_with_trigger(true, Some(&dispatch), Some(dispatch.config))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a bound conversation"),
+            "{error:#}"
+        );
+        assert!(events.borrow().contains(&"current-target-writer-received"));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            watch.read(&mut [0; 4096]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(reader);
+        drop(dispatch);
+        drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_only_installed_current_target_places_the_masked_regional_draft() {
+        use super::super::resident_supervisor::writer_request::{FixtureSlot, RegionalRequest};
+        use crate::conversation::{
+            resident_capture::tests::capture_for,
+            target::{geometry::Geometry, Candidate, Understanding},
+            target_source::tests::Fixture as StoreFixture,
+            BindingAcquisition, BindingReceipt, ExpectedHeads, Mode, Role, SourceObservation, Turn,
+        };
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        #[derive(Default)]
+        struct RegionalModel {
+            calls: Rc<Cell<usize>>,
+            images: Vec<String>,
+            text: Vec<String>,
+        }
+
+        impl crate::LLMEngine for RegionalModel {
+            fn guarded_timeout(&self) -> Option<Duration> {
+                Some(Duration::from_secs(1))
+            }
+            fn execute_with_handoff(
+                &mut self,
+                progress: &mut dyn FnMut() -> Result<()>,
+                handoff: &mut crate::llm::ModelHandoff<'_>,
+            ) -> Result<String> {
+                progress()?;
+                let mut result = None;
+                handoff(&mut || {
+                    result = Some(self.execute());
+                    Ok(())
+                })?;
+                result.context("regional fixture provider was not dispatched")?
+            }
+            fn add_text_content(&mut self, text: &str) {
+                self.text.push(text.into());
+            }
+            fn add_image_content(&mut self, image: &str) {
+                self.images.push(image.into());
+            }
+            fn clear_content(&mut self) {
+                self.images.clear();
+                self.text.clear();
+            }
+            fn execute(&mut self) -> Result<String> {
+                let call = self.calls.get();
+                self.calls.set(call + 1);
+                match call {
+                    0 => {
+                        let [image] = self.images.as_slice() else {
+                            panic!("normalization must receive one masked original");
+                        };
+                        let png = STANDARD.decode(image).unwrap();
+                        let pixels =
+                            image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                                .unwrap()
+                                .to_rgba8();
+                        assert_eq!(pixels.dimensions(), (12, 20));
+                        assert_eq!(pixels.get_pixel(1, 1).0, [17, 29, 41, 255]);
+                        assert_eq!(pixels.get_pixel(10, 1).0, [255, 255, 255, 255]);
+                        Ok(
+                            r#"{"pages":[{"page":1,"status":"transcribed","text":"24 / 6 = 4"}]}"#
+                                .into(),
+                        )
+                    }
+                    1 => {
+                        assert!(self.images.is_empty());
+                        assert!(self.text.iter().any(|part| part.contains("24 / 6 = 4")));
+                        Ok("# Regional note\n\nSelected equation equals four.".into())
+                    }
+                    _ => panic!("unexpected extra model request"),
+                }
+            }
+        }
+
+        let base = StoreFixture(std::env::temp_dir().join(format!(
+            "resident-current-target-{}",
+            ConversationId::new_v4(),
+        )));
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
+                data: base.0.join("data"),
+                cache: base.0.join("cache"),
+                credentials: base.0.join("credentials"),
+            },
+            "product_settings": {"reader_enabled": false, "writer_enabled": true}
+        }))
+        .unwrap();
+        let store = Arc::new(Store::open_source_target_startup(&config).unwrap());
+        let ledger = Ledger::new(store.clone());
+        let document = ConversationId::new_v4();
+        let original = capture_for(document);
+        let page = original.page();
+        let conversation = ConversationId::new_v4();
+        ledger
+            .create(conversation, ConversationId::new_v4(), 1)
+            .unwrap();
+        let image_id = ConversationId::new_v4();
+        let mut user = Turn {
+            id: ConversationId::new_v4(),
+            conversation,
+            exchange: ConversationId::new_v4(),
+            sequence: 0,
+            role: Role::User,
+            mode: Mode::Reader,
+            outcome: Outcome::Prepared,
+            text: None,
+            sources: vec![],
+            correction_of: None,
+            created_ms: 1,
+            updated_ms: 1,
+            completion: None,
+        };
+        ledger
+            .prepare_resident_historical(
+                ConversationId::new_v4(),
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                user.clone(),
+                image_id,
+                &original,
+            )
+            .unwrap();
+        let mut frame = ledger.target_source_frame(conversation, image_id).unwrap();
+        let user_heads = ledger.expected(Namespace::Conversation, user.id).unwrap();
+        user.outcome = Outcome::Interpreted;
+        user.updated_ms = 2;
+        user.text = Some("What is this?".into());
+        user.sources = vec![image_id];
+        ledger
+            .advance_with_source_target(
+                ConversationId::new_v4(),
+                user_heads,
+                user,
+                &mut frame,
+                &Candidate {
+                    subject: "24 / 6".into(),
+                    geometry: Some(Geometry {
+                        components: vec![vec![
+                            [0, 0],
+                            [500_000, 0],
+                            [500_000, 1_000_000],
+                            [0, 1_000_000],
+                        ]],
+                    }),
+                    understanding: Understanding::Interpreted,
+                },
+                Some(
+                    crate::analysis::SelectionCenter::from_pixels(192.0, 512.0, 768, 1024).unwrap(),
+                ),
+            )
+            .unwrap();
+        let target = ledger
+            .current_resident_writer_target(conversation, document, page)
+            .unwrap()
+            .unwrap();
+
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let runtime = native
+            .start_with_store(
+                store.clone(),
+                "reconnect-source-handoff",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let profile = InstalledReaderSelection::fixture_for_installed_output(
+            &base.0.join("output-profile"),
+            runtime.identity(),
+        )
+        .unwrap();
+        let hex = |bytes: [u8; 32]| {
+            bytes
+                .into_iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let bind = ConversationId::new_v4();
+        ledger
+            .bind(
+                bind,
+                ledger
+                    .expected(Namespace::Conversation, conversation)
+                    .unwrap(),
+                ExpectedHeads::default(),
+                BindingReceipt {
+                    operation: bind,
+                    conversation,
+                    request_fingerprint: "fixture-request".into(),
+                    adapter_fingerprint: hex(runtime.identity().adapter_sha256),
+                    source: SourceObservation {
+                        document,
+                        page,
+                        session: "fixture-session".into(),
+                        visit: "fixture-visit".into(),
+                        content_revision: None,
+                        order_revision: None,
+                        capability_revision: hex(runtime.identity().profile_sha256),
+                        evidence_procedure: "fixture-source".into(),
+                    },
+                    intended_target: Some(page),
+                    observed_document: document,
+                    observed_page: page,
+                    expected_order: vec![page],
+                    observed_order: vec![page],
+                    persisted_revision: "fixture-binding".into(),
+                    observed_ms: 3,
+                    evidence_origin: "installed-native-guarded-v1".into(),
+                    acquisition: BindingAcquisition::ExistingCurrent,
+                },
+            )
+            .unwrap();
+
+        let operation = ConversationId::new_v4();
+        let slot = Rc::new(FixtureSlot::current_target(RegionalRequest {
+            document,
+            page,
+            operation,
+            request: "Make a note about this marked source".into(),
+            guidance: None,
+        }));
+        let preview = Rc::new(RefCell::new(vec![]));
+        let backend =
+            super::super::selected_backend::RefusingBackend::with_resident_releases(vec![
+                released(Instant::now()),
+            ])
+            .with_test_output(Box::new(RecognitionProbe {
+                rendered_text: Some(preview.clone()),
+                ..RecognitionProbe::default()
+            }));
+        let mut workflow = Workflow::with_device(Box::new(backend), false);
+        let (socket, _notify) = UnixDatagram::pair().unwrap();
+        workflow
+            .enable_service_health(ServiceHealth::fixture(socket))
+            .unwrap();
+        workflow
+            .configure_resident_source(profile, store.clone())
+            .unwrap();
+        let events = Rc::new(RefCell::new(vec![]));
+        workflow.resident_source.as_mut().unwrap().session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            refinement_slot: None,
+            writer_slot_fault: false,
+            writer_slot: Some(slot.clone()),
+        }));
+        let dispatch = super::super::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .unwrap()
+            .with_regional_writer_model("fixture".into());
+        let provider = RegionalModel::default();
+        let calls = provider.calls.clone();
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let mut reader = Orchestrator::new(workflow, provider, Ledger::new(store.clone()));
+        reader
+            .run_iteration_with_trigger(false, Some(&dispatch), Some(dispatch.config))
+            .unwrap();
+
+        assert_eq!(calls.get(), 2);
+        assert!(!slot.pending());
+        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(
+            preview.borrow().as_slice(),
+            &["Q: Make a note about this marked source\n\nA: Regional note\n\nAbout: 24 / 6\n\nSelected equation equals four.\n"],
+        );
+        let records = ledger.inspect(conversation, false).unwrap();
+        assert!(records.iter().any(|record| matches!(record,
+            Record::RegionSource(region) if region.target == target
+                && region.normalized.document.document == document)));
+        assert!(records.iter().any(|record| matches!(record,
+            Record::Turn(turn) if turn.exchange == operation
+                && turn.role == Role::Assistant
+                && turn.mode == Mode::Writer
+                && turn.outcome == Outcome::Generated)));
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) struct OrdinaryPdfFixtureRounds<'a> {
+        pub epub: bool,
+        pub rendered: Option<Rc<RefCell<Vec<String>>>>,
+        pub source_targets: bool,
+        pub bound_successor_for_book_edit: Option<ConversationId>,
+        pub count: usize,
+        pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) type OrdinaryPdfRoundHook<'a> =
+        dyn FnMut(usize, &std::path::Path) -> Result<()> + 'a;
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn ordinary_pdf_receiver_fixture<M: crate::LLMEngine>(
+        document: ConversationId,
+        page: ConversationId,
+        root: PathBuf,
+        original_file_executable: Option<PathBuf>,
+        mut rounds: OrdinaryPdfFixtureRounds<'_>,
+        model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
+        inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
+    ) -> Result<(Vec<Result<()>>, Vec<Record>)> {
+        let mode = if rounds.rendered.is_some() {
+            anyhow::ensure!(
+                rounds.count == 1,
+                "The placement fixture starts from one original page"
+            );
+            if rounds.bound_successor_for_book_edit.is_some() {
+                "reconnect-source-handoff-research-pages"
+            } else {
+                "reconnect-source-handoff-writer-insert"
+            }
+        } else {
+            "reconnect-source-handoff-ordinary-pdf"
+        };
+        let base = std::env::temp_dir().join(format!("resident-workflow-{}", uuid::Uuid::new_v4()));
+        let setting = if rounds.epub {
+            "researched_epub"
+        } else {
+            "researched_pdf"
+        };
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
+                data: base.join("data"),
+                cache: base.join("cache"),
+                credentials: base.join("credentials"),
+            },
+            "model": "gpt-6.1-terra",
+            "model_credential": "fixture_model_key",
+            "reader": { (setting): { "research_model": "gpt-5.6-terra" } },
+            "research_policy": "required"
+        }))?;
+        config
+            .validate_values()
+            .context("Validate ordinary PDF fixture configuration")?;
+        let store = if rounds.source_targets {
+            Store::open_source_target_startup(&config)
+        } else {
+            Store::open(config.paths.clone())
+        }
+        .context("Open ordinary PDF fixture Store")?;
+        let store = Arc::new(store);
+        let releases = (0..rounds.count)
+            .map(|_| released(Instant::now()))
+            .collect();
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, releases, Duration::ZERO, &store);
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let successor = rounds.bound_successor_for_book_edit;
+        if let Some(successor) = successor {
+            native.declare_research_successor(successor);
+        }
+        let position = native.successor_position();
+        let runtime = native
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .context("Start ordinary PDF fixture resident session")?;
+        let ledger = Ledger::new(store.clone());
+        if let Some(successor) = successor {
+            installed_reader_memory::bind_existing_reader_page(
+                &ledger,
+                runtime.identity(),
+                ConversationId::new_v4(),
+                document,
+                page,
+                successor,
+            )?;
+        }
+        let order_change = native.ordinary_pdf_order_change();
+        let change_file_on_observe = Rc::new(Cell::new(false));
+        let extension = if rounds.epub { "epub" } else { "pdf" };
+        let pdf = root.join(format!("{document}.{extension}"));
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = if let Some(rendered) = &rounds.rendered {
+            let output = RecognitionProbe {
+                confirmed_source: true,
+                insertion_source: successor.is_none().then_some(page),
+                successor: successor.map(|_| SuccessorProbe {
+                    position: position.clone(),
+                    interrupt_restore: false,
+                }),
+                book_edit_on_navigation: successor.map(|_| pdf.clone()),
+                rendered_text: Some(rendered.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                super::super::selected_backend::RefusingBackend::with_resident_releases(vec![
+                    released(Instant::now()),
+                ])
+                .with_test_output(Box::new(output)),
+            );
+            InstalledReaderSelection::fixture_for_installed_output(
+                &base.join("output-profile"),
+                runtime.identity(),
+            )?
+        } else {
+            InstalledReaderSelection::fixture_with_installed_output()
+        };
+        owner.original_book_fixture_selected = original_file_executable.is_some();
+        owner.ordinary_pdf_fixture = Some((root, original_file_executable.unwrap_or_default()));
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: Some(ObserveFileChange {
+                pdf,
+                armed: change_file_on_observe.clone(),
+            }),
+            refinement_slot: None,
+            writer_slot_fault: false,
+            writer_slot: None,
+        }));
+        crate::storage::files::atomic(
+            &store.paths.credentials.join("fixture_model_key"),
+            b"PRIVATE_RESEARCH_FIXTURE",
+        )
+        .context("Write ordinary PDF fixture model credential")?;
+        let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)
+            .context("Admit ordinary PDF fixture local dispatch")?;
+        let mut reader = Orchestrator::new(
+            workflow,
+            model(&ledger, order_change.clone(), change_file_on_observe),
+            Ledger::new(store.clone()),
+        );
+        reader
+            .set_local_handwriting(&dispatch)
+            .context("Configure ordinary PDF fixture handwriting")?;
+        let mut results = Vec::with_capacity(rounds.count);
+        for ordinal in 0..rounds.count {
+            if let Some(before_round) = &mut rounds.before_round {
+                before_round(ordinal, &order_change)?;
+            }
+            results.push(reader.run_iteration_with_trigger(
+                true,
+                Some(&dispatch),
+                Some(dispatch.config),
+            ));
+            let mut events = events.borrow_mut();
+            let acquisition: &[&str] = if ordinal == 0 {
+                &["observe", "capture"]
+            } else {
+                &["reconnect", "observe", "capture"]
+            };
+            assert!(
+                events.starts_with(acquisition),
+                "unexpected fixture acquisition: {events:?}"
+            );
+            if rounds.rendered.is_some() {
+                assert_eq!(
+                    events.iter().filter(|&&event| event == "insert").count(),
+                    usize::from(successor.is_none()),
+                    "Expected placement to use its assigned page"
+                );
+                if successor.is_some() {
+                    assert!(
+                        position.exists(),
+                        "Expected navigation to the bound Buddy page. Request outcome: {:?}",
+                        results.last()
+                    );
+                }
+            } else {
+                let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
+                assert!(remainder.is_empty());
+                assert!(observations
+                    .iter()
+                    .all(|pair| *pair == ["reconnect", "observe"]));
+            }
+            events.clear();
+        }
+        let records = store
+            .snapshot_heads_matching(
+                &[Namespace::Conversation],
+                crate::storage::MAX_ITEMS,
+                |_| true,
+            )
+            .context("Read ordinary PDF fixture conversation heads")?
+            .iter()
+            .map(Ledger::decode)
+            .collect::<Result<Vec<_>>>()
+            .context("Decode ordinary PDF fixture conversation records")?;
+        inspect(&ledger, &records).context("Inspect ordinary PDF fixture conversation")?;
+        drop((reader, dispatch, ledger, store));
+        std::fs::remove_dir_all(base).context("Remove ordinary PDF fixture Store")?;
+        Ok((results, records))
+    }
+
+    #[test]
+    fn resident_owner_brackets_original_pdf_source_and_refuses_same_release_retry() {
+        use std::{fs, os::unix::fs::DirBuilderExt};
+
+        for refusal in [None, Some("before"), Some("after")] {
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let document = ConversationId::from_u128(81);
+            let page = ConversationId::from_u128(82);
+            let root = base.join("original-pdf");
+            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let pdf_path = root.join(format!("{document}.pdf"));
+            if refusal != Some("before") {
+                fs::write(&pdf_path, b"synthetic original source").unwrap();
+            }
+            fs::write(
+                root.join(format!("{document}.content")),
+                serde_json::to_vec(&serde_json::json!({
+                    "fileType": "pdf",
+                    "cPages": {"original": {"value": 2}, "pages": [
+                        {"id": page, "idx": {"value": "a"}, "redir": {"value": 1}}
+                    ]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.factory = Box::new(OwnedFactory {
+                source: Some((document, page)),
+                events: events.clone(),
+                mode: "reconnect-source-handoff",
+                delay: Duration::ZERO,
+            });
+            let started = Instant::now();
+            owner.begin(released(started), health).unwrap();
+            let requested = started + Duration::from_secs(20);
+            let deadline = owner.original_pdf_deadline(requested, requested).unwrap();
+            assert_eq!(deadline, requested);
+            let checks = RefCell::new(Vec::new());
+            let result = owner.acquire_original_pdf_using(
+                health,
+                deadline,
+                requested,
+                |facts| {
+                    checks.borrow_mut().push(facts.is_some());
+                    Ok(())
+                },
+                |facts, pulse| {
+                    assert_eq!(&*events.borrow(), &["activate", "spawn", "observe"]);
+                    original_pdf::ObservedOriginalPdf::observe_at(
+                        &root,
+                        (unsafe { libc::geteuid() }, None),
+                        true,
+                        facts,
+                        document,
+                        deadline,
+                        pulse,
+                    )
+                },
+                &mut || Ok(()),
+                |pdf, verified, _, pulse| {
+                    assert_eq!(
+                        &*events.borrow(),
+                        &["activate", "spawn", "observe", "capture"]
+                    );
+                    if refusal == Some("after") {
+                        fs::write(&pdf_path, b"changed after capture")?;
+                    }
+                    pdf.verify_fixture_capture(verified, pulse)
+                },
+            );
+            let expected_checks: &[bool] = if refusal == Some("before") {
+                &[false, true]
+            } else {
+                &[false, true, true]
+            };
+            assert_eq!(checks.borrow().as_slice(), expected_checks);
+            if refusal.is_some() {
+                assert!(result.is_err());
+            } else {
+                let (capture, original_page) = result.unwrap();
+                assert_eq!(capture.document(), document);
+                assert_eq!(capture.page(), page);
+                assert_eq!(original_page, 2);
+            }
+            assert!(owner.original_pdf_deadline(requested, requested).is_err());
+            owner.finish(health).unwrap();
+            let expected_events: &[&str] = if refusal == Some("before") {
+                &["activate", "spawn", "observe"]
+            } else {
+                &["activate", "spawn", "observe", "capture"]
+            };
+            assert_eq!(events.borrow().as_slice(), expected_events);
+            drop((workflow, store));
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    /// Actual installed receiver body with a declared protocol peer, live input
+    /// guard/health owner and normal finalization. This is not native authority.
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn fresh_receiver_fixture<E: crate::LLMEngine>(
+        store: Arc<Store>,
+        writer: &crate::conversation::SelectedAdmission,
+        pin: &crate::workflow::resident_supervisor::writer_request::RegionalPin,
+        preferences: crate::storage::sync::selected::RequestPreferences,
+        engine: &mut E,
+    ) -> Result<()> {
+        let events = Rc::new(RefCell::new(vec![]));
+        let backend =
+            super::super::selected_backend::RefusingBackend::with_resident_releases(vec![]);
+        let mut workflow = Workflow::with_device(Box::new(backend), false);
+        let (socket, _receiver) = UnixDatagram::pair()?;
+        workflow.enable_service_health(ServiceHealth::fixture(socket))?;
+        workflow.configure_resident_source(InstalledReaderSelection::fixture(), store)?;
+        workflow.resident_source.as_mut().unwrap().factory = Box::new(OwnedFactory {
+            source: Some((pin.request().document, pin.request().page)),
+            events: events.clone(),
+            mode: "reconnect-source-handoff",
+            delay: Duration::ZERO,
+        });
+        let started = preferences.regional_cutoff(60)? - Duration::from_secs(60);
+        let result = super::super::selected_resident_reader::receive_fresh_request(
+            &mut workflow,
+            writer,
+            released(started),
+            pin,
+            preferences,
+            engine,
+            None,
+            "fixture-model",
+        );
+        assert!(!workflow.runtime_failed());
+        let owner = workflow.resident_source.as_ref().unwrap();
+        assert!(
+            owner.input.is_none() && owner.deadline.is_none(),
+            "normal Workflow finalization retired source/input guard"
+        );
+        assert_eq!(
+            &*events.borrow(),
+            &["activate", "spawn", "observe", "capture"]
+        );
+        assert!(
+            !writer
+                .writer_store()
+                .writer_active
+                .load(std::sync::atomic::Ordering::Acquire),
+            "original Writer owner released only after finalization"
+        );
+        result
+    }
+
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
+    pub(crate) fn assert_selected_policy_boundaries(mut verify: impl FnMut(bool) -> Result<()>) {
+        let expected: [&[&str]; 4] = [
+            &[],
+            &[],
+            &["activate", "spawn"],
+            &["activate", "spawn", "observe"],
+        ];
+        for (boundary, events_expected) in expected.into_iter().enumerate() {
+            verify(false).unwrap();
+            let (mut workflow, store, base, events, _notify) =
+                workflow("reconnect-source-handoff", vec![], Duration::ZERO);
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            let result = match boundary {
+                0 => owner.activate_at_startup_with_input(
+                    health,
+                    Some(Instant::now() + Duration::from_secs(10)),
+                    || Ok(quiet_guard()),
+                    || verify(true),
+                ),
+                1 => owner.begin_with_check(released(Instant::now()), health, || verify(true)),
+                _ => {
+                    owner
+                        .begin_with_check(released(Instant::now()), health, || verify(false))
+                        .unwrap();
+                    owner
+                        .acquire_with_check(health, |observed| {
+                            verify((boundary == 3) == observed.is_some())
+                        })
+                        .map(|_| ())
+                }
+            };
+            assert!(result.is_err(), "policy boundary {boundary} accepted");
+            assert_eq!(
+                &*events.borrow(),
+                events_expected,
+                "policy boundary {boundary}"
+            );
+            if boundary > 0 {
+                crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                    .unwrap();
+            }
+            drop((workflow, store));
+            std::fs::remove_dir_all(base).unwrap();
+        }
+        verify(false).unwrap();
     }
     struct Provider {
         calls: Rc<Cell<usize>>,
@@ -1403,6 +3165,100 @@ mod tests {
             })
         }
     }
+    #[cfg(feature = "installed-resident-output")]
+    mod installed_reader_memory;
+    #[cfg(feature = "installed-resident-output")]
+    mod installed_writer_memory;
+    #[cfg(feature = "installed-resident-output")]
+    mod shared_source_submission;
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_slot_read_failure_preserves_each_enabled_corner_action() {
+        let releases = vec![released(Instant::now()), released(Instant::now())];
+        let mode = "reconnect-source-handoff";
+        let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
+        let fixture = Fixture::new();
+        let runtime = fixture
+            .start_with_store(store.clone(), mode, Duration::from_secs(5))
+            .unwrap();
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: fixture,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            refinement_slot: None,
+            writer_slot_fault: true,
+            writer_slot: None,
+        }));
+        for reader_enabled in [false, true] {
+            let config = serde_json::from_value(serde_json::json!({
+                "product_settings": {"reader_enabled": reader_enabled, "writer_enabled": true}
+            }))
+            .unwrap();
+            assert_eq!(
+                workflow.wait_for_idle_batch(None, Some(&config)).unwrap(),
+                reader_enabled
+            );
+        }
+        assert_eq!(
+            &*events.borrow(),
+            &["writer slot unavailable", "writer slot unavailable"]
+        );
+        events.borrow_mut().push("current-target-writer-queued");
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(workflow
+            .selected_resident_conversation(&source, true)
+            .unwrap()
+            .is_none());
+        assert!(events.borrow().contains(&"current-target-writer-queued"));
+        workflow.finish_request().unwrap();
+        drop((source, workflow, store));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_only_can_capture_an_unqueued_corner_then_accepts_blank_start() {
+        let releases = vec![
+            released(Instant::now()),
+            ReleasedReaderInput {
+                gesture: ResidentGesture::BlankStart,
+                ..released(Instant::now())
+            },
+        ];
+        let (mut workflow, store, base, _events, _notify) =
+            workflow("reconnect-source-handoff", releases, Duration::ZERO);
+        workflow.resident_source.as_mut().unwrap().selection =
+            InstalledReaderSelection::fixture_with_installed_output();
+        let config = serde_json::from_value(serde_json::json!({
+            "product_settings": { "reader_enabled": false, "writer_enabled": true }
+        }))
+        .unwrap();
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(workflow
+            .selected_resident_conversation(&source, true)
+            .unwrap()
+            .is_none());
+        workflow.finish_request().unwrap();
+
+        assert!(workflow.wait_for_idle_batch(None, Some(&config)).unwrap());
+        let source = workflow.acquire_reader_evidence().unwrap();
+        assert!(matches!(
+            workflow
+                .selected_resident_conversation(&source, true)
+                .unwrap(),
+            Some(super::super::resident_output::SelectedConversationRequest::BlankStart(None))
+        ));
+        workflow.finish_request().unwrap();
+        drop((source, workflow, store));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn selected_workflow_two_requests_reuse_actual_peer_and_deliver_only_stored_provider_images() {
         let (workflow, store, base, events, _notify) = workflow(
@@ -1481,8 +3337,39 @@ mod tests {
     }
     #[derive(Default)]
     struct RecognitionProbe {
-        conversation: Option<ConversationId>,
+        conversation: Rc<Cell<Option<ConversationId>>>,
         confirmed_source: bool,
+        refuse_new_reader_text: bool,
+        #[cfg(feature = "installed-resident-output")]
+        refuse_writer_text: bool,
+        successor: Option<SuccessorProbe>,
+        #[cfg(feature = "installed-resident-output")]
+        insertion_source: Option<ConversationId>,
+        #[cfg(feature = "installed-resident-output")]
+        rendered_text: Option<Rc<RefCell<Vec<String>>>>,
+        #[cfg(feature = "installed-resident-output")]
+        book_edit_on_navigation: Option<PathBuf>,
+        #[cfg(feature = "installed-resident-output")]
+        early_source: Option<(ReaderFacts, Rc<RefCell<Option<String>>>)>,
+    }
+
+    struct SuccessorProbe {
+        position: PathBuf,
+        interrupt_restore: bool,
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    struct RecordedOutput(Rc<RefCell<Vec<String>>>);
+
+    #[cfg(feature = "installed-resident-output")]
+    impl ResidentRenderer for RecordedOutput {
+        fn render(&mut self, text: &str, lease: &mut DevelopmentTargetLease<'_>) -> Result<()> {
+            lease.step(|pulse| {
+                pulse()?;
+                self.0.borrow_mut().push(text.to_owned());
+                pulse()
+            })
+        }
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -1614,6 +3501,7 @@ mod tests {
             &mut continuation,
             &context,
             "Why again?",
+            None,
             &crate::config::Personalization::default()
                 .snapshot()
                 .unwrap(),
@@ -1647,6 +3535,87 @@ mod tests {
     }
 
     impl ResidentOutputBackend for RecognitionProbe {
+        #[cfg(feature = "installed-resident-output")]
+        fn opens_submission_page(&self) -> bool {
+            self.early_source.is_some()
+        }
+
+        #[cfg(feature = "installed-resident-output")]
+        fn bind_opened_page(
+            &mut self,
+            ledger: &Ledger,
+            conversation: ConversationId,
+            target: &ReaderFacts,
+        ) -> Result<()> {
+            use crate::conversation::{
+                BindingAcquisition, BindingReceipt, ExpectedHeads, SourceObservation,
+            };
+            let (source, _) = self
+                .early_source
+                .as_ref()
+                .context("fixture source absent")?;
+            let stored = |uuid: Uuid| ConversationId::from_bytes(*uuid.as_bytes());
+            let operation = ConversationId::new_v4();
+            ledger.bind(
+                operation,
+                ledger.expected(Namespace::Conversation, conversation)?,
+                ExpectedHeads::default(),
+                BindingReceipt {
+                    operation,
+                    conversation,
+                    request_fingerprint: "open-before-model-fixture".into(),
+                    adapter_fingerprint: crate::storage::digest(b"adapter"),
+                    source: SourceObservation {
+                        document: stored(source.page().document),
+                        page: stored(source.page().page),
+                        session: "open-before-model-fixture".into(),
+                        visit: operation.to_string(),
+                        content_revision: None,
+                        order_revision: None,
+                        capability_revision: crate::storage::digest(b"profile"),
+                        evidence_procedure:
+                            crate::workflow::resident_output::development::UNIFIED_BINDING_PROCEDURE
+                                .into(),
+                    },
+                    intended_target: Some(stored(target.page().page)),
+                    observed_document: stored(target.page().document),
+                    observed_page: stored(target.page().page),
+                    expected_order: source.order().iter().copied().map(stored).collect(),
+                    observed_order: target.order().iter().copied().map(stored).collect(),
+                    persisted_revision: "fixture-scene".into(),
+                    observed_ms: 3,
+                    evidence_origin: "installed-native-guarded-v1".into(),
+                    acquisition: BindingAcquisition::Inserted,
+                },
+            )?;
+            Ok(())
+        }
+
+        fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
+            #[cfg(feature = "installed-resident-output")]
+            if matches!(
+                text,
+                ResidentOutputText::Plain(_) | ResidentOutputText::WriterSourceDraft(_)
+            ) {
+                return Ok(!self.refuse_writer_text
+                    && crate::workflow::resident_output::development::fits_test_keyboard(
+                        text, new_page,
+                    ));
+            }
+            #[cfg(feature = "installed-resident-output")]
+            if self.early_source.is_some() {
+                return Ok(true);
+            }
+            assert!(
+                new_page
+                    && matches!(
+                        text,
+                        ResidentOutputText::Reader { .. } | ResidentOutputText::ReaderQuestion(_)
+                    )
+            );
+            Ok(!self.refuse_new_reader_text)
+        }
+
         fn admit(
             &mut self,
             _: &RuntimeIdentity,
@@ -1661,13 +3630,35 @@ mod tests {
             _: &Ledger,
             conversation: ConversationId,
             _: &RuntimeIdentity,
-            _: &ReaderFacts,
-            _: &HistoricalCapture,
+            _facts: &ReaderFacts,
+            _pixels: &[u8],
             _: bool,
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<PageUse> {
-            assert!(self.conversation.replace(conversation).is_none());
+            #[cfg(feature = "installed-resident-output")]
+            if let Some((source, captured)) = &self.early_source {
+                self.conversation.set(Some(conversation));
+                if source == _facts {
+                    *captured.borrow_mut() = Some(crate::storage::digest(_pixels));
+                    return Ok(PageUse::ConfirmedNonBuddy);
+                }
+                return Ok(PageUse::RelevantBuddy);
+            }
+            let previous = self.conversation.replace(Some(conversation));
+            assert!(
+                previous.is_none() || (self.successor.is_some() && previous == Some(conversation))
+            );
+            #[cfg(feature = "installed-resident-output")]
+            if self.insertion_source.is_none()
+                && self.rendered_text.is_some()
+                && self
+                    .successor
+                    .as_ref()
+                    .is_none_or(|probe| probe.position.exists())
+            {
+                return Ok(PageUse::RelevantBuddy);
+            }
             Ok(if self.confirmed_source {
                 PageUse::ConfirmedNonBuddy
             } else {
@@ -1688,13 +3679,35 @@ mod tests {
 
         fn navigate(
             &mut self,
-            _: RequestInput,
-            _: LogicalDirection,
+            input: RequestInput,
+            direction: LogicalDirection,
             _: &RuntimeIdentity,
             _: Instant,
-            _: &mut dyn FnMut() -> Result<()>,
+            progress: &mut dyn FnMut() -> Result<()>,
         ) -> Result<RequestInput> {
-            panic!("unexpected navigation");
+            let probe = self.successor.as_ref().expect("unexpected navigation");
+            progress()?;
+            match direction {
+                LogicalDirection::Next => {
+                    assert!(!probe.position.exists());
+                    std::fs::write(&probe.position, [])?;
+                    #[cfg(feature = "installed-resident-output")]
+                    if let Some(book) = &self.book_edit_on_navigation {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(book)?
+                            .write_all(b"fixture book changed during navigation")?;
+                    }
+                }
+                LogicalDirection::Previous => {
+                    assert!(probe.position.exists());
+                    anyhow::ensure!(!probe.interrupt_restore, "fixture navigation interrupted");
+                    std::fs::remove_file(&probe.position)?;
+                }
+            }
+            progress()?;
+            Ok(input)
         }
 
         fn renderer(
@@ -1702,12 +3715,105 @@ mod tests {
             _: &Ledger,
             _: ConversationId,
             _: &RuntimeIdentity,
-            _: &ReaderFacts,
-            _: bool,
+            _target: &ReaderFacts,
+            _newly_created: bool,
             _: Instant,
             _: &mut dyn FnMut() -> Result<()>,
         ) -> Result<Box<dyn ResidentRenderer + '_>> {
+            #[cfg(feature = "installed-resident-output")]
+            if let Some(preview) = &self.rendered_text {
+                if let Some(source) = self.insertion_source {
+                    assert!(_newly_created);
+                    assert_ne!(_target.page().page.as_bytes(), source.as_bytes());
+                }
+                return Ok(Box::new(RecordedOutput(preview.clone())));
+            }
             panic!("unexpected renderer request");
+        }
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    #[test]
+    fn writer_places_an_exact_fit_on_a_relevant_page_and_reports_refusal_before_insertion() {
+        use crate::workflow::{
+            resident_output::{
+                development::fits_test_keyboard, format_exchange, ResidentOutputText,
+            },
+            selected_backend::RefusingBackend,
+        };
+
+        let question = "Make a note from this page.";
+        let answer = format!(
+            "Note\n\n{}",
+            "a".repeat(512 - format_exchange(question, "Note\n\n").len())
+        );
+        assert!(fits_test_keyboard(ResidentOutputText::Plain(&answer), true));
+        let draft = format_exchange(question, &answer);
+        assert_eq!(draft.len(), 512);
+        for role in [
+            PageUse::RelevantBuddy,
+            PageUse::ConfirmedNonBuddy,
+            PageUse::Unresolved,
+        ] {
+            let (mut workflow, store, base, events, _notify) = workflow(
+                "reconnect-source-handoff-current-rejected",
+                vec![],
+                Duration::ZERO,
+            );
+            let owner = workflow.resident_source.as_mut().unwrap();
+            let health = workflow.service_health.as_mut().unwrap();
+            owner.begin(released(Instant::now()), health).unwrap();
+            owner.acquire(health).unwrap();
+            owner.deliver(health).unwrap();
+            let runtime = owner.session.as_ref().unwrap().identity();
+            owner.selection = InstalledReaderSelection::fixture_for_output(
+                &base.join("output-profile"),
+                &runtime,
+            )
+            .unwrap();
+            let ledger = Ledger::new(store.clone());
+            let conversation = ConversationId::new_v4();
+            ledger
+                .create(conversation, ConversationId::new_v4(), 1)
+                .unwrap();
+            let written = Rc::new(RefCell::new(Vec::new()));
+            let probe = RecognitionProbe {
+                confirmed_source: role == PageUse::ConfirmedNonBuddy,
+                rendered_text: (role == PageUse::RelevantBuddy).then(|| written.clone()),
+                ..RecognitionProbe::default()
+            };
+            workflow.device = Box::new(
+                RefusingBackend::with_resident_releases(vec![]).with_test_output(Box::new(probe)),
+            );
+
+            let result = workflow.place_resident_writer_draft(
+                &ledger,
+                conversation,
+                ResidentOutputText::Plain(&draft),
+                None,
+            );
+            match role {
+                PageUse::RelevantBuddy => {
+                    result.unwrap();
+                    assert_eq!(written.borrow().as_slice(), std::slice::from_ref(&draft));
+                }
+                PageUse::ConfirmedNonBuddy => {
+                    assert_eq!(
+                        result.unwrap_err().to_string(),
+                        "Writer draft saved. Page output is unavailable."
+                    );
+                }
+                _ => assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("placement is unresolved")),
+            }
+            assert!(!events.borrow().contains(&"insert"));
+            assert!(resident_client::attempts(&store).unwrap().is_empty());
+            drop(workflow);
+            drop(ledger);
+            drop(store);
+            std::fs::remove_dir_all(base).unwrap();
         }
     }
 
@@ -1717,23 +3823,47 @@ mod tests {
         use crate::workflow::selected_backend::RefusingBackend;
         use remarkable_open_sdk::native_adapter::Rejection;
 
-        for (mode, reply, outcome, reason) in [
+        for (mode, reply, outcome, reason, successor) in [
             (
                 "reconnect-source-handoff-current-rejected",
-                Reply::Rejected(Rejection::ExecutorBeforeMutation),
+                Some(Reply::Rejected(Rejection::ExecutorBeforeMutation)),
                 Outcome::Failed,
                 AttemptReason::NoSuccessor,
+                None,
             ),
             (
                 "reconnect-source-handoff-current-indeterminate",
-                Reply::Indeterminate,
+                Some(Reply::Indeterminate),
                 Outcome::ReconcileRequired,
                 AttemptReason::DeviceUncertain,
+                None,
+            ),
+            (
+                "reconnect-source-handoff-current-rejected",
+                None,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+                None,
+            ),
+            (
+                "reconnect-source-handoff-text-refusal",
+                None,
+                Outcome::Failed,
+                AttemptReason::NativeOutputUnavailable,
+                Some(false),
+            ),
+            (
+                "reconnect-source-handoff-text-refusal",
+                None,
+                Outcome::ReconcileRequired,
+                AttemptReason::DeviceUncertain,
+                Some(true),
             ),
         ] {
             let (mut workflow, store, base, events, _notify) =
                 workflow(mode, vec![], Duration::ZERO);
             let fixture = Fixture::new();
+            let position = fixture.successor_position();
             let runtime = fixture
                 .start_with_store(store.clone(), mode, Duration::from_secs(5))
                 .unwrap();
@@ -1748,11 +3878,24 @@ mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             let source = RecognitionProbe {
                 confirmed_source: true,
+                refuse_new_reader_text: reply.is_none(),
+                successor: successor.map(|interrupt_restore| SuccessorProbe {
+                    position: position.clone(),
+                    interrupt_restore,
+                }),
                 ..RecognitionProbe::default()
             };
+            let conversation = source.conversation.clone();
             workflow.device = Box::new(
                 RefusingBackend::with_resident_releases(vec![released(Instant::now())])
                     .with_test_output(Box::new(source)),
@@ -1769,7 +3912,12 @@ mod tests {
             let ledger = Ledger::new(store.clone());
             let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
             let result = reader.run_iteration();
-            if reply == Reply::Indeterminate {
+            if successor == Some(true) {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("navigation interrupted"));
+            } else if reply == Some(Reply::Indeterminate) {
                 assert!(result.unwrap_err().to_string().contains("Indeterminate"));
             } else {
                 result.unwrap();
@@ -1777,12 +3925,30 @@ mod tests {
             assert_eq!(calls.get(), 2);
             assert_eq!(
                 events.borrow().iter().filter(|e| **e == "insert").count(),
-                1
+                usize::from(reply.is_some())
             );
             let attempts = resident_client::attempts(&store).unwrap();
-            assert_eq!(attempts.len(), 1);
-            assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
-            let records = ledger.inspect(attempts[0].conversation, false).unwrap();
+            let conversation = conversation.get().unwrap();
+            if let Some(reply) = reply {
+                assert_eq!(attempts.len(), 1);
+                assert_eq!(attempts[0].conversation, conversation);
+                assert_eq!(attempts[0].reply.as_ref(), Some(&reply));
+            } else {
+                assert!(attempts.is_empty());
+                assert!(!store
+                    .paths
+                    .data
+                    .join("native-insertion-attempts-v1.json")
+                    .exists());
+            }
+            let records = ledger.inspect(conversation, false).unwrap();
+            if let Some(interrupted) = successor {
+                assert_eq!(position.exists(), interrupted);
+                assert!(records.iter().any(|record| matches!(
+                    record,
+                    Record::OutcomeFact(fact) if fact.reason == AttemptReason::OutputPending
+                )));
+            }
             let answer = records
                 .iter()
                 .find_map(|record| match record {
@@ -1930,7 +4096,7 @@ mod tests {
                     question: "What is the answer to this?",
                     answer: "4",
                     center: crate::analysis::SelectionCenter::from_pixels(0.0, 0.0, 1, 1).unwrap(),
-                    subject: None,
+                    about: None,
                 }
             };
 
@@ -1949,13 +4115,15 @@ mod tests {
                 )
                 .unwrap();
 
+            // Acquisition retired its socket, so output must reconnect before
+            // observing the unchanged source on the same owned peer.
             if case == Prior::ExactEarlierBoot {
                 assert_eq!(outcome, ResidentOutputOutcome::InsertionRefused);
                 assert_eq!(
                     &*events.borrow(),
                     &["reconnect", "observe", "capture", "observe", "insert"]
                 );
-                assert_eq!(backend.conversation, Some(next));
+                assert_eq!(backend.conversation.get(), Some(next));
                 assert_eq!(effects, 1);
                 let old: serde_json::Value =
                     serde_json::from_slice(&original_journal.unwrap()).unwrap();
@@ -1982,11 +4150,11 @@ mod tests {
                 assert_eq!(effects, 0, "{case:?}");
                 if let Some(bytes) = original_journal {
                     assert_eq!(&*events.borrow(), &["reconnect", "observe"], "{case:?}");
-                    assert_eq!(backend.conversation, None);
+                    assert_eq!(backend.conversation.get(), None);
                     assert_eq!(std::fs::read(&journal).unwrap(), bytes);
                 } else {
                     assert_eq!(&*events.borrow(), &["reconnect", "observe", "capture"]);
-                    assert_eq!(backend.conversation, Some(next));
+                    assert_eq!(backend.conversation.get(), Some(next));
                     assert!(!journal.exists());
                 }
             }
@@ -2078,6 +4246,13 @@ mod tests {
                 _fixture: fixture,
                 events: events.clone(),
                 delivery_fault: false,
+                observe_file_change: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot_fault: false,
+                #[cfg(feature = "installed-resident-output")]
+                refinement_slot: None,
+                #[cfg(feature = "installed-resident-output")]
+                writer_slot: None,
             }));
             owner.reconnect = true;
             let calls = Rc::new(Cell::new(0));
@@ -2311,14 +4486,14 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
-    fn selected_workflow_canceled_request_then_new_release_reconnects_same_child_without_reactivation(
-    ) {
+    fn selected_service_finalization_allows_new_release_after_clean_cancellation() {
         use crate::device::interaction::Interaction;
         let mut polls = (0..5).map(|_| Ok(vec![])).collect::<Vec<_>>();
         polls.push(Ok(vec![Interaction::Invalidated]));
         polls.extend((0..4096).map(|_| Ok(vec![])));
         let first = ReleasedReaderInput {
             released_at: Instant::now(),
+            released_boot_second: Some(120),
             gesture: ResidentGesture::Reader,
             input: RequestInput::scripted(polls),
         };
@@ -2340,7 +4515,7 @@ mod tests {
         assert!(workflow.acquire_reader_evidence().is_err());
         assert!(workflow.input_failed());
         assert!(!workflow.runtime_failed());
-        assert!(workflow.finish_request().is_err());
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         workflow.wait_for_reader().unwrap();
         let acquisition = workflow.acquire_reader_evidence().unwrap();
         let ledger = Ledger::new(store.clone());
@@ -2349,7 +4524,7 @@ mod tests {
         let images = attempt.images(&ledger).unwrap();
         assert_eq!(images.len(), 4);
         workflow.deliver_reader_acquisition().unwrap();
-        workflow.finish_request().unwrap();
+        crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow).unwrap();
         assert_eq!(
             workflow
                 .resident_source
@@ -2380,6 +4555,28 @@ mod tests {
         drop(ledger);
         drop(workflow);
         drop(store);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn selected_service_finalization_stops_when_input_is_lost_during_cleanup() {
+        let (mut workflow, store, base, _, _notify) = workflow(
+            "reconnect-source-handoff",
+            vec![released(Instant::now())],
+            Duration::ZERO,
+        );
+        workflow.wait_for_reader().unwrap();
+        assert!(!workflow.runtime_failed());
+        workflow.resident_source.as_mut().unwrap().input = Some(RequestInput::scripted(vec![Err(
+            anyhow::anyhow!("fixture input lost"),
+        )]));
+        let error =
+            crate::workflow::selected_resident_reader::finish_selected_request(&mut workflow)
+                .unwrap_err();
+        assert!(!error.is::<FinalizedCancellation>());
+        assert!(workflow.runtime_failed());
+        assert!(workflow.resident_source.as_ref().unwrap().input.is_none());
+        drop((workflow, store));
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]

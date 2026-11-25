@@ -103,21 +103,31 @@ fn with_stored_feedback<R>(
     // siblings retained because another head matched the predicate.
     let mut seen = BTreeSet::new();
     for envelope in &snapshot {
+        // Schema 2 is shared by existing-page bindings and selected intent
+        // records. The tag screens out the latter before full domain validation.
+        let supported_schema = matches!(
+            envelope.domain_schema_version,
+            1 | super::marked_question::SCHEMA | super::target::SCHEMA
+        ) || (envelope.domain_schema_version
+            == super::EXISTING_BINDING_SCHEMA
+            && envelope.payload["record_kind"].as_str() == Some("binding"));
         ensure!(
-            envelope.kind == Kind::Value && envelope.domain_schema_version == 1,
+            envelope.kind == Kind::Value && supported_schema,
             "unsupported stored feedback history"
         );
         ensure!(
             seen.insert((envelope.namespace, envelope.record_id)),
             "conflicted stored feedback history"
         );
-        let owner = match Ledger::decode(envelope)
-            .map_err(|_| anyhow!("invalid stored feedback record"))?
-        {
+        let record =
+            Ledger::decode(envelope).map_err(|_| anyhow!("invalid stored feedback record"))?;
+        let owner = match record {
             Record::Root(root) => root.id,
             Record::Turn(turn) => turn.conversation,
             Record::OutcomeFact(fact) => fact.conversation,
             Record::RequestEvidence(evidence) => evidence.conversation,
+            Record::TargetUse(used) => used.conversation,
+            Record::TargetState(state) => state.conversation,
             Record::Binding(binding) => binding.conversation,
             Record::Receipt(receipt) => receipt.acknowledgment.conversation,
             _ => bail!("unsupported stored feedback record"),
@@ -126,6 +136,13 @@ fn with_stored_feedback<R>(
     }
     let records = Ledger::inspect_snapshot(conversation, false, &snapshot)
         .map_err(|_| anyhow!("invalid stored feedback chronology"))?;
+    let mut marked_budget = crate::storage::captured::ReadBudget::default();
+    for envelope in snapshot
+        .iter()
+        .filter(|e| e.domain_schema_version == super::marked_question::SCHEMA)
+    {
+        ledger.validate_marked_question(envelope, conversation, &mut marked_budget)?;
+    }
     let selected = records
         .iter()
         .find_map(|record| match record {

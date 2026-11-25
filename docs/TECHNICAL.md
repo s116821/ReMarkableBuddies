@@ -30,7 +30,30 @@ src/
     └── renderer.rs      # Content rendering (placeholder)
 ```
 
-## Current Workflow (v0.1)
+## Marked questions and erasure
+
+The ordinary installed Reader observes a handwritten `?` in the same
+recognition pass that reads the associated fragment. A bounded region in the
+captured overview, its exact User interpretation, and the observed source
+identity are saved together in a marked-question receipt. Independent
+transcription and web-intent agreement still govern answering. When no answer
+can be produced, guarded resident placement can submit the saved User text by
+itself to the Buddy page. Its result remains submitted and unverified until
+durable tablet readback is available.
+
+The mark grants permission for question-only erasure after capture, without a
+separate user confirmation. Printed punctuation leaves ink intact. The current
+installed SDK lacks a bounded ink mutation with matching viewport, footprint
+and readback, so the standard Reader leaves source ink intact. The simulator
+covers modeled erasure and bound presentation. Physical source-ink preservation,
+durable Buddy readback and representative live handwriting recognition still
+require qualification. See the
+[active OpenSpec change](https://github.com/s116821/ReMarkableBuddiesDocs/pull/206).
+
+## Historical workflow (v0.1)
+
+This section records the earlier v0.1 design. See the [current Reader workflow](../README.md#how-it-works)
+for installed behavior.
 
 1. User outlines content (any closed shape)
 2. User writes question nearby
@@ -43,7 +66,7 @@ src/
 9. **Render Q&A** on new page with matching symbol
 10. **Navigate back** to original page to preserve reading context
 
-### Why Single LLM Call?
+### Why v0.1 used a single LLM call
 
 **Design Decision**: One vision API call handles everything (detection + OCR + answering) because:
 - **Simpler**: Less code, fewer edge cases
@@ -87,7 +110,7 @@ Reads `/etc/hwrevision` to determine:
 - Maps characters to key events
 - Supports Ctrl commands for text formatting
 
-## Implemented Features (v0.1)
+## Historical implementation notes (v0.1)
 
 ### ✅ Page Management System
 
@@ -98,7 +121,7 @@ Reads `/etc/hwrevision` to determine:
 - Methods: `create_page_right()`, `next_page()`, `previous_page()`
 - **File**: `src/workflow/page_manager.rs`
 
-### ✅ Outline Preservation
+### Outline preservation
 
 **Implementation**: LLM returns separate bounding boxes
 - `QUESTION_BOX`: Location of question text (erased)
@@ -106,7 +129,7 @@ Reads `/etc/hwrevision` to determine:
 - Only the question region is erased, outline remains visible
 - **File**: `src/workflow/orchestrator.rs` (parse_bounding_box)
 
-### ✅ Symbol Pool Implementation
+### Symbol pool
 
 **Implementation**: Persistent symbol cycling
 - Pool of 10 symbols: ①②③④⑤⑥⑦⑧⑨⑩
@@ -115,7 +138,7 @@ Reads `/etc/hwrevision` to determine:
 - Automatically loads on startup
 - **File**: `src/workflow/symbol_pool.rs`
 
-### ✅ Question Erasure
+### Bounding-box erasure
 
 **Implementation**: Uses erase_region() with bounding box
 - Erases only the question text region
@@ -123,7 +146,7 @@ Reads `/etc/hwrevision` to determine:
 - Falls back gracefully if no bounding box provided
 - **File**: `src/workflow/orchestrator.rs` (render_answer)
 
-### ✅ Dual Symbol Placement
+### Dual symbol placement
 
 **Implementation**: Symbol appears on both pages
 - Drawn on original page at question location
@@ -131,11 +154,13 @@ Reads `/etc/hwrevision` to determine:
 - Same symbol used for linking
 - **File**: `src/workflow/orchestrator.rs` (render_answer)
 
-## Remaining TODOs
+## Historical follow-ups (v0.1)
+
+These notes record the proposals for the earlier workflow.
 
 ### 🔧 Symbol Rendering Enhancement
 
-**Current**: Simple geometric circle
+**v0.1 approach**: Simple geometric circle
 **Goal**: Render actual ①②③④⑤ glyphs
 
 **Options to explore**:
@@ -147,7 +172,7 @@ Reads `/etc/hwrevision` to determine:
 
 ### 🔧 Improved Bounding Box Accuracy
 
-**Current**: LLM provides approximate boxes
+**v0.1 approach**: LLM provides approximate boxes
 **Goal**: More precise regions for better erasure
 
 **Approaches**:
@@ -157,7 +182,7 @@ Reads `/etc/hwrevision` to determine:
 
 ### 🔧 White Erasure Testing
 
-**Current**: Uses pen drawing for erasure
+**v0.1 approach**: Used pen drawing for erasure
 **Goal**: Ensure it actually erases on device
 
 **Testing Needed**:
@@ -238,7 +263,7 @@ separate from emulator/package integration. Canonical requirements live in Docs.
 - Pen drawing: Depends on complexity
 - Future: Local CV could reduce LLM calls
 
-## Known Limitations (v0.1)
+## Historical limitations (v0.1)
 
 1. Single outline-question pair per trigger
 2. No page creation (renders to current page)

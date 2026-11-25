@@ -1,4 +1,5 @@
 //! Deliberate host Writer/export orchestration. No device or native admission.
+use crate::note_export::dispatch::{unresolved, LegacyDestination, OwnedDestination};
 use crate::{
     config::PersonalizationSnapshot,
     conversation::{Ledger, Outcome, WriterExportInput, WriterFlowAdmission},
@@ -16,6 +17,12 @@ use tokio::sync::watch;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
+    GenerateTargetAndExport {
+        outer_operation: Uuid,
+        generation: writer::target::Request,
+        correlation: Uuid,
+        effect_operation: Uuid,
+    },
     GenerateAndExport {
         outer_operation: Uuid,
         generation: writer::Request,
@@ -48,8 +55,19 @@ impl Request {
             _ => None,
         }
     }
+    pub fn requires_model(&self) -> bool {
+        self.model().is_some() || matches!(self, Self::GenerateTargetAndExport { .. })
+    }
+    pub(crate) fn target(&self) -> Option<&writer::target::Request> {
+        if let Self::GenerateTargetAndExport { generation, .. } = self {
+            Some(generation)
+        } else {
+            None
+        }
+    }
     pub fn conversation(&self) -> Uuid {
         match self {
+            Self::GenerateTargetAndExport { generation, .. } => generation.identities().0,
             Self::GenerateAndExport { generation, .. } => generation.conversation(),
             Self::RefineAndExport { refinement, .. } => refinement.conversation(),
             Self::ExportDraft { conversation, .. } | Self::ReconcileExport { conversation, .. } => {
@@ -59,6 +77,12 @@ impl Request {
     }
     pub fn identities(&self) -> (Uuid, Uuid, Uuid) {
         match self {
+            Self::GenerateTargetAndExport {
+                outer_operation,
+                correlation,
+                effect_operation,
+                ..
+            } => (*outer_operation, *correlation, *effect_operation),
             Self::GenerateAndExport {
                 outer_operation,
                 correlation,
@@ -82,6 +106,9 @@ impl Request {
     }
     fn draft(&self) -> Uuid {
         match self {
+            Self::GenerateTargetAndExport { generation, .. } => {
+                writer::stage(generation.identities().1, "draft")
+            }
             Self::ExportDraft { draft, .. } => *draft,
             _ => self.model().map_or(Uuid::nil(), |request| {
                 writer::stage(request.operation(), "draft")
@@ -90,6 +117,7 @@ impl Request {
     }
     pub fn preflight(&self) -> Result<()> {
         match self {
+            Self::GenerateTargetAndExport { generation, .. } => generation.validate()?,
             Self::GenerateAndExport { generation, .. } => ensure!(
                 matches!(generation, writer::Request::Generate { .. }),
                 "generation variant required"
@@ -122,6 +150,9 @@ impl Request {
         ];
         if let Some(model) = self.model() {
             ids.push(model.operation());
+        }
+        if let Some(target) = self.target() {
+            ids.push(target.identities().1);
         }
         ensure!(ids.iter().all(|id| !id.is_nil()), "nil flow identity");
         let mut distinct = ids.clone();
@@ -234,9 +265,131 @@ pub(crate) fn run_with_events<E: LLMEngine>(
     canceled: watch::Receiver<bool>,
     events: &mut Events<'_>,
 ) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        request,
+        preference,
+        canceled,
+        events,
+    )
+}
+/// Writer ownership and selection guards, using Capacities' provider-assigned identity.
+pub fn run_capacities<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &note_export::capacities::CapacitiesDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        destination,
+        request,
+        preference,
+        canceled,
+        &mut |_, _| {},
+    )
+}
+
+pub(crate) fn run_destination_with_events<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+    events: &mut Events<'_>,
+) -> Report {
+    run_with_configuration(
+        ledger,
+        engine,
+        destination,
+        request,
+        preference,
+        canceled,
+        FlowContext {
+            events,
+            regional: None,
+        },
+    )
+}
+/// Regional recognition owns its original two-stage300s window. The existing
+/// flow grant below binds the export intent; its single-pass Writer entry is
+/// never used to authorize those recognition/generation calls.
+pub fn run_regional<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl NoteDestination,
+    request: &Request,
+    config: &crate::config::Config,
+    model_profile: &str,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_configured_regional(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        request,
+        config,
+        model_profile,
+        canceled,
+    )
+}
+
+pub(crate) fn run_configured_regional<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
+    request: &Request,
+    config: &crate::config::Config,
+    model_profile: &str,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    if !config.admits_writer(true) {
+        return Report::refused(request, Failure::Unsupported);
+    }
+    let Ok(preference) = config.personalization_snapshot() else {
+        return Report::refused(request, Failure::InvalidInput);
+    };
+    run_with_configuration(
+        ledger,
+        engine,
+        destination,
+        request,
+        &preference,
+        canceled,
+        FlowContext {
+            events: &mut |_, _| {},
+            regional: Some((config, model_profile)),
+        },
+    )
+}
+struct FlowContext<'a, 'b> {
+    events: &'a mut Events<'b>,
+    regional: Option<(&'a crate::config::Config, &'a str)>,
+}
+fn run_with_configuration<E: LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
+    request: &Request,
+    preference: &PersonalizationSnapshot,
+    canceled: watch::Receiver<bool>,
+    context: FlowContext<'_, '_>,
+) -> Report {
+    let FlowContext { events, regional } = context;
+    let started = std::time::Instant::now();
     let mut result = Report::refused(request, Failure::Storage);
     if request.preflight().is_err() {
         result.failure = Some(Failure::InvalidInput);
+        return result;
+    }
+    if request.target().is_some() && regional.is_none() {
+        result.failure = Some(Failure::Unsupported);
         return result;
     }
     let Some(writer_owner) = writer::Owner::acquire(ledger.store()) else {
@@ -265,9 +418,8 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         return result;
     }
     if matches!(request, Request::ReconcileExport { .. }) {
-        let export = runtime.block_on(note_export::reconcile_with_owner(
+        let export = runtime.block_on(destination.reconcile_owned(
             ledger,
-            destination,
             request.conversation(),
             result.correlation,
             canceled,
@@ -285,13 +437,11 @@ pub(crate) fn run_with_events<E: LLMEngine>(
             return result;
         }
     };
-    match ledger.export_association(request.conversation(), result.correlation) {
-        Ok(Some(old))
-            if old.outcome != Outcome::Completed
-                && !old.attempt.as_ref().is_some_and(|a| {
-                    a.no_send && matches!(old.outcome, Outcome::Failed | Outcome::Canceled)
-                }) =>
-        {
+    match ledger.export_association(
+        request.conversation(),
+        destination.association_id(request.conversation(), result.correlation),
+    ) {
+        Ok(Some(old)) if unresolved(&old) => {
             result.status = Status::ReconcileRequired;
             return result;
         }
@@ -301,14 +451,25 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         }
         _ => {}
     }
-    let fingerprint =
-        match serde_json::to_vec(&("writer-flow-intent-v1", request, destination.backend())) {
-            Ok(value) => digest(&value),
-            Err(_) => {
-                result.failure = Some(Failure::InvalidInput);
-                return result;
-            }
-        };
+    let fingerprint = match serde_json::to_vec(&(
+        "writer-flow-intent-v1",
+        request,
+        destination.intent_binding(),
+    )) {
+        Ok(value) => digest(&value),
+        Err(_) => {
+            result.failure = Some(Failure::InvalidInput);
+            return result;
+        }
+    };
+    if request.target().is_some_and(|t| t.root() != &expected)
+        && !ledger
+            .original_writer_flow(result.outer_operation, &fingerprint)
+            .unwrap_or(false)
+    {
+        result.failure = Some(Failure::Storage);
+        return result;
+    }
     result.trace.push(Phase::BeforeAdmission);
     events(Phase::BeforeAdmission, ledger);
     if *canceled.borrow() {
@@ -342,7 +503,50 @@ pub(crate) fn run_with_events<E: LLMEngine>(
     };
     result.trace.push(Phase::AfterAdmission);
     events(Phase::AfterAdmission, ledger);
-    let selection = if let Some(model) = request.model() {
+    let selection = if let Some(target) = request.target() {
+        let (config, profile) = regional.unwrap();
+        result.trace.push(Phase::BeforeModel);
+        events(Phase::BeforeModel, ledger);
+        let mut produced = None;
+        let generated = writer::target::run_owned(
+            ledger,
+            engine,
+            &target.with_root(grant.root.clone()),
+            &mut || *canceled.borrow(),
+            writer::target::TargetRun {
+                config,
+                model_profile: profile,
+                owner: &writer_owner,
+                deadline: started + std::time::Duration::from_secs(300),
+                accepted: None,
+                installed_region: None,
+            },
+            &mut produced,
+        );
+        let status = generated.status;
+        result.draft = generated.draft;
+        result.generation = Some(generated);
+        result.trace.push(Phase::AfterModel);
+        events(Phase::AfterModel, ledger);
+        if *canceled.borrow() {
+            result.status = Status::Canceled;
+            return result;
+        }
+        if status != writer::Status::Generated {
+            result.status = if status == writer::Status::Canceled {
+                Status::Canceled
+            } else {
+                Status::GenerationFailed
+            };
+            return result;
+        }
+        let Some(selection) = produced else {
+            result.status = Status::Interrupted;
+            result.failure = Some(Failure::NoFreshSelection);
+            return result;
+        };
+        selection
+    } else if let Some(model) = request.model() {
         result.trace.push(Phase::BeforeModel);
         events(Phase::BeforeModel, ledger);
         let mut produced = None;
@@ -430,11 +634,12 @@ pub(crate) fn run_with_events<E: LLMEngine>(
         guard: None,
         observation: &mut result.observation,
         event: &mut export_event,
-        deadline: None,
+        deadline: request
+            .target()
+            .map(|_| started + std::time::Duration::from_secs(345)),
     };
-    let export = runtime.block_on(note_export::export_with_owner(
+    let export = runtime.block_on(destination.export_owned(
         ledger,
-        destination,
         &note,
         canceled,
         &export_owner,
@@ -457,5 +662,57 @@ fn export_status(status: ExportStatus) -> Status {
     }
 }
 
+/// Export owns a current-thread async runtime on its worker. Keep native
+/// observation on the input owner and wait for its answer before each effect.
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+pub(crate) fn run_guarded_draft_export(
+    ledger: &crate::conversation::Ledger,
+    destination: &impl crate::note_export::dispatch::OwnedDestination,
+    request: &crate::writer_flow::Request,
+    preference: &crate::config::PersonalizationSnapshot,
+    mut check: impl FnMut(crate::writer_flow::Phase) -> Result<()>,
+) -> crate::writer_flow::Report {
+    use crate::{
+        writer::command::NoModel,
+        writer_flow::{self, Phase},
+    };
+
+    std::thread::scope(|scope| {
+        let (calls, receive) = std::sync::mpsc::channel();
+        let (reply, responses) = std::sync::mpsc::sync_channel(0);
+        let (cancel, canceled) = tokio::sync::watch::channel(false);
+        let worker = scope.spawn(move || {
+            writer_flow::run_destination_with_events(
+                ledger,
+                &mut NoModel,
+                destination,
+                request,
+                preference,
+                canceled,
+                &mut move |phase, _| {
+                    if matches!(
+                        phase,
+                        Phase::BeforeAdmission
+                            | Phase::BeforeExportAdmission
+                            | Phase::BeforeDestinationPoll
+                            | Phase::BeforeWritePoll
+                    ) && (calls.send(phase).is_err() || responses.recv() != Ok(true))
+                    {
+                        let _ = cancel.send(true);
+                    }
+                },
+            )
+        });
+        for phase in receive {
+            if reply.send(check(phase).is_ok()).is_err() {
+                break;
+            }
+        }
+        worker.join().unwrap_or_else(|_| {
+            writer_flow::Report::refused(request, writer_flow::Failure::Storage)
+        })
+    })
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

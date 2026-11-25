@@ -72,4 +72,16 @@ cargo run --example normalize_epub_source -- DOCUMENT_UUID book.epub > normalize
 The example prints bounded JSON only after complete normalization. It does not
 install an index, persist a cache, select a conversation source or call a model.
 Use `Index::build(result.document)` and keep its returned key for local queries.
-Reader integration and broader retrieval/research acceptance remain unfinished.
+
+### Asking about a page on the tablet
+
+Use the lower-right finger hold on the source page to submit a question. An
+ordinary Reader request uses the verified page immediately left of the Buddy
+conversation, the current conversation, and relevant memory. A typed follow-up
+uses the same original page when its capture is available. A blank conversation
+without an original can answer from its current conversation and memory.
+
+Existing original-file configuration and saved transcriptions stay readable.
+An ordinary request does not extract an entire PDF or EPUB or transcribe other
+notebook pages. A way to explicitly add a whole document to a conversation will
+be specified separately.

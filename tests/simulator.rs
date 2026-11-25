@@ -322,13 +322,21 @@ fn run(name: &str) -> Run {
         "{name}: {:?}",
         run.report.assertion_failures
     );
-    for request in run
-        .report
-        .trace
-        .iter()
-        .filter(|event| event.action == "model_request")
-    {
-        assert_eq!(request.detail, "scripted texts=1 images=4");
+    let mut request_in_iteration = 0;
+    for event in &run.report.trace {
+        if event.action == "iteration" {
+            request_in_iteration = 0;
+        } else if event.action == "model_request" {
+            request_in_iteration += 1;
+            // Analysis includes the same-request handwritten-mark observation;
+            // independent transcription still receives its single prompt.
+            let expected = if request_in_iteration == 1 {
+                "scripted texts=2 images=4"
+            } else {
+                "scripted texts=1 images=4"
+            };
+            assert_eq!(event.detail, expected, "{name}");
+        }
     }
     run
 }
@@ -582,4 +590,74 @@ fn verified_navigation_omits_only_redundant_transition_waits() {
             assert_eq!(after.x_count, 0);
         }
     }
+}
+
+#[test]
+fn source_target_about_uses_the_real_reader_transaction_and_render_body() {
+    let run = execute(&load("source-target-about"), &root()).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    assert_eq!(run.report.model_calls, 2);
+    let records = run.report.target_records.as_ref().unwrap();
+    for kind in ["source-target", "target-use", "target-state"] {
+        assert_eq!(
+            records
+                .iter()
+                .filter(|e| e.payload["record_kind"] == kind)
+                .count(),
+            1,
+            "{kind}"
+        );
+    }
+    let used = records
+        .iter()
+        .find(|e| e.payload["record_kind"] == "target-use")
+        .unwrap();
+    let about = used.payload["record"]["about"].as_str().unwrap();
+    assert_eq!(used.payload["record"]["action"], "introduce");
+    let text = &run.report.pages[1].text;
+    let body = &text[text.find(about).unwrap()..];
+    assert_eq!(
+        used.payload["record"]["inline_body_sha256"],
+        remarkable_reader_buddy::storage::digest(body.as_bytes())
+    );
+    assert_eq!(body.matches("About: ").count(), 1);
+    assert!(run.report.pages[0].unchanged);
+}
+
+#[test]
+fn source_target_invalid_geometry_remains_explicitly_uncertain() {
+    let run = execute(&load("source-target-uncertain"), &root()).unwrap();
+    assert!(
+        run.report.assertion_failures.is_empty(),
+        "{:?}",
+        run.report.assertion_failures
+    );
+    let records = run.report.target_records.as_ref().unwrap();
+    let target = records
+        .iter()
+        .find(|e| e.payload["record_kind"] == "source-target")
+        .unwrap();
+    assert_eq!(
+        target.payload["record"]["candidate"]["geometry"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        target.payload["record"]["candidate"]["understanding"]["status"],
+        "uncertain"
+    );
+    let calls = run
+        .report
+        .trace
+        .iter()
+        .filter(|e| e.action == "model_request")
+        .map(|e| e.detail.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec!["scripted texts=3 images=4", "scripted texts=1 images=4"]
+    );
 }

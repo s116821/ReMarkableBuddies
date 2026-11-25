@@ -12,7 +12,7 @@ use remarkable_open_sdk::{
     native_adapter::{HistoricalCapture, ReaderFacts, RuntimeIdentity},
     navigation::LogicalDirection,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 #[cfg(all(
     feature = "development-resident-bootstrap",
     feature = "development-input-diagnostics"
@@ -43,20 +43,64 @@ pub enum ResidentOutputOutcome {
 
 pub enum SelectedConversationRequest {
     BlankStart(Option<Uuid>),
+    /// Ordinary installed receivers cannot consume fresh regional generation.
+    UnsupportedRegionalWriter,
+    WriterCurrentTarget(crate::writer::target::CurrentRequest),
     WriterRefinement {
         request: crate::writer::Request,
         require_current_draft: bool,
     },
 }
 
+impl SelectedConversationRequest {
+    pub(crate) fn installed_writer_memory(
+        &self,
+        store: &crate::storage::Store,
+        configured: Option<&Arc<dyn crate::memory::Provider>>,
+    ) -> Result<Option<Arc<dyn crate::memory::Provider>>> {
+        // Only the installed queue selects the current draft. Development plans
+        // keep their declared inputs, including when local memory is enabled.
+        let (
+            Self::WriterRefinement {
+                require_current_draft: true,
+                ..
+            },
+            Some(provider),
+        ) = (self, configured)
+        else {
+            return Ok(None);
+        };
+        provider.admit_ordinary_writer(store)?;
+        Ok(Some(Arc::clone(provider)))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ReaderAbout<'a> {
+    /// The Markdown-escaped About line from the validated source-target record.
+    PreparedLine(&'a str),
+    Subject(&'a crate::analysis::ReaderSubject),
+}
+
+#[derive(Clone, Copy)]
 pub enum ResidentOutputText<'a> {
     Plain(&'a str),
+    WriterSourceDraft(&'a str),
+    ReaderQuestion(&'a str),
     Reader {
         question: &'a str,
         answer: &'a str,
         center: crate::analysis::SelectionCenter,
-        subject: Option<&'a crate::analysis::ReaderSubject>,
+        about: Option<ReaderAbout<'a>>,
     },
+}
+
+pub(super) fn format_question(question: &str) -> String {
+    format!("Q: {question}\n")
+}
+
+pub(super) fn format_exchange(request: &str, response: impl std::fmt::Display) -> String {
+    format!("Q: {request}\n\nA: {response}\n")
 }
 
 impl ResidentOutputText<'_> {
@@ -69,12 +113,36 @@ impl ResidentOutputText<'_> {
 /// minted by ReaderFacts. No production implementation is supplied here.
 /// Implementations must use existing Ledger bindings/adoption, not a second map.
 pub trait ResidentOutputBackend {
+    #[cfg(feature = "installed-resident-output")]
+    fn opens_submission_page(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn bind_opened_page(
+        &mut self,
+        _ledger: &Ledger,
+        _conversation: Uuid,
+        _target: &ReaderFacts,
+    ) -> Result<()> {
+        anyhow::bail!("early Buddy page binding unavailable")
+    }
+
     fn selected_conversation_request(&self) -> Result<Option<SelectedConversationRequest>> {
         Ok(None)
     }
 
     fn validate_new_page_text(&self, _text: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Existing adapters retain their preliminary Writer check. The installed
+    /// backend also checks the fully formatted text before creating a page.
+    fn supports_page_text(&self, text: ResidentOutputText<'_>, new_page: bool) -> Result<bool> {
+        if let (false, ResidentOutputText::Plain(body)) = (new_page, text) {
+            self.validate_new_page_text(body)?;
+        }
+        Ok(true)
     }
 
     /// Optional diagnostics from fresh native pixels after rendering. This is
@@ -106,7 +174,7 @@ pub trait ResidentOutputBackend {
         conversation: Uuid,
         runtime: &RuntimeIdentity,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
         deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,
@@ -160,16 +228,30 @@ pub trait ResidentRenderer {
         lease: &mut DevelopmentTargetLease<'_>,
     ) -> Result<()> {
         match text {
-            ResidentOutputText::Plain(text) => self.render(text, lease),
+            ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
+                self.render(text, lease)
+            }
+            ResidentOutputText::ReaderQuestion(question) => {
+                self.render(&format_question(question), lease)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,
                 center,
-                ..
-            } => self.render(
-                &super::Workflow::compose_qa(question, answer, center),
-                lease,
-            ),
+                about,
+            } => {
+                let about = match about {
+                    Some(ReaderAbout::PreparedLine(line)) => {
+                        Some(crate::conversation::target::about_display_text(line))
+                    }
+                    _ => None,
+                };
+                let body = super::Workflow::compose_qa(question, answer, center);
+                self.render(
+                    &super::Workflow::with_source_description(body, about.as_deref()),
+                    lease,
+                )
+            }
         }
     }
 }

@@ -322,6 +322,13 @@ pub(crate) fn preflight_state(
     config: &Config,
     allow_initialization: bool,
 ) -> Result<StoreReadiness, ReportStatus> {
+    preflight_state_observed(config, allow_initialization, |_| {})
+}
+fn preflight_state_observed(
+    config: &Config,
+    allow_initialization: bool,
+    locked: impl FnOnce(&File),
+) -> Result<StoreReadiness, ReportStatus> {
     config
         .paths
         .validate()
@@ -383,11 +390,17 @@ pub(crate) fn preflight_state(
         .map_err(|_| ReportStatus::Unsupported)?;
     let handle = File::open(lock).map_err(|_| ReportStatus::Unavailable)?;
     match handle.try_lock() {
-        Ok(()) => Ok(StoreReadiness::Existing),
+        Ok(()) => {
+            locked(&handle);
+            // Close alone can retain flock through a duplicated/inherited open
+            // file description. Release this preflight before Store reacquires.
+            handle.unlock().map_err(|_| ReportStatus::Unsupported)?;
+            Ok(StoreReadiness::Existing)
+        }
         Err(std::fs::TryLockError::WouldBlock) => Err(ReportStatus::Busy),
         Err(std::fs::TryLockError::Error(_)) => Err(ReportStatus::Unsupported),
     }
-    // The preflight handle drops before normal Store reacquisition; no unleased read follows.
+    // No unleased content read follows the explicitly released preflight.
 }
 
 pub fn run(operation: Operation, input_path: &Path, config_path: Option<PathBuf>) -> Report {
@@ -566,6 +579,51 @@ pub(crate) fn store_open_status(error: &anyhow::Error) -> ReportStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn duplicated_preflight_descriptor_cannot_extend_admission_or_unlock_the_new_owner() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            Cleanup(std::env::temp_dir().join(format!("memory-preflight-dup-{}", Uuid::new_v4())));
+        let config = Config {
+            paths: storage::StorePaths {
+                data: root.0.join("data"),
+                cache: root.0.join("cache"),
+                credentials: root.0.join("credentials"),
+            },
+            ..Default::default()
+        };
+        drop(Store::prepare_notebook(config.paths.clone()).unwrap());
+        let mut inherited = None;
+        assert!(matches!(
+            preflight_state_observed(&config, true, |handle| {
+                // Same open-file description as a concurrent fork-to-exec window.
+                inherited = Some(handle.try_clone().unwrap());
+            }),
+            Ok(StoreReadiness::Existing)
+        ));
+        let admitted = match crate::reader_runtime::startup(&config) {
+            crate::reader_runtime::StartupDecision::Ordinary(Some(store)) => store,
+            crate::reader_runtime::StartupDecision::Report(report) => panic!(
+                "ready notebook reacquire refused: {}",
+                serde_json::to_value(report).unwrap()["status"]
+            ),
+            _ => panic!("ready notebook lost existing admission"),
+        };
+        drop(inherited);
+        assert!(
+            Store::open(config.paths.clone()).is_err(),
+            "closing an old duplicate cannot unlock the actual admitted owner"
+        );
+        drop(admitted);
+        drop(Store::open(config.paths).unwrap());
+    }
+
     #[test]
     fn inspect_stdin_is_strict_at_both_levels_then_reuses_key_validation() {
         let profile = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();

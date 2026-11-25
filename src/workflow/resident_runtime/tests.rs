@@ -18,8 +18,94 @@ impl Fixture {
             let mut file = create_private(&path.join(name)).unwrap();
             file.write_all(name.as_bytes()).unwrap();
         }
+        // Keep the fixture body outside argv so growth cannot exceed the
+        // production launch limit. The actual arguments still test boundaries.
+        let mut child = create_private(&path.join("resident-child.py")).unwrap();
+        child
+            .write_all(include_bytes!(
+                "../../../tests/fixtures/resident_runtime_child.py"
+            ))
+            .unwrap();
         Self(path)
     }
+    fn child_arguments(&self, mode: &str) -> Vec<String> {
+        [
+            "-S",
+            self.0.join("resident-child.py").to_str().unwrap(),
+            mode,
+            "--system",
+            "two words",
+            "",
+            "$(not-a-command); *",
+            "λ",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+    pub(crate) fn declare_source(&self, document: StoreUuid, page: StoreUuid) {
+        fs::write(
+            self.0.join("declared-source.json"),
+            serde_json::to_vec(&(document, page)).unwrap(),
+        )
+        .unwrap();
+    }
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_displayed_writer_png(&self, png: &[u8]) {
+        fs::write(self.0.join("displayed-writer.png"), png).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_edited_selection(&self) {
+        fs::write(self.0.join("edited-selection"), []).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_source_order(&self, pages: &[StoreUuid]) {
+        fs::write(
+            self.0.join("declared-source-order.json"),
+            serde_json::to_vec(pages).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn temporary_source(
+        &self,
+        document: StoreUuid,
+        pages: &[StoreUuid],
+        reject_observation: bool,
+    ) -> PathBuf {
+        let path = self.0.join("temporary-source.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&(document, pages, reject_observation)).unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn ordinary_pdf_order_change(&self) -> PathBuf {
+        self.0.join("ordinary-pdf-order-change")
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn opened_page_probe(&self) -> (PathBuf, PathBuf) {
+        (
+            self.0.join("observed-open-page"),
+            self.0.join("source-switch"),
+        )
+    }
+
+    pub(crate) fn successor_position(&self) -> PathBuf {
+        self.0.join("successor-position")
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_research_successor(&self, page: StoreUuid) {
+        fs::write(self.0.join("research-successor"), page.to_string()).unwrap();
+    }
+
     fn store(&self) -> Arc<Store> {
         Arc::new(
             Store::open(StorePaths {
@@ -80,19 +166,7 @@ impl Fixture {
         mut admit: impl FnMut(Instant) -> Result<()>,
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
-        input.arguments = [
-            "-S",
-            "-c",
-            include_str!("../../../tests/fixtures/resident_runtime_child.py"),
-            mode,
-            "--system",
-            "two words",
-            "",
-            "$(not-a-command); *",
-            "λ",
-        ]
-        .map(str::to_owned)
-        .to_vec();
+        input.arguments = self.child_arguments(mode);
         ResidentRuntime::launch_checked(
             store,
             input,

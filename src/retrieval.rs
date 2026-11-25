@@ -3,6 +3,9 @@ pub mod disk;
 pub mod epub;
 pub mod notebook;
 pub mod pdf;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod pdf_worker;
 mod ranking;
 use crate::storage::{digest, Uuid};
 use anyhow::{ensure, Result};

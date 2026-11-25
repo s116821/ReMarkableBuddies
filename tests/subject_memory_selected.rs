@@ -726,6 +726,60 @@ fn mixed_document_edit_preserves_exact_other_profile_and_noncanonical_conversati
             objects,
         )
         .unwrap();
+    let mixed = store.selected_snapshot(&scope, 4096).unwrap().unwrap();
+    assert!(admission.with_current(&mixed.token, |_| Ok(())).is_err());
+
+    let wrong_identity = catalog::Identity {
+        profile: Uuid::new_v4(),
+        ..id.clone()
+    };
+    let wrong = selected::SelectedMemory::new(store.clone(), wrong_identity.clone()).unwrap();
+    wrong
+        .initialize_selection(selected::InitializeSelection {
+            operation: Uuid::new_v4(),
+            accepted_base_sha256: storage::digest(b"unrelated catalog"),
+            registrations: vec![],
+        })
+        .unwrap();
+    assert!(admission.with_current(&mixed.token, |_| Ok(())).is_err());
+    let wrong_catalog = store
+        .selected_snapshot(&wrong_identity.scope().unwrap(), 4096)
+        .unwrap()
+        .unwrap();
+    let operation = Uuid::new_v4();
+    let wrong_witness = catalog::Record::registration(catalog::Registration {
+        catalog: wrong_identity.record_id().unwrap(),
+        genesis_sha256: storage::digest(b"wrong local genesis"),
+        ..registration.clone()
+    })
+    .envelope(&wrong_identity, store.actor_id, operation)
+    .unwrap();
+    store
+        .commit_selected(
+            &wrong_catalog.token,
+            operation,
+            vec![wrong_witness],
+            BTreeMap::new(),
+        )
+        .unwrap();
+    assert!(admission.with_current(&mixed.token, |_| Ok(())).is_err());
+
+    // The only exact registration belongs to a local catalog whose profile
+    // contributes no fact to this document. Fact profiles cannot pick the gate.
+    let catalog_identity = catalog::Identity {
+        profile: Uuid::new_v4(),
+        ..id.clone()
+    };
+    let catalog_memory =
+        selected::SelectedMemory::new(store.clone(), catalog_identity.clone()).unwrap();
+    register(
+        &catalog_memory,
+        catalog::Registration {
+            catalog: catalog_identity.record_id().unwrap(),
+            ..registration.clone()
+        },
+    );
+    admission.with_current(&mixed.token, |_| Ok(())).unwrap();
     register(&memory, registration);
     let mut query = Query::new("gravity".into(), 10);
     query.document = Some(document);

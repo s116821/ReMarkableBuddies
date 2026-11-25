@@ -106,6 +106,7 @@ pub enum Outcome {
     Prepared,
     Interpreted,
     Generated,
+    Clarification,
     Completed,
     Failed,
     Canceled,
@@ -114,8 +115,10 @@ pub enum Outcome {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AttemptReason {
     RequestFailed,
+    ReaderDisabled,
     NativeOutputUnavailable,
     NoSelection,
+    UnclearRequest,
     TranscriptionDisagreement,
     ProviderFailure,
     Canceled,
@@ -264,10 +267,13 @@ pub struct ExportAssociation {
     /// Schema-two export attempt; absent in unchanged schema-one history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<super::ExportAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacities: Option<super::CapacitiesAttempt>,
 }
 impl ExportAssociation {
     pub fn title_marker(&self) -> String {
-        format!("[RMB:{}]", self.id)
+        let correlation = self.capacities.as_ref().map_or(self.id, |a| a.correlation);
+        format!("[RMB:{correlation}]")
     }
     pub const METADATA_KEY: &'static str = "remarkable_buddies_export_id";
 }
@@ -288,6 +294,8 @@ pub struct Receipt {
     pub acknowledgment: Acknowledgment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_intent: Option<super::AdmittedIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked_question: Option<Box<super::MarkedQuestion>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(
@@ -298,6 +306,10 @@ pub struct Receipt {
 )]
 pub enum Record {
     Root(Root),
+    SourceTarget(Box<super::target::SourceTarget>),
+    RegionSource(Box<super::target::RegionSource>),
+    TargetUse(Box<super::target::TargetUse>),
+    TargetState(Box<super::target::TargetState>),
     RequestEvidence(Box<super::evidence::RequestEvidence>),
     Turn(Turn),
     Source(ImageUse),
@@ -346,8 +358,11 @@ pub struct ContextBudget {
     /// Supplied by the provider adapter; None refuses provider context assembly.
     pub provider_token_limit: Option<usize>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ContextView {
+    pub target_uses: Vec<super::target::TargetUse>,
+    pub region_sources: Vec<super::target::RegionSource>,
+    pub targets: Vec<super::target::TargetView>,
     pub turns: Vec<Turn>,
     pub sources: Vec<ImageUse>,
     pub captures: Vec<CaptureEvidence>,

@@ -7,7 +7,13 @@ use crate::{
     },
 };
 use serde_json::{json, Value};
-use std::{cell::Cell, collections::BTreeMap, os::unix::fs::symlink, sync::Barrier, thread};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    os::unix::fs::symlink,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Fault {
@@ -164,8 +170,6 @@ fn existing_default_setup_preserves_owned_data_and_unlocks_the_revision_editor()
         config::personalization::{self, Operation, Status},
         conversation::{Ledger, Record},
     };
-    use std::sync::Arc;
-
     let f = Fixture::new();
     assert_eq!(f.run(Action::CheckExistingDefault), State::Blocked);
     f.assert_no_store();
@@ -399,6 +403,46 @@ fn unsupported_and_prepublication_failure_block_but_postpublication_is_unknown()
 
 #[test]
 fn anchored_creation_composes_with_initialize_and_verified_foreign_actor_restore() {
+    assert_first_config_restore(|source, root| {
+        let data = root.join("archive");
+        assert!(source.export(&data).unwrap());
+        data
+    });
+}
+
+#[test]
+fn anchored_creation_preserves_configuration_after_isolated_backup_restore() {
+    use crate::storage::{digest, sync::mode::SyncModeChoice};
+
+    assert_first_config_restore(|source, root| {
+        source
+            .set_sync_mode(
+                &source.sync_mode_snapshot().unwrap().token,
+                Uuid::new_v4(),
+                SyncModeChoice::IsolatedBackup {
+                    binding_sha256: digest(b"fixture binding"),
+                },
+            )
+            .unwrap();
+        let lease = source
+            .sync_mode_lease(&source.sync_mode_snapshot().unwrap().token)
+            .unwrap();
+        let package = root.join("package");
+        let mut attempted = None;
+        let exported = source
+            .export_isolated_package(&lease, &package, &root.join("config.json"), &mut attempted)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Store::inspect_isolated_package(&package, attempted.as_deref()).unwrap(),
+            exported
+        );
+        assert!(!exported.data.configuration_included);
+        package.join("data")
+    });
+}
+
+fn assert_first_config_restore(archive: impl FnOnce(&Arc<Store>, &Path) -> PathBuf) {
     let target = Fixture::new();
     assert_eq!(target.run(Action::CreateInitial), State::Created);
     target.assert_no_store();
@@ -426,8 +470,7 @@ fn anchored_creation_composes_with_initialize_and_verified_foreign_actor_restore
     let entry = record(&source);
     assert_ne!(target_actor, entry.actor_id);
     source.commit(vec![entry.clone()], BTreeMap::new()).unwrap();
-    let data = origin.root.join("archive");
-    assert!(source.export(&data).unwrap());
+    let data = archive(&source, &origin.root);
     let restore = |operation, value: Value| {
         let bytes = serde_json::to_vec(&value).unwrap();
         let mut output = Vec::new();

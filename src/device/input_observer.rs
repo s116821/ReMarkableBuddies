@@ -7,7 +7,7 @@ use super::{
     DeviceModel,
 };
 use anyhow::{ensure, Context, Result};
-use evdev::{raw_stream::RawDevice, AbsoluteAxisCode};
+use evdev::{raw_stream::RawDevice, AbsoluteAxisCode, EventType, MiscCode, SynchronizationCode};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -22,6 +22,8 @@ use std::{
 // Linux input.h EVIOCGMTSLOTS(len): first i32 is the requested MT axis,
 // remaining i32 values receive every kernel slot's state.
 nix::ioctl_read_buf!(mt_slots, b'E', 0x0a, i32);
+// Linux input.h EVIOCSCLOCKID chooses the timestamp clock for this open client.
+nix::ioctl_write_ptr!(set_event_clock, b'E', 0xa0, nix::libc::c_int);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
@@ -168,6 +170,14 @@ struct Source {
     identity: Identity,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GestureClock {
+    Unavailable,
+    FirstEvent,
+    Ready,
+    LostAtSetup,
+}
+
 pub struct InputObserver {
     sources: Vec<Source>,
     inventory: BTreeMap<PathBuf, Identity>,
@@ -175,6 +185,8 @@ pub struct InputObserver {
     reducer: ContactReducer,
     model: DeviceModel,
     clock: Instant,
+    gesture_clock: GestureClock,
+    reader_release_second: Option<u64>,
     lost: bool,
     initial_input: bool,
     owned_pen: Option<OwnedPen>,
@@ -214,6 +226,14 @@ impl InputObserver {
     }
 
     pub fn new(corner: TriggerCorner, owned_sysfs: Option<&Path>) -> Result<Self> {
+        Self::open(corner, owned_sysfs, false)
+    }
+
+    pub(super) fn open(
+        corner: TriggerCorner,
+        owned_sysfs: Option<&Path>,
+        timestamp_release: bool,
+    ) -> Result<Self> {
         let model = DeviceModel::detect();
         let touch_path = match model {
             DeviceModel::Remarkable2 => Path::new("/dev/input/event2"),
@@ -225,6 +245,7 @@ impl InputObserver {
         let mut sources = Vec::new();
         let mut frames = None;
         let mut initial_input = false;
+        let mut gesture_clock = GestureClock::Unavailable;
         for (path, identity) in &inventory_before {
             if owned.as_ref() == Some(&identity.sysfs) {
                 ensure!(path != touch_path, "Cannot exclude the touch device");
@@ -234,8 +255,16 @@ impl InputObserver {
                 .read(true)
                 .custom_flags(nix::libc::O_NONBLOCK)
                 .open(path)?;
-            let device = RawDevice::from_fd(file.into())?;
             let touch = path == touch_path;
+            // Select the clock before seeding contacts or reading events.
+            // Unsupported clocks leave Reader and blank-start available.
+            if touch
+                && timestamp_release
+                && unsafe { set_event_clock(file.as_raw_fd(), &nix::libc::CLOCK_BOOTTIME) }.is_ok()
+            {
+                gesture_clock = GestureClock::FirstEvent;
+            }
+            let device = RawDevice::from_fd(file.into())?;
             if touch {
                 let state = seed(&device)?;
                 initial_input |= !state.contacts().context("Unknown touch state")?.is_empty();
@@ -265,6 +294,8 @@ impl InputObserver {
             reducer: ContactReducer::new(corner),
             model,
             clock: Instant::now(),
+            gesture_clock,
+            reader_release_second: None,
             lost: false,
             initial_input,
             owned_pen: None,
@@ -297,18 +328,35 @@ impl InputObserver {
         self.reducer.enable_blank_start();
     }
 
+    pub(super) fn reader_release_second(&self) -> Option<u64> {
+        self.reader_release_second
+    }
+
+    pub(super) fn lost_initial_clock_frame(&self) -> bool {
+        self.lost && self.gesture_clock == GestureClock::LostAtSetup
+    }
+
     /// Call frequently, including while waiting for persistence. A failed poll
     /// permanently invalidates this observer and the caller's saved history.
     /// Process every Invalidated event before considering any action returned
     /// in the same batch: separate input devices have no shared event order.
     pub fn poll(&mut self) -> Result<Vec<Interaction>> {
+        self.poll_observer(false)
+    }
+
+    pub(super) fn poll_request(&mut self) -> Result<Vec<Interaction>> {
+        self.poll_observer(true)
+    }
+
+    fn poll_observer(&mut self, resident_request: bool) -> Result<Vec<Interaction>> {
+        self.reader_release_second = None;
         if self.lost {
             anyhow::bail!("Native input observer permanently lost; recreate before waiting");
         }
         let result = if self.owned_pen.is_some() || self.owned_touch.is_some() {
             Err(anyhow::anyhow!("Input observer is inside owned pen window"))
         } else {
-            self.poll_inner()
+            self.poll_inner(resident_request)
         };
         if result.is_err() {
             self.lost = true;
@@ -462,7 +510,7 @@ impl InputObserver {
         result
     }
 
-    fn poll_inner(&mut self) -> Result<Vec<Interaction>> {
+    fn poll_inner(&mut self, resident_request: bool) -> Result<Vec<Interaction>> {
         #[cfg(test)]
         if let Some(polls) = self.scripted_polls.as_mut() {
             return polls.pop_front().expect("unexpected diagnostic poll");
@@ -472,7 +520,12 @@ impl InputObserver {
             let batches = std::mem::take(&mut replay.batches);
             let mut output = Vec::new();
             for (touch, events) in batches {
-                self.feed_events(touch, events, &mut output)?;
+                self.feed_events(
+                    touch,
+                    resident_request,
+                    events.into_iter().map(|event| (event, None)),
+                    &mut output,
+                )?;
             }
             self.finish_poll(&mut output)?;
             return Ok(output);
@@ -502,11 +555,30 @@ impl InputObserver {
             }
             ensure!(events.len() <= 8192, "Input observer event limit");
             let touch = source.touch;
+            let timestamp_touch = touch
+                && matches!(
+                    self.gesture_clock,
+                    GestureClock::FirstEvent | GestureClock::Ready
+                );
             self.feed_events(
                 touch,
-                events
-                    .into_iter()
-                    .map(|event| (event.event_type().0, event.code(), event.value())),
+                resident_request,
+                events.into_iter().map(|event| {
+                    let kind = event.event_type().0;
+                    let code = event.code();
+                    let second = if timestamp_touch && kind == 0 && code == 0 {
+                        // evdev represents the raw timeval relative to UNIX_EPOCH
+                        // even when the descriptor's selected clock is BOOTTIME.
+                        event
+                            .timestamp()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|t| t.as_secs())
+                    } else {
+                        None
+                    };
+                    ((kind, code, event.value()), second)
+                }),
                 &mut output,
             )?;
         }
@@ -517,15 +589,41 @@ impl InputObserver {
     fn feed_events(
         &mut self,
         touch: bool,
-        events: impl IntoIterator<Item = super::owned_pen_window::Event>,
+        resident_request: bool,
+        events: impl IntoIterator<Item = (super::owned_pen_window::Event, Option<u64>)>,
         output: &mut Vec<Interaction>,
     ) -> Result<()> {
-        for (kind, code, value) in events {
+        for ((kind, code, value), second) in events {
+            if resident_request {
+                let kind = EventType(kind);
+                // These packets carry device output, repeat settings or timing.
+                // The corresponding actual key, pen or touch event is separate.
+                if matches!(kind, EventType::LED | EventType::SOUND | EventType::REPEAT)
+                    || (kind == EventType::MISC && MiscCode(code) == MiscCode::MSC_TIMESTAMP)
+                {
+                    continue;
+                }
+                if !touch
+                    && kind == EventType::SYNCHRONIZATION
+                    && SynchronizationCode(code) == SynchronizationCode::SYN_DROPPED
+                {
+                    anyhow::bail!("Lost native input frame");
+                }
+            }
             if !touch {
                 if kind != 0 || code == 3 {
                     output.push(self.reducer.cancel());
                 }
                 continue;
+            }
+            if self.gesture_clock == GestureClock::FirstEvent {
+                // Switching clocks can discard queued input on this new client.
+                // Only its very first event can identify this setup boundary.
+                self.gesture_clock = if (kind, code) == (0, 3) {
+                    GestureClock::LostAtSetup
+                } else {
+                    GestureClock::Ready
+                };
             }
             // Finger-count hints are checked against the complete slots.
             // Other buttons are unrelated actions and invalidate history.
@@ -535,13 +633,25 @@ impl InputObserver {
             match self.frames.feed(kind, code, value) {
                 Observation::Pending => {}
                 Observation::Lost => anyhow::bail!("Lost native contact frame"),
-                Observation::Frame(contacts) => output.extend(
-                    self.reducer
-                        .frame(&Self::transform(self.model, contacts), self.clock.elapsed()),
-                ),
+                Observation::Frame(contacts) => self.reduce_frame(contacts, second, output),
             }
         }
         Ok(())
+    }
+
+    fn reduce_frame(
+        &mut self,
+        contacts: Vec<Contact>,
+        second: Option<u64>,
+        output: &mut Vec<Interaction>,
+    ) {
+        let actions = self
+            .reducer
+            .frame(&Self::transform(self.model, contacts), self.clock.elapsed());
+        if actions.contains(&Interaction::Reader) {
+            self.reader_release_second = second;
+        }
+        output.extend(actions);
     }
 
     fn finish_poll(&mut self, output: &mut Vec<Interaction>) -> Result<()> {
@@ -550,10 +660,7 @@ impl InputObserver {
             .contacts()
             .context("Unknown complete contact frame")?;
         if self.frames.ready_for_timer() {
-            output.extend(
-                self.reducer
-                    .frame(&Self::transform(self.model, contacts), self.clock.elapsed()),
-            );
+            self.reduce_frame(contacts, None, output);
         }
         Ok(())
     }
@@ -657,6 +764,8 @@ impl InputObserver {
             reducer: ContactReducer::new(TriggerCorner::LowerLeft),
             model: DeviceModel::Remarkable2,
             clock: Instant::now(),
+            gesture_clock: GestureClock::Unavailable,
+            reader_release_second: None,
             lost: false,
             initial_input: false,
             owned_pen: None,
@@ -756,9 +865,75 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
     }
     fn check_other_input(&mut self) -> Result<()> {
         ensure!(
-            self.observer.poll_inner()?.is_empty() && self.observer.quiescent_state(),
+            self.observer.poll_inner(false)?.is_empty() && self.observer.quiescent_state(),
             "External or delayed input during owned pen window"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod gesture_clock_tests {
+    use super::*;
+
+    #[test]
+    fn lost_first_clocked_frame_reseeds_before_accepting_a_fresh_gesture() {
+        use crate::device::request_input::{RequestInput, ResidentGesture};
+        let mut opened = Vec::new();
+        let released = RequestInput::wait_for_gesture_with(
+            TriggerCorner::LowerRight,
+            true,
+            true,
+            &mut || Ok(()),
+            |clock| {
+                opened.push(clock);
+                match opened.len() {
+                    1 => {
+                        let mut idle = InputObserver::replay_request(vec![(true, vec![(0, 3, 0)])]);
+                        idle.gesture_clock = GestureClock::FirstEvent;
+                        Ok(idle)
+                    }
+                    2 => Ok(InputObserver::scripted(vec![
+                        Ok(vec![Interaction::BlankStart]),
+                        Ok(vec![]),
+                    ])),
+                    3 => Ok(InputObserver::scripted(vec![Ok(vec![])])),
+                    _ => panic!("unexpected input reopen"),
+                }
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(opened, [true, false, false]);
+        assert_eq!(released.gesture, ResidentGesture::BlankStart);
+        assert_eq!(released.released_boot_second, None);
+
+        // A drop after the first intact touch frame remains fatal.
+        let mut established =
+            InputObserver::replay_request(vec![(true, vec![(0, 0, 0), (0, 3, 0)])]);
+        established.gesture_clock = GestureClock::FirstEvent;
+        assert!(established.poll().is_err());
+        assert!(!established.lost_initial_clock_frame());
+    }
+
+    #[test]
+    fn late_poll_preserves_the_release_frames_boot_second_or_leaves_it_unknown() {
+        for release_second in [Some(119), None] {
+            let mut observer = InputObserver::scripted(Vec::new());
+            observer.reducer = ContactReducer::new(TriggerCorner::LowerRight);
+            let mut events = Vec::new();
+            let contact = Contact {
+                slot: 0,
+                tracking: 7,
+                x: 1390,
+                y: 15,
+            };
+            observer.reduce_frame(vec![contact], Some(116), &mut events);
+            observer.clock = Instant::now() - Duration::from_secs(4);
+            observer.reduce_frame(Vec::new(), release_second, &mut events);
+            observer.finish_poll(&mut events).unwrap();
+            assert_eq!(events, [Interaction::Reader]);
+            assert_eq!(observer.reader_release_second(), release_second);
+        }
     }
 }

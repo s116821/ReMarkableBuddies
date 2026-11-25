@@ -7,7 +7,7 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-struct NoModel;
+pub(crate) struct NoModel;
 impl LLMEngine for NoModel {
     fn add_text_content(&mut self, _: &str) {}
     fn add_image_content(&mut self, _: &str) {}
@@ -60,7 +60,9 @@ pub fn run(config_path: Option<PathBuf>, input: &mut impl Read) -> Report {
                 ))
             };
             let ledger = Ledger::new(Arc::new(
-                Store::open(config.paths).map_err(|_| Failure::Storage)?,
+                Store::open(config.paths.clone())
+                    .map_err(|_| Failure::Storage)?
+                    .with_runtime_policy(&config),
             ));
             let memory = if enrich {
                 Some(
@@ -155,7 +157,9 @@ enum CommandRequest {
         feature = "development-input-diagnostics"
     ))]
     Resident(crate::workflow::resident_supervisor::writer_request::Submission),
+    SelectedNotebook(Box<notebook::selected::Input>),
     Notebook(Box<notebook::command::Request>),
+    Target(super::target::Request),
 }
 /// Parse bounded stdin once; each strict variant rejects duplicates and unknown fields.
 pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandReport {
@@ -191,7 +195,10 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
         ))]
         Ok(CommandRequest::Resident(submission)) => {
             let (conversation, operation) = submission.identities();
-            let result = crate::workflow::resident_supervisor::writer_request::submit(submission);
+            let result = crate::workflow::resident_supervisor::writer_request::submit(
+                submission,
+                config_path,
+            );
             CommandReport::Resident(ResidentReport {
                 status: if result.is_ok() { "queued" } else { "refused" },
                 conversation,
@@ -199,23 +206,78 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
                 failure: result.err().map(|_| "tablet-request-unavailable"),
             })
         }
+        Ok(CommandRequest::SelectedNotebook(request)) => CommandReport::Notebook(Box::new(
+            notebook::command::Report::Generation(notebook::selected::run(config_path, *request)),
+        )),
         Ok(CommandRequest::Notebook(request)) => {
             CommandReport::Notebook(Box::new(notebook::command::run(config_path, *request)))
+        }
+        Ok(CommandRequest::Target(request)) => {
+            CommandReport::Legacy(run_target(config_path, request))
         }
         Err(_) => CommandReport::Legacy(run(config_path, &mut &bytes[..])),
     }
 }
+fn run_target(config_path: Option<PathBuf>, request: super::target::Request) -> Report {
+    let identity = request.identities();
+    let result = (|| -> std::result::Result<_, Failure> {
+        request.validate().map_err(|_| Failure::InvalidInput)?;
+        let config = Config::load(config_path).map_err(|_| Failure::Storage)?;
+        if !config.admits_writer(false) || config.sync.enabled || config.reader.selection.is_some()
+        {
+            return Err(Failure::Unsupported);
+        }
+        let effective = config::resolve(
+            &config,
+            config::Overrides::default(),
+            config::Environment::current(),
+        )
+        .map_err(|_| Failure::MissingCredentials)?;
+        let profile = effective.model.clone();
+        let mut engine = crate::OpenAI::new(
+            effective.model,
+            effective.key.into_string(),
+            effective.base_url,
+        );
+        let ledger = Ledger::new(Arc::new(
+            Store::open_source_target_startup(&config).map_err(|_| Failure::Storage)?,
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Failure::Unsupported)?;
+        runtime.block_on(async move {
+            let flag=Arc::new(AtomicBool::new(false)); let worker_flag=flag.clone();
+            let mut worker=tokio::task::spawn_blocking(move||super::target::run(&ledger,&config,&mut engine,&request,&profile,&mut ||worker_flag.load(Ordering::Acquire)));
+            let joined=tokio::select!{r=&mut worker=>r,_=tokio::signal::ctrl_c()=>{flag.store(true,Ordering::Release);worker.await}};
+            joined.map_err(|_|Failure::Unsupported)
+        })
+    })();
+    result.unwrap_or_else(|failure| {
+        let (conversation, operation) = identity;
+        Report {
+            status: Status::Refused,
+            conversation,
+            operation,
+            draft: None,
+            failure: Some(failure),
+            prepared_note: None,
+        }
+    })
+}
+
 fn run_flow(
     config_path: Option<PathBuf>,
     request: crate::writer_flow::Request,
 ) -> crate::writer_flow::Report {
     use crate::{
-        note_export::mem::MemDestination,
+        note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure},
         writer_flow::{self, Failure as FlowFailure},
     };
     let result = (|| -> std::result::Result<_, FlowFailure> {
         request.preflight().map_err(|_| FlowFailure::InvalidInput)?;
-        let config = Config::load(config_path).map_err(|_| FlowFailure::Storage)?;
+        let (config, saved) =
+            Config::load_with_saved_revision(config_path).map_err(|_| FlowFailure::Storage)?;
         if !matches!(request, writer_flow::Request::ReconcileExport { .. })
             && !config.admits_writer(true)
         {
@@ -225,27 +287,61 @@ fn run_flow(
             .personalization_snapshot()
             .map_err(|_| FlowFailure::Storage)?;
         // All required credentials are resolved before Store creation or intent admission.
-        let model = if request.model().is_some() {
+        let model = if request.requires_model() {
             let effective = config::resolve(
                 &config,
                 config::Overrides::default(),
                 config::Environment::current(),
             )
             .map_err(|_| FlowFailure::MissingCredentials)?;
-            Some(crate::OpenAI::new(
-                effective.model,
-                effective.key.into_string(),
-                effective.base_url,
+            let profile = effective.model.clone();
+            Some((
+                crate::OpenAI::new(
+                    effective.model,
+                    effective.key.into_string(),
+                    effective.base_url,
+                ),
+                profile,
             ))
         } else {
             None
         };
-        let token = std::env::var("MEM_API_KEY").map_err(|_| FlowFailure::MissingCredentials)?;
-        let destination =
-            MemDestination::new(&token).map_err(|_| FlowFailure::MissingCredentials)?;
-        let ledger = Ledger::new(Arc::new(
-            Store::open(config.paths).map_err(|_| FlowFailure::Storage)?,
-        ));
+        let destination_failure = |failure| match failure {
+            ExportFailure::MissingCredentials
+            | ExportFailure::MissingCapacitiesCredentials
+            | ExportFailure::Authentication
+            | ExportFailure::Transport => FlowFailure::MissingCredentials,
+            ExportFailure::Unsupported => FlowFailure::Unsupported,
+            _ => FlowFailure::Storage,
+        };
+        let (ledger, destination) = match &request {
+            writer_flow::Request::ReconcileExport {
+                conversation,
+                correlation,
+            } => ConfiguredDestination::original(
+                &config,
+                saved.as_ref(),
+                *conversation,
+                *correlation,
+            )
+            .map_err(destination_failure)?,
+            _ => {
+                let mut destination =
+                    ConfiguredDestination::selected(&config, saved.as_ref(), None)
+                        .map_err(destination_failure)?;
+                let store = (if request.target().is_some() {
+                    Store::open_source_target_startup(&config)
+                } else {
+                    Store::open(config.paths.clone())
+                })
+                .map_err(|_| FlowFailure::Storage)?
+                .with_runtime_policy(&config);
+                destination
+                    .admit_actor(&store)
+                    .map_err(destination_failure)?;
+                (Ledger::new(Arc::new(store)), destination)
+            }
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -254,23 +350,36 @@ fn run_flow(
         runtime.block_on(async move {
             let (sender, canceled) = tokio::sync::watch::channel(false);
             let mut worker = tokio::task::spawn_blocking(move || {
-                if let Some(mut model) = model {
-                    writer_flow::run(
+                if let Some((mut model, profile)) = model {
+                    if owned_request.target().is_some() {
+                        return writer_flow::run_configured_regional(
+                            &ledger,
+                            &mut model,
+                            &destination,
+                            &owned_request,
+                            &config,
+                            &profile,
+                            canceled,
+                        );
+                    }
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut model,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 } else {
-                    writer_flow::run(
+                    writer_flow::run_destination_with_events(
                         &ledger,
                         &mut NoModel,
                         &destination,
                         &owned_request,
                         &preference,
                         canceled,
+                        &mut |_, _| {},
                     )
                 }
             });

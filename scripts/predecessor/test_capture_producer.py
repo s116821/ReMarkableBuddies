@@ -2,9 +2,10 @@
 import copy
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
-from capture_producer import select_command, verify_build_identity
+from capture_producer import select_command, select_library_test, verify_build_identity
 
 
 class CommandArtifactTests(unittest.TestCase):
@@ -46,6 +47,34 @@ class CommandArtifactTests(unittest.TestCase):
     def test_non_artifact_output_cannot_supply_provenance(self):
         with self.assertRaises(ValueError):
             select_command('test result: ok\n{}\nnull', self.workspace)
+
+    def test_library_test_requires_matching_unique_successful_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            binary = root / 'target/debug/deps/reader_buddy-fixture'
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            artifact = copy.deepcopy(self.artifact)
+            artifact.update(target={'kind': ['lib'], 'src_path': str(root / 'src/lib.rs')},
+                            profile={'test': True}, executable=str(binary))
+            result = {'reason': 'build-finished', 'success': True}
+
+            def select(*records):
+                return select_library_test('\n'.join(map(json.dumps, records)), root, self.artifact)
+
+            self.assertEqual(select(artifact, artifact, result)['executable'], str(binary))
+            other = binary.with_name('other')
+            other.touch()
+            for records in (
+                (artifact,),
+                (artifact, dict(result, success=False)),
+                (artifact, dict(artifact, executable=str(other)), result),
+                (dict(artifact, features=['default']), result),
+                (dict(artifact, profile={'test': False}), result),
+                (dict(artifact, package_id='other package'), result),
+            ):
+                with self.subTest(records=records), self.assertRaises(ValueError):
+                    select(*records)
 
     def test_requires_features_and_exact_commit_and_tree(self):
         verify_build_identity('merge', 'merge', 'tree', 'tree', ['feature'], ['feature'])

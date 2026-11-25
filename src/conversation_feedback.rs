@@ -1,8 +1,44 @@
 //! Static descriptions of historical facts, never rendering or cancellation authority.
-use crate::conversation::{AttemptReason, Outcome, OutcomeFact};
+use crate::conversation::{AttemptReason, Outcome, OutcomeFact, Role, Turn};
 use crate::storage::Uuid;
 use anyhow::{ensure, Result};
 use serde::Serialize;
+const CANCELED_REQUEST: &str = "This request was canceled.";
+
+pub(crate) fn opened_reply_id(exchange: Uuid) -> Uuid {
+    crate::writer::stage(exchange, "installed-submission-feedback")
+}
+
+/// A sanitized reply from an installed source submission belongs to
+/// displayable history, outside model context.
+pub(crate) fn is_opened_reply(turn: &Turn) -> bool {
+    if turn.role != Role::Assistant
+        || turn.id != opened_reply_id(turn.exchange)
+        || !turn.sources.is_empty()
+        || turn.correction_of.is_some()
+    {
+        return false;
+    }
+    if turn.outcome == Outcome::Canceled {
+        return turn.text.as_deref() == Some(CANCELED_REQUEST);
+    }
+    turn.outcome == Outcome::Failed
+        && [
+            AttemptReason::NoSelection,
+            AttemptReason::UnclearRequest,
+            AttemptReason::ReaderDisabled,
+            AttemptReason::TranscriptionDisagreement,
+            AttemptReason::ProviderFailure,
+            AttemptReason::NativeOutputUnavailable,
+            AttemptReason::NoSuccessor,
+            AttemptReason::InvalidSuccessor,
+            AttemptReason::RequestFailed,
+            AttemptReason::DeviceUncertain,
+        ]
+        .iter()
+        .any(|reason| turn.text.as_deref() == Some(describe_reason(reason, false).2))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FeedbackKind {
@@ -56,7 +92,7 @@ pub fn describe(fact: &OutcomeFact) -> Result<Option<FeedbackDescription>> {
         (
             FeedbackKind::Canceled,
             "RMB-REQUEST-CANCELED",
-            "This request was canceled.",
+            CANCELED_REQUEST,
         )
     } else {
         let (_, code, text) = describe_reason(&fact.reason, false);
@@ -85,7 +121,15 @@ pub(crate) fn describe_reason(
         );
     }
     let (code, text) = match reason {
+        AttemptReason::ReaderDisabled => (
+            "RMB-READER-DISABLED",
+            "Reader is turned off. Enable it in Manager to ask a reading question.",
+        ),
         AttemptReason::NoSelection => ("RMB-NO-SELECTION", "No usable source selection was found."),
+        AttemptReason::UnclearRequest => (
+            "RMB-REQUEST-UNCLEAR",
+            "I couldn't tell what you wanted. Clarify your request on the source page and try again.",
+        ),
         AttemptReason::TranscriptionDisagreement => (
             "RMB-READ-UNCERTAIN",
             "The selected text could not be read reliably.",

@@ -28,6 +28,22 @@ Legacy `openspec/...` references in component guides resolve there after migrati
 - **On-Device Rendering**: Displays question and answer directly on your reMarkable tablet
 - **Answer Page Detection**: Recognizes blank pages or existing answer pages for seamless Q&A flow
 
+### Handwritten question marks
+
+On a source page, a handwritten `?` anywhere in your question marks the
+associated fragment. Use the same lower-right hold to submit. Buddy saves the
+wording it read and the region of the screenshot for later correction. If the
+fragment is readable but Buddy cannot answer, it can send the saved question
+alone to the Buddy page when page output is available.
+
+Automatic question erasure remains disabled in the standard installation.
+The mark gives permission for a future question-only erase after capture,
+without a separate confirmation prompt. Your source handwriting, circles,
+highlights, and underlying content stay in place today.
+
+Tablet support and live handwriting recognition still require qualification.
+See [the technical notes](docs/TECHNICAL.md#marked-questions-and-erasure).
+
 ## Using Reader on the tablet
 
 On a reMarkable 2 with firmware 3.28.0.172, Buddy's complete resident
@@ -61,15 +77,25 @@ for results and limitations, and the [build and cost details](https://github.com
 ## Using Writer on the tablet
 
 Handwritten Writer requests require the combined Reader/Writer development
-preview on reMarkable 2 with Writer enabled. The `v0.78.3` release predates
-this input. With automatic page insertion enabled, a one-page notebook is enough.
+preview for reMarkable 2 with Writer enabled. To save to a notes service, set up
+a supported destination in the preview before submitting.
 
-1. Open the notebook page you want to use. Write “Make a note from this page” for a whole-page draft. To use one passage or drawing, circle it and write “Make a note about the circled part” beside it.
-2. Hold one finger in the **lower-right corner** for three seconds, then release once.
-3. On a successful run, the adjacent Buddy page shows the request Buddy read and the draft beneath it. For a circled note, check the **About** line against the content you selected.
+| Source | Draft for review | Save to the configured destination |
+| --- | --- | --- |
+| Open page | “Make a note from this page.” | “Save a note from this page.” |
+| One selection | Circle it and write “Make a note about the circled part.” | Circle it and write “Save a note about only the circled part.” |
+| Entire notebook | “Make a note from this entire notebook.” | “Save a note from this entire notebook.” |
 
-This gesture saves a draft in Buddy. Export to a connected notes service is
-a separate action.
+Write the request on the open source page. Hold one finger in the
+**lower-right corner** for three seconds, then release. On a successful run,
+the adjacent Buddy page shows what Buddy read and the draft or save result.
+Check the **About** line on a circled note to confirm the selection. Ask to
+review the draft first if you want to decide whether to send it later. If
+Buddy cannot match a selection to an earlier save, it keeps the draft and asks
+you to check the earlier note or request a separate one.
+
+The installed save paths are covered by host tests with a test destination.
+Physical tablet and live Capacities verification are pending.
 
 ## Undo and redo the latest answer
 

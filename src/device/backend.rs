@@ -13,6 +13,11 @@ use super::{
 use crate::workflow::xochitl_integration::NavigationDirection;
 #[cfg(target_os = "linux")]
 use crate::workflow::xochitl_integration::XochitlIntegration;
+use crate::{
+    conversation::SourceObservation,
+    storage::Uuid,
+    workflow::exchange_history::{PageBackend, UserPresentationTarget},
+};
 
 #[derive(Clone, Default)]
 pub struct Frame {
@@ -31,6 +36,35 @@ pub enum AcquisitionKind {
     LegacyUnqualified,
     Sdk,
     Development,
+}
+
+/// The acquisition owner's exact frame and viewport, retained with the active request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MarkedSourceBinding {
+    pub source: SourceObservation,
+    pub overview_sha256: String,
+    pub dimensions: [u32; 2],
+    pub viewport_revision: String,
+    pub overview_to_source: [f64; 6],
+}
+
+pub enum MarkedEraseSubmission<'a> {
+    Refused,
+    Accepted {
+        operation: Uuid,
+        readback: Box<dyn FnOnce() -> bool + 'a>,
+    },
+    Uncertain,
+}
+
+/// Exact bounded operation, prepared without writes. Acceptance must recheck
+/// the active source, viewport and footprint without waiting or re-entering Store.
+pub struct PreparedMarkedErase<'a>(pub Box<dyn FnOnce() -> MarkedEraseSubmission<'a> + 'a>);
+
+impl<'a> PreparedMarkedErase<'a> {
+    pub(crate) fn submit(self) -> MarkedEraseSubmission<'a> {
+        (self.0)()
+    }
 }
 
 pub trait DeviceBackend {
@@ -72,6 +106,36 @@ pub trait DeviceBackend {
     }
     fn capture_sdk(&mut self) -> Result<remarkable_open_sdk::capture::CapturedBatch> {
         anyhow::bail!("SDK acquisition unavailable")
+    }
+    fn capture_sdk_with_marked_source(
+        &mut self,
+    ) -> Result<(
+        remarkable_open_sdk::capture::CapturedBatch,
+        Option<MarkedSourceBinding>,
+    )> {
+        Ok((self.capture_sdk()?, None))
+    }
+    fn prepare_marked_question_erase(
+        &mut self,
+        _binding: &MarkedSourceBinding,
+        _operation: Uuid,
+        _region: [i32; 4],
+    ) -> Option<PreparedMarkedErase<'_>> {
+        None
+    }
+    /// Advertise a supported user-only edit on the bound destination.
+    /// Implementations must know the destination owner supports this edit
+    /// before navigation. Destination identity alone cannot supply capability.
+    fn marked_question_destination(&self) -> Option<UserPresentationTarget> {
+        None
+    }
+    /// The same bound successor positively supports an exact pair edit.
+    fn marked_answer_destination(&self) -> Option<UserPresentationTarget> {
+        None
+    }
+    /// Returns the existing page owner only after the bound destination is active.
+    fn exchange_page_backend(&mut self) -> Option<&mut dyn PageBackend> {
+        None
     }
     /// Separate development evidence; never a synthetic SDK batch or legacy fallback.
     fn capture_development(
@@ -135,6 +199,7 @@ pub trait DeviceBackend {
     #[cfg(target_os = "linux")]
     fn wait_for_resident_reader(
         &mut self,
+        _timestamp_release: bool,
         _progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::request_input::ReleasedReaderInput> {
         anyhow::bail!("Resident released-input handoff unavailable")
@@ -870,6 +935,7 @@ impl DeviceBackend for RealDevice {
     #[cfg(target_os = "linux")]
     fn wait_for_resident_reader(
         &mut self,
+        timestamp_release: bool,
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<super::request_input::ReleasedReaderInput> {
         self.status_wait_cancellation.check()?;
@@ -899,6 +965,7 @@ impl DeviceBackend for RealDevice {
         super::request_input::RequestInput::wait_released_reader(
             self.resident_corner.clone(),
             blank_start,
+            timestamp_release && blank_start,
             progress,
         )
     }

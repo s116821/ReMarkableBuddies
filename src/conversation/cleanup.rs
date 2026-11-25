@@ -194,7 +194,7 @@ pub(crate) fn eligible(
         }
         for (e, a) in assistants {
             match a.outcome {
-                Outcome::Completed => {}
+                Outcome::Completed | Outcome::Clarification => {}
                 Outcome::Failed | Outcome::Canceled => {
                     terminal(snapshot, e, a, &by_hash, &membership, budget)?
                 }

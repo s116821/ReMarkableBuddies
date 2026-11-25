@@ -40,6 +40,12 @@ pub struct Refine {
 pub enum Request {
     GenerateNotebook(Box<Generate>),
     RefineNotebook(Box<Refine>),
+    #[serde(skip)]
+    GenerateAcquiredNotebook {
+        conversation: Uuid,
+        operation: Uuid,
+        request: String,
+    },
     GenerateNotebookAndExport {
         outer_operation: Uuid,
         generation: Box<Request>,
@@ -65,6 +71,7 @@ impl Request {
         match self.model() {
             Self::GenerateNotebook(r) => r.conversation,
             Self::RefineNotebook(r) => r.conversation,
+            Self::GenerateAcquiredNotebook { conversation, .. } => *conversation,
             _ => Uuid::nil(),
         }
     }
@@ -72,6 +79,7 @@ impl Request {
         match self.model() {
             Self::GenerateNotebook(r) => r.operation,
             Self::RefineNotebook(r) => r.operation,
+            Self::GenerateAcquiredNotebook { operation, .. } => *operation,
             _ => Uuid::nil(),
         }
     }
@@ -96,10 +104,11 @@ impl Request {
             _ => None,
         }
     }
-    fn fields(&self) -> Result<(&str, usize, Option<TurnRange>)> {
+    pub(super) fn fields(&self) -> Result<(&str, usize, Option<TurnRange>)> {
         match self.model() {
             Self::GenerateNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
             Self::RefineNotebook(r) => Ok((&r.request, r.max_model_calls, r.history_range)),
+            Self::GenerateAcquiredNotebook { request, .. } => Ok((request, MAX_CALLS, None)),
             _ => anyhow::bail!("notebook model variant required"),
         }
     }
@@ -137,6 +146,7 @@ impl Request {
                         && !s.contains('\0')),
                 "invalid notebook generation input"
             ),
+            Self::GenerateAcquiredNotebook { .. } => (),
             Self::RefineNotebook(r) => ensure!(
                 !r.draft.is_nil() && r.draft != r.operation && r.draft != r.conversation,
                 "invalid notebook draft identity"
@@ -301,7 +311,10 @@ pub(crate) fn prepare_receiving(
 ) -> Result<runner::Input> {
     ensure!(
         request.joined().is_none()
-            && matches!(request, Request::GenerateNotebook(_)) == frozen.is_some(),
+            && matches!(
+                request,
+                Request::GenerateNotebook(_) | Request::GenerateAcquiredNotebook { .. }
+            ) == frozen.is_some(),
         "routed notebook requires an explicit frozen source and separate export admission"
     );
     match prepare_inner(
@@ -326,6 +339,10 @@ fn prepare_inner(
     memory: Option<&crate::memory::LocalMemory>,
 ) -> Result<Prepared> {
     request.preflight()?;
+    ensure!(
+        !matches!(request, Request::GenerateAcquiredNotebook { .. }) || routed.is_some(),
+        "acquired notebook requires the routed receiver"
+    );
     ensure!(
         ledger.store().unavailable_commits()? == 0,
         "incomplete notebook history"
@@ -441,6 +458,17 @@ fn prepare_inner(
                 &source,
                 input.selection.clone(),
                 input.guidance.clone(),
+            )?;
+            (source, archive, None)
+        }
+        Request::GenerateAcquiredNotebook { conversation, .. } => {
+            let source = frozen.context("acquired notebook source unavailable")?;
+            let archive = ArchivedNormalizedSource::from_notebook(
+                *conversation,
+                user_id,
+                &source,
+                TextScope::SuppliedNotebook,
+                None,
             )?;
             (source, archive, None)
         }
@@ -560,7 +588,7 @@ fn prepare_inner(
     }
     Ok(Prepared::Fresh(Box::new(input)))
 }
-fn generation_report(
+pub(super) fn generation_report(
     request: &Request,
     status: runner::Status,
     failure: Option<runner::Failure>,
@@ -601,11 +629,13 @@ fn refused(request: &Request, failure: runner::Failure) -> Report {
     }
 }
 pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
+    use crate::note_export::{dispatch::ConfiguredDestination, Failure as ExportFailure};
     let result = (|| -> std::result::Result<Report, runner::Failure> {
         request
             .preflight()
             .map_err(|_| runner::Failure::InvalidInput)?;
-        let config = Config::load(config_path).map_err(|_| runner::Failure::Storage)?;
+        let (config, saved) =
+            Config::load_with_saved_revision(config_path).map_err(|_| runner::Failure::Storage)?;
         if !config.admits_writer(request.joined().is_some()) {
             return Err(runner::Failure::Unsupported);
         }
@@ -629,14 +659,16 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             None
         };
+        let selected = |existing: Option<&Store>| {
+            ConfiguredDestination::selected(&config, saved.as_ref(), existing).map_err(|failure| {
+                match failure {
+                    ExportFailure::Unsupported => runner::Failure::Unsupported,
+                    _ => runner::Failure::MissingCredentials,
+                }
+            })
+        };
         let mut destination = if !config.memory.enabled && request.joined().is_some() {
-            Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            )
+            Some(selected(None)?)
         } else {
             None
         };
@@ -678,12 +710,20 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
         } else {
             let (store, prepared) =
                 Store::prepare_notebook_validated(config.paths.clone(), |ledger| {
+                    if let Some(destination) = destination.as_mut() {
+                        destination.admit_actor(ledger.store())?;
+                    }
                     prepare(ledger, &request, &preference)
                 })
-                .map_err(|error| match error.downcast_ref::<InputRefusal>() {
-                    Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
-                    Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
-                    _ => runner::Failure::Storage,
+                .map_err(|error| {
+                    if error.downcast_ref::<ExportFailure>().is_some() {
+                        return runner::Failure::MissingCredentials;
+                    }
+                    match error.downcast_ref::<InputRefusal>() {
+                        Some(InputRefusal::Unsupported) => runner::Failure::Unsupported,
+                        Some(InputRefusal::InvalidInput) => runner::Failure::InvalidInput,
+                        _ => runner::Failure::Storage,
+                    }
                 })?;
             let ledger = Ledger::new(Arc::new(store));
             (ledger, prepared, None)
@@ -726,13 +766,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             effective.base_url,
         );
         if destination.is_none() && request.joined().is_some() {
-            destination = Some(
-                crate::note_export::mem::MemDestination::new(
-                    &std::env::var("MEM_API_KEY")
-                        .map_err(|_| runner::Failure::MissingCredentials)?,
-                )
-                .map_err(|_| runner::Failure::MissingCredentials)?,
-            );
+            destination = Some(selected(Some(ledger.store()))?);
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -743,7 +777,7 @@ pub fn run(config_path: Option<PathBuf>, request: Request) -> Report {
             let (sender,canceled)=tokio::sync::watch::channel(false);
             let mut worker=tokio::task::spawn_blocking(move|| {
                 let _memory = memory;
-                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run(&ledger,&mut model,&destination,*input,identity,canceled)))}
+                if let (Some(identity),Some(destination))=(identity,destination) {Report::Joined(Box::new(flow::run_destination_with_events(&ledger,&mut model,&destination,*input,identity,canceled,&mut |_, _| {})))}
                 else {Report::Generation(runner::run(&ledger,&mut model,*input,&mut||*canceled.borrow()).report)}
             });
             let joined=tokio::select! {result=&mut worker=>result,_=tokio::signal::ctrl_c()=>{let _=sender.send(true);worker.await}};

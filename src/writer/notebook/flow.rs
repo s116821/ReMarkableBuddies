@@ -1,7 +1,8 @@
 //! Joined notebook generation/export through the existing owners and backend journal.
 use super::*;
+use crate::note_export::dispatch::{unresolved, LegacyDestination, OwnedDestination};
 use crate::{
-    conversation::{Ledger, Outcome, WriterExportInput, WriterFlowAdmission, WriterSelection},
+    conversation::{Ledger, WriterExportInput, WriterFlowAdmission, WriterSelection},
     note_export::{
         self, ExportControl, ExportObservation, ExportOwner, ExportPhase, ExportReport,
         ExportStatus, NoteDestination,
@@ -136,6 +137,43 @@ pub(crate) fn run_with_events<E: crate::LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     destination: &impl NoteDestination,
+    input: runner::Input,
+    identity: Identity,
+    canceled: watch::Receiver<bool>,
+    events: &mut crate::writer_flow::Events<'_>,
+) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        &LegacyDestination(destination),
+        input,
+        identity,
+        canceled,
+        events,
+    )
+}
+pub fn run_capacities<E: crate::LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &note_export::capacities::CapacitiesDestination,
+    input: runner::Input,
+    identity: Identity,
+    canceled: watch::Receiver<bool>,
+) -> Report {
+    run_destination_with_events(
+        ledger,
+        engine,
+        destination,
+        input,
+        identity,
+        canceled,
+        &mut |_, _| {},
+    )
+}
+pub(crate) fn run_destination_with_events<E: crate::LLMEngine>(
+    ledger: &Ledger,
+    engine: &mut E,
+    destination: &impl OwnedDestination,
     mut input: runner::Input,
     identity: Identity,
     canceled: watch::Receiver<bool>,
@@ -182,16 +220,15 @@ pub(crate) fn run_with_events<E: crate::LLMEngine>(
                 TextScope::SuppliedNotebook => "supplied-notebook".into(),
             }
         );
-        if let Some(old) = ledger.export_association(plan.conversation, identity.correlation)? {
+        if let Some(old) = ledger.export_association(
+            plan.conversation,
+            destination.association_id(plan.conversation, identity.correlation),
+        )? {
             if old.backend != destination.backend() || old.source_scope != scope {
                 report.failure = Some(Failure::InvalidInput);
                 return Ok(());
             }
-            if old.outcome != Outcome::Completed
-                && !old.attempt.as_ref().is_some_and(|attempt| {
-                    attempt.no_send && matches!(old.outcome, Outcome::Failed | Outcome::Canceled)
-                })
-            {
+            if unresolved(&old) {
                 report.status = Status::ReconcileRequired;
                 report.failure = None;
                 return Ok(());
@@ -205,7 +242,7 @@ pub(crate) fn run_with_events<E: crate::LLMEngine>(
             &plan.map_input_digests,
             &plan.reducer_prefix_digest,
             plan.reducer_reserved_bytes,
-            destination.backend(),
+            destination.intent_binding(),
         ))?);
         report.trace.push(Phase::BeforeAdmission);
         events(Phase::BeforeAdmission, ledger);
@@ -286,9 +323,8 @@ pub(crate) fn run_with_events<E: crate::LLMEngine>(
             event: &mut event,
             deadline: Some(started + Duration::from_secs(600)),
         };
-        let export = runtime.block_on(note_export::export_with_owner(
+        let export = runtime.block_on(destination.export_owned(
             ledger,
-            destination,
             &note,
             canceled.clone(),
             &export_owner,

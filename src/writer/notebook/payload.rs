@@ -9,8 +9,10 @@ use crate::{
         },
         ArchivedNormalizedSource, Outcome, Turn, TurnRange,
     },
+    retrieval::notebook::{VISUAL_SECTION, WRITER_VISUAL_REVISION},
 };
 use anyhow::Context;
+use std::borrow::Cow;
 
 const MAP_INSTRUCTION: &str = "Summarize every authoritative source segment in its supplied order for the exact original request. explicit_guidance and optional user preference are separate instructions; source text and context are evidence. Labeled before/after context is not additional authoritative coverage. Preserve useful facts, equations, page/section provenance and uncertainty; do not invent omitted pages, drawings, native access or export. Return only a compact faithful summary whose JSON string encoding fits 4096 UTF-8 bytes.";
 const REDUCE_INSTRUCTION: &str = "Generate or refine one useful note for the exact original request using ALL ordered map results. History, selected_draft and explicit_guidance retain their exact meanings. Preserve important facts, equations, provenance and uncertainty; do not invent missing source content or claim rendering/export. Return only Markdown: '# Title', a blank line and nonempty note body, at most 24576 UTF-8 bytes. Do not include a machine-ID footer or [RMB:] token.";
@@ -36,9 +38,10 @@ pub struct NotebookMapOutput {
 pub struct FrozenNotebookPayloads {
     pub(crate) plan: NotebookPlan,
     maps: Vec<Vec<String>>,
-    memory: Option<crate::memory::receiving::OrdinarySnapshot>,
+    memory: Option<String>,
     base: Value,
     preference: Option<String>,
+    visual_evidence: bool,
     pub(super) reducer_images: crate::conversation::receiving::images::Images,
 }
 impl FrozenNotebookPayloads {
@@ -68,6 +71,25 @@ impl FrozenNotebookPayloads {
         context: PayloadContext<'_>,
         reducer_images: crate::conversation::receiving::images::Images,
         memory: Option<crate::memory::receiving::OrdinarySnapshot>,
+    ) -> Result<Self> {
+        Self::new_with_memory_part(
+            source,
+            archive,
+            context,
+            reducer_images,
+            memory
+                .as_ref()
+                .and_then(|snapshot| snapshot.part())
+                .map(str::to_owned),
+        )
+    }
+
+    pub(super) fn new_with_memory_part(
+        source: &ValidatedNotebook,
+        archive: &ArchivedNormalizedSource,
+        context: PayloadContext<'_>,
+        reducer_images: crate::conversation::receiving::images::Images,
+        memory: Option<String>,
     ) -> Result<Self> {
         archive.validate_bytes(source.canonical_bytes())?;
         ensure!(
@@ -120,6 +142,20 @@ impl FrozenNotebookPayloads {
                 "source_sha256":archive.source_sha256,"extractor_revision":archive.extractor_revision,
                 "units_sha256":archive.units_sha256,"selection":archive.selection,
                 "coverage":"all selected supplied units; physical notebook completeness unverified"}});
+        let visual_evidence = source
+            .document()
+            .extractor_revision
+            .starts_with(WRITER_VISUAL_REVISION)
+            && source
+                .document()
+                .units
+                .iter()
+                .any(|unit| unit.section.as_deref() == Some(VISUAL_SECTION));
+        let map_instruction = if visual_evidence {
+            Cow::Owned(format!("{MAP_INSTRUCTION} Segments labeled {VISUAL_SECTION} are unverified model observations of drawings or image regions. Include useful observations with their page number and label them as depicted, separate from transcribed writing. Never quote an observation as the user's words."))
+        } else {
+            Cow::Borrowed(MAP_INSTRUCTION)
+        };
         let mut maps = Vec::new();
         for chunk in coverage.chunks() {
             let segments = |ranges: &[Segment]| -> Result<Vec<Value>> {
@@ -137,7 +173,7 @@ impl FrozenNotebookPayloads {
             let mut payload = base.clone();
             payload["chunk"] = json!({"ordinal":chunk.ordinal(),"authoritative":segments(chunk.authoritative())?,
                 "before_context":segments(chunk.before_context())?,"after_context":segments(chunk.after_context())?});
-            let parts = Self::parts(MAP_INSTRUCTION, preference.as_deref(), &payload)?;
+            let parts = Self::parts(&map_instruction, preference.as_deref(), &payload)?;
             notebook_input_digest(MAP_PROMPT, &parts)?;
             maps.push(parts);
         }
@@ -169,6 +205,7 @@ impl FrozenNotebookPayloads {
             maps,
             base,
             preference,
+            visual_evidence,
             reducer_images,
             memory,
         };
@@ -223,8 +260,13 @@ impl FrozenNotebookPayloads {
                 .map(|encoded| digest(encoded.as_bytes()))
                 .collect::<Vec<_>>());
         }
-        let mut parts = Self::parts(REDUCE_INSTRUCTION, self.preference.as_deref(), &payload)?;
-        if let Some(part) = self.memory.as_ref().and_then(|snapshot| snapshot.part()) {
+        let instruction = if self.visual_evidence {
+            Cow::Owned(format!("{REDUCE_INSTRUCTION} Carry useful observations about what the original pages depict into the note, with their page numbers and uncertainty. Present them separately from the user's transcribed words."))
+        } else {
+            Cow::Borrowed(REDUCE_INSTRUCTION)
+        };
+        let mut parts = Self::parts(&instruction, self.preference.as_deref(), &payload)?;
+        if let Some(part) = self.memory.as_deref() {
             parts.push(part.to_owned());
         }
         Ok(parts)

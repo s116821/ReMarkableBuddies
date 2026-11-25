@@ -1,5 +1,6 @@
 //! Inject as an example into unchanged published 68e42968 source for offline qualification.
-//! This is an uncompiled review candidate, not execution evidence.
+//! Local helper tests do not qualify the unchanged old library; hosted CI compiles that path.
+#[cfg(not(test))]
 use remarkable_reader_buddy::{
     config::SyncPolicy,
     conversation::Ledger,
@@ -10,15 +11,54 @@ use remarkable_reader_buddy::{
         Namespace, Store, StorePaths, Uuid,
     },
 };
+#[cfg(not(test))]
 use serde_json::json;
+#[cfg(not(test))]
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, Write},
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Condvar, Mutex},
+    sync::{atomic::AtomicBool, Condvar, Mutex},
+};
+
+use std::{
+    sync::Arc,
     time::{Duration, Instant},
 };
 
+// Worker::drop in the pinned predecessor permits its bounded request to outlive
+// the 250ms grace. Only observing the original Arc become unique proves that
+// the worker has released this Store. There is no public completion receiver;
+// pace repeated observations, without treating a wait or Drop as completion.
+fn wait_for_sole_owner<T>(
+    store: &Arc<T>,
+    timeout: Duration,
+    mut pause: impl FnMut(Duration),
+) -> Result<(), usize> {
+    let deadline = Instant::now() + timeout;
+    let mut owners = Arc::strong_count(store);
+    if owners == 1 {
+        return Ok(());
+    }
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(owners);
+        }
+        pause(remaining.min(Duration::from_millis(10)));
+        owners = Arc::strong_count(store);
+        // After any wait, even actual uniqueness is too late at the original
+        // cutoff. Only the initial already-unique observation bypasses waiting.
+        if Instant::now() >= deadline {
+            return Err(owners);
+        }
+        if owners == 1 {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(not(test))]
 #[derive(Default)]
 struct Cloud {
     files: BTreeMap<String, (RemoteFile, Vec<u8>)>,
@@ -29,8 +69,10 @@ struct Cloud {
     entered: bool,
     released: bool,
 }
+#[cfg(not(test))]
 #[derive(Clone, Default)]
 struct MemoryDrive(Arc<(Mutex<Cloud>, Condvar)>);
+#[cfg(not(test))]
 impl DriveTransport for MemoryDrive {
     fn authorize(&mut self, _: Uuid) -> anyhow::Result<()> {
         let mut c = self.0 .0.lock().unwrap();
@@ -123,6 +165,7 @@ impl DriveTransport for MemoryDrive {
     }
 }
 
+#[cfg(not(test))]
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     anyhow::ensure!(
@@ -264,11 +307,87 @@ fn main() -> anyhow::Result<()> {
         drive.0 .1.notify_all();
     }
     drop(worker);
-    anyhow::ensure!(
-        Arc::strong_count(&store) == 1,
-        "worker must release actual Store ownership before closed receipt"
-    );
+    wait_for_sole_owner(&store, Duration::from_secs(10), std::thread::park_timeout)
+        .map_err(|owners| anyhow::anyhow!(
+            "worker Store ownership was not observed released within 10s before closed receipt (last observed {owners} owners)"
+        ))?;
     drop(store);
     println!("{}", json!({"action":"released","closed":true}));
     Ok(())
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use std::{sync::mpsc, thread};
+
+    #[test]
+    fn already_unique_needs_no_wait() {
+        assert_eq!(
+            wait_for_sole_owner(&Arc::new(()), Duration::ZERO, |_| panic!("already unique")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn delayed_release_requires_another_actual_ownership_observation() {
+        let store = Arc::new(());
+        let worker_store = store.clone();
+        let (release, pending) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            pending.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(worker_store);
+            finished.send(()).unwrap();
+        });
+        let mut release = Some(release);
+        let mut observations = 0;
+        let result = wait_for_sole_owner(&store, Duration::from_secs(2), |_| {
+            assert_eq!(Arc::strong_count(&store), 2);
+            observations += 1;
+            release.take().unwrap().send(()).unwrap();
+            done.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        worker.join().unwrap();
+        assert_eq!(observations, 1);
+        assert_eq!(result, Ok(()));
+        assert_eq!(Arc::strong_count(&store), 1);
+    }
+
+    #[test]
+    fn ownership_released_only_after_original_deadline_is_not_accepted() {
+        let store = Arc::new(());
+        let mut retained = Some(store.clone());
+        let timeout = Duration::from_millis(5);
+        let started = Instant::now();
+        let result = wait_for_sole_owner(&store, timeout, |_| {
+            assert_eq!(Arc::strong_count(&store), 2);
+            // The helper's deadline precedes this pause. Keep the extra owner
+            // for another full timeout, then make the late observation unique.
+            thread::sleep(timeout);
+            assert!(started.elapsed() >= timeout);
+            drop(retained.take().unwrap());
+        });
+        assert_eq!(Arc::strong_count(&store), 1);
+        assert_eq!(
+            result,
+            Err(1),
+            "late uniqueness must not renew the original deadline"
+        );
+    }
+
+    #[test]
+    fn never_released_ownership_fails_at_the_original_deadline() {
+        let store = Arc::new(());
+        let retained = store.clone();
+        let timeout = Duration::from_millis(20);
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_sole_owner(&store, timeout, thread::park_timeout),
+            Err(2)
+        );
+        assert!(started.elapsed() >= timeout);
+        assert_eq!(Arc::strong_count(&store), 2);
+        drop(retained);
+    }
 }

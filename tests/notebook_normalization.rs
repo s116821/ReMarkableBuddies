@@ -233,7 +233,7 @@ fn actual_ordered_png_to_index_cache_reopen_and_query_retains_unverified_key() {
     assert!(doc
         .document
         .extractor_revision
-        .starts_with("notebook-ocr-unverified-v1:"));
+        .starts_with("notebook-ocr-unverified-v2:"));
     assert_eq!(
         doc.prompt_sha256,
         remarkable_reader_buddy::storage::digest(&serde_json::to_vec(&e.sent).unwrap())

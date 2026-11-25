@@ -1,6 +1,7 @@
 //! Transient ordinary historical data composition, without model/effect admission.
 pub mod research;
 use super::{encoded, Frame, FrozenRequestContext, SourceAssociation, FRAME_BYTES};
+use crate::memory::Provider as _;
 use crate::{memory, storage::Uuid};
 use anyhow::{ensure, Result};
 use serde::Serialize;
@@ -95,7 +96,7 @@ impl MemoryReport {
 #[derive(Serialize)]
 struct CombinedFrame<'a> {
     schema: u32,
-    scope: &'static str,
+    scope: &'a str,
     request_context: &'a Frame,
     memory: Option<&'a MemoryReport>,
 }
@@ -128,8 +129,16 @@ pub(crate) fn validate_result(
     profile: Uuid,
     query: &memory::Query,
 ) -> Result<()> {
-    use memory::Status;
     ensure!(!result.selected(), CompositionRefusal::SelectedMemory);
+    validate_result_data(result, profile, query)
+}
+
+fn validate_result_data(
+    result: &memory::QueryResult,
+    profile: Uuid,
+    query: &memory::Query,
+) -> Result<()> {
+    use memory::Status;
     ensure!(
         result.status != Status::Unavailable && !result.diagnostics.snapshot_unavailable,
         CompositionRefusal::MemoryUnavailable
@@ -189,12 +198,126 @@ pub(crate) fn validate_result(
 }
 
 impl FrozenRequestContext {
+    /// One previously queried selected memory view, retained by its Attempt
+    /// through actual dispatch and publication. This function never queries.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_selected_memory(
+        self,
+        admitted: &crate::workflow::ResearchContext,
+        input: Option<(Uuid, &memory::Query, &memory::QueryResult)>,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenSourceMemoryContext> {
+        ensure!(
+            self.frame.scope == "selected-historical"
+                && self.frame.conversation == admitted.conversation()
+                && self.frame.request.id == admitted.request_turn()
+                && matches!(&self.frame.source, SourceAssociation::Original { expected, .. }
+                    if expected == admitted.index_key()),
+            CompositionRefusal::IncompatibleRequest
+        );
+        let report = if let Some((profile, query, result)) = input {
+            ensure!(
+                !profile.is_nil() && result.selected(),
+                CompositionRefusal::InvalidMemory
+            );
+            query
+                .validate()
+                .map_err(|_| CompositionRefusal::InvalidMemoryOptions)?;
+            ensure!(
+                self.request().text.as_deref() == Some(query.text.as_str())
+                    && query.document == Some(admitted.index_key().document),
+                CompositionRefusal::IncompatibleRequest
+            );
+            validate_result_data(result, profile, query)?;
+            MemoryReport {
+                profile: Some(profile),
+                query: Some(query.clone()),
+                status: result.status,
+                diagnostics: result.diagnostics.clone(),
+                context: Some(result.context.clone()),
+            }
+        } else {
+            MemoryReport {
+                profile: None,
+                query: None,
+                status: memory::Status::Disabled,
+                diagnostics: memory::Diagnostics::default(),
+                context: None,
+            }
+        };
+        ensure!(
+            (512..=FRAME_BYTES).contains(&budget.max_encoded_bytes) && budget.max_tokens > 0,
+            CompositionRefusal::InvalidBudget
+        );
+        let frame = CombinedFrame {
+            schema: 1,
+            scope: &self.frame.scope,
+            request_context: &self.frame,
+            memory: Some(&report),
+        };
+        let encoded = encoded(&frame, budget.max_encoded_bytes)
+            .map_err(|_| CompositionRefusal::EncodedLimit)?;
+        let tokens = token_count(&encoded).map_err(|_| CompositionRefusal::CounterUnavailable)?;
+        ensure!(tokens > 0, CompositionRefusal::CounterUnavailable);
+        ensure!(
+            tokens <= budget.max_tokens,
+            CompositionRefusal::TokenLimit {
+                tokens,
+                limit: budget.max_tokens
+            }
+        );
+        Ok(FrozenSourceMemoryContext {
+            source: self,
+            memory: report,
+            encoded,
+            tokens,
+        })
+    }
+
     /// Consumes captured data only. No Ledger read, source query, write or dispatch.
     pub fn with_memory(
         self,
         input: MemoryInput<'_>,
         budget: CombinedBudget,
         token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenSourceMemoryContext> {
+        self.with_memory_inner(input, budget, token_count, false)
+    }
+
+    pub(crate) fn with_followup_memory(
+        self,
+        memory: Option<(&memory::LocalMemory, Uuid)>,
+        store: &crate::storage::Store,
+        now_ms: u64,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+    ) -> Result<FrozenSourceMemoryContext> {
+        let input = if let Some((provider, profile)) = memory {
+            provider.admit_ordinary_writer(store)?;
+            let defaults = memory::Query::new(String::new(), now_ms);
+            MemoryInput::Query {
+                provider,
+                profile,
+                options: MemoryOptions {
+                    now_ms,
+                    current_claims: defaults.current_claims,
+                    max_matches: defaults.max_matches,
+                    max_context_bytes: defaults.max_context_bytes,
+                },
+            }
+        } else {
+            MemoryInput::Disabled
+        };
+        self.with_memory_inner(input, budget, token_count, true)
+    }
+
+    fn with_memory_inner(
+        self,
+        input: MemoryInput<'_>,
+        budget: CombinedBudget,
+        token_count: impl Fn(&str) -> Result<usize>,
+        refuse_empty_partial: bool,
     ) -> Result<FrozenSourceMemoryContext> {
         ensure!(
             (512..=FRAME_BYTES).contains(&budget.max_encoded_bytes) && budget.max_tokens > 0,
@@ -224,6 +347,14 @@ impl FrozenRequestContext {
                     text: text.to_owned(),
                     document: match self.source() {
                         SourceAssociation::NoDocument => None,
+                        SourceAssociation::CapturedPage { source_record, .. } => {
+                            let crate::conversation::Record::ResidentCapture(capture) =
+                                source_record.as_ref()
+                            else {
+                                return Err(CompositionRefusal::IncompatibleRequest.into());
+                            };
+                            Some(capture.before.document)
+                        }
                         SourceAssociation::Original { expected, .. } => Some(expected.document),
                     },
                     now_ms: options.now_ms,
@@ -245,6 +376,12 @@ impl FrozenRequestContext {
                 .query(&query)
                 .map_err(|_| CompositionRefusal::MemoryUnavailable)?;
             validate_result(&result, profile, &query)?;
+            ensure!(
+                !refuse_empty_partial
+                    || result.status != memory::Status::Partial
+                    || !result.context.facts.is_empty(),
+                CompositionRefusal::MemoryUnavailable
+            );
             MemoryReport {
                 profile: Some(profile),
                 query: Some(query),

@@ -1,5 +1,6 @@
 //! Nonsecret file settings. Credentials are selected through protected references.
 pub mod basic;
+pub mod capacities;
 pub mod credential_reference;
 mod initial;
 pub mod inspection;
@@ -11,7 +12,11 @@ pub mod portable;
 pub mod product;
 pub mod product_settings;
 pub mod research_settings;
+// The selected researched receiver is assembled separately from ordinary resolve.
+#[allow(dead_code)]
+pub(crate) mod researched_reader;
 pub mod schema;
+mod source_snapshot;
 use crate::conversation::receiving::memory::research::ResearchPolicy;
 use crate::{
     llm::openai::DEFAULT_MODEL,
@@ -21,6 +26,7 @@ use crate::{
 use anyhow::{ensure, Result};
 pub use personalization::{Personalization, PersonalizationSnapshot};
 use serde::{Deserialize, Serialize};
+pub use source_snapshot::SourceSnapshot;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -64,6 +70,10 @@ impl SyncPolicy {
             !self.namespaces.contains(&Namespace::UnassociatedFeedback),
             "unassociated feedback live sync unsupported"
         );
+        ensure!(
+            !self.namespaces.contains(&Namespace::PortableConfiguration),
+            "portable configuration uses selected shared sync only"
+        );
         ensure!(self.max_media_bytes <= MAX_MEDIA, "invalid media limit");
         ensure!(
             self.collection.is_none_or(|c| !c.is_nil()),
@@ -104,12 +114,20 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub research_policy: Option<Option<ResearchPolicy>>,
+    // Append new fields to preserve legacy positional Config array prefixes.
+    pub handwriting: crate::handwriting::Configuration,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacities_export: Option<capacities::ExportConnection>,
+    #[serde(skip)]
+    pub source_snapshot: Option<SourceSnapshot>,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
+            source_snapshot: None,
             config_schema_version: 1,
             product_settings: None,
+            capacities_export: None,
             model: None,
             base_url: None,
             trigger_corner: None,
@@ -119,6 +137,7 @@ impl Default for Config {
             model_credential: None,
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
+            handwriting: crate::handwriting::Configuration::default(),
             reader: crate::reader_runtime::Configuration::default(),
             personalization: Personalization::default(),
             research_policy: None,
@@ -126,16 +145,46 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn saved_path(&self) -> Option<&Path> {
+        self.source_snapshot
+            .as_ref()
+            .map(|source| source.fingerprint().0)
+    }
+
     pub fn load(path: Option<PathBuf>) -> Result<Self> {
+        Self::load_document(path)
+    }
+
+    pub(crate) fn load_with_saved_revision(
+        path: Option<PathBuf>,
+    ) -> Result<(Self, Option<SavedRevision>)> {
+        let config = Self::load(path)?;
+        let saved = config.saved_revision();
+        Ok((config, saved))
+    }
+
+    pub(crate) fn saved_revision(&self) -> Option<SavedRevision> {
+        let (path, sha256) = self.source_snapshot.as_ref()?.fingerprint();
+        Some(SavedRevision {
+            path: path.into(),
+            sha256: sha256?.into(),
+        })
+    }
+
+    fn load_document(path: Option<PathBuf>) -> Result<Self> {
         let explicit = path.is_some();
         let path =
             path.unwrap_or_else(|| "/home/root/.config/remarkable-buddies/config.json".into());
-        let config = if path.exists() {
-            files::json(&path, MAX_RECORD as u64)?
+        let (mut config, bytes) = if path.exists() {
+            let bytes = files::read(&path, MAX_RECORD as u64)?;
+            let config = serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("invalid or unsupported stored JSON"))?;
+            (config, Some(bytes))
         } else {
             ensure!(!explicit, "selected configuration is missing");
-            Self::default()
+            (Self::default(), None)
         };
+        config.source_snapshot = Some(SourceSnapshot::observed(path, bytes.as_deref()));
         Self::validate(&config)?;
         Ok(config)
     }
@@ -157,8 +206,27 @@ impl Config {
             "unsupported product settings version"
         );
         self.sync.validate()?;
+        if let Some(connection) = &self.capacities_export {
+            connection.validate()?;
+        }
         self.memory.validate()?;
+        self.handwriting.validate()?;
+        ensure!(
+            !self.handwriting.enabled || !self.sync.enabled,
+            "handwriting requires local or selected admission without legacy sync"
+        );
         self.reader.validate()?;
+        ensure!(
+            self.reader.researched_pdf.is_none()
+                || self.reader.selection.is_some()
+                || !self.sync.enabled,
+            "Ordinary researched PDF requires the local Reader route"
+        );
+        ensure!(
+            self.reader.researched_epub.is_none()
+                || (self.reader.selection.is_none() && !self.sync.enabled),
+            "Researched EPUB requires the ordinary local Reader route"
+        );
         ensure!(
             !(self.reader.selection.is_some() && self.sync.enabled),
             "selected Reader requires the separately qualified selected sync worker"
@@ -212,6 +280,21 @@ impl Config {
     /// Pure saved declaration/default capture; no file or runtime lookup.
     pub fn research_policy_snapshot(&self) -> Result<research_settings::ResearchPolicySnapshot> {
         research_settings::ResearchPolicySnapshot::capture(self)
+    }
+}
+
+#[derive(Clone)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct SavedRevision {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl SavedRevision {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn current(&self) -> bool {
+        files::read(&self.path, MAX_RECORD as u64)
+            .is_ok_and(|bytes| crate::storage::digest(&bytes) == self.sha256)
     }
 }
 

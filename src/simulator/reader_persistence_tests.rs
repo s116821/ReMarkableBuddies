@@ -401,6 +401,7 @@ struct RecordingModel {
     fail: bool,
     fault_after_second: bool,
     cancel_after_first: Option<Shared>,
+    after_first: Option<Box<dyn FnOnce()>>,
 }
 impl LLMEngine for RecordingModel {
     fn add_text_content(&mut self, _: &str) {}
@@ -445,6 +446,9 @@ impl LLMEngine for RecordingModel {
             if let Some(state) = &self.cancel_after_first {
                 state.borrow_mut().request_lost = true;
             }
+            if let Some(f) = self.after_first.take() {
+                f();
+            }
         }
         self.replies.pop_front().context("model replies exhausted")
     }
@@ -469,7 +473,7 @@ fn setup() -> Shared {
 fn model(store: Arc<Store>, calls: Calls) -> RecordingModel {
     RecordingModel {images:vec![],calls,store,replies:VecDeque::from([
         "QUESTION: Why?\nQUESTION_BOX: 20,20,30,30\nSELECTION_CENTER: 300,400\n---\nANSWER: Because.".into(),
-        "TRANSCRIPTION: Why?".into()]),fail:false,fault_after_second:false,cancel_after_first:None}
+        "TRANSCRIPTION: Why?".into()]),fail:false,fault_after_second:false,cancel_after_first:None,after_first:None}
 }
 #[test]
 fn no_output_disagreement_cancellation_and_device_uncertainty_remain_explicit() {
@@ -623,6 +627,46 @@ fn actual_orchestrator_uses_stored_batch_twice_and_records_unverified_output() {
     ));
     // Opening/reconstructing the ledger makes no device/model effects.
     assert_eq!(calls.borrow().len(), 2);
+}
+
+#[test]
+fn ordinary_marked_question_abstention_preserves_legacy_ink_and_interpreted_user() {
+    for (marker, retained) in [("present", true), ("absent", false)] {
+        let fixture = SimulatorLedger::new();
+        let ledger = fixture.open().unwrap();
+        let store = ledger.store().clone();
+        let state = setup();
+        let initial = state.borrow().pages[0].image();
+        let calls = Rc::new(RefCell::new(vec![]));
+        let mut recording = model(store.clone(), calls.clone());
+        recording.replies = VecDeque::from([format!(
+            "QUESTION: G? unc. here\nQUESTION_BOX: 12,24,48,16\nHANDWRITTEN_QUESTION_MARK: {marker}\n---\nANSWER: NONE"
+        )]);
+        let mut orchestrator = Orchestrator::new(
+            Workflow::with_device(Box::new(SimDevice(state.clone())), false),
+            recording,
+            ledger,
+        );
+        orchestrator.set_trigger_enabled(false);
+        orchestrator.run_iteration().unwrap();
+        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(state.borrow().pages[0].image(), initial);
+        assert!(!state
+            .borrow()
+            .events
+            .iter()
+            .any(|event| event.action == "erase"));
+        let records = records(&Ledger::new(store));
+        assert!(records
+            .iter()
+            .any(|record| matches!(record, Record::LegacyCapture(_))));
+        assert!(records
+            .iter()
+            .all(|record| !matches!(record, Record::Turn(turn) if turn.role == Role::Assistant)));
+        assert!(records.iter().all(|record| !matches!(record, Record::Receipt(receipt) if receipt.marked_question.is_some())));
+        assert_eq!(records.iter().any(|record| matches!(record, Record::Turn(turn)
+            if turn.outcome == Outcome::Interpreted && turn.text.as_deref() == Some("G? unc. here"))), retained);
+    }
 }
 #[test]
 fn storage_failure_prevents_provider_or_output_and_provider_failure_is_durable() {

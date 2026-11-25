@@ -27,7 +27,7 @@ pub struct SmartEraseInput {
     rectangles: Vec<ReaderEraseRectangle>,
 }
 
-fn checked_region(bounds: [i32; 4]) -> Result<BoundingBox> {
+pub(crate) fn checked_region(bounds: [i32; 4]) -> Result<BoundingBox> {
     let [x, y, width, height] = bounds;
     ensure!(
         x >= 0 && y >= 0 && width > 0 && height > 0,

@@ -40,6 +40,24 @@ impl WriterSelection {
         self.draft.revision_id
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn same_draft_and_source(&self, current: &Self) -> bool {
+        // Export admission publishes exact copies of these records as direct
+        // successors so it can guard them atomically with the effect.
+        let unchanged = |old: &Envelope, observed: &Envelope| {
+            old.envelope_version == observed.envelope_version
+                && old.domain_schema_version == observed.domain_schema_version
+                && old.namespace == observed.namespace
+                && old.record_id == observed.record_id
+                && old.kind == observed.kind
+                && old.payload == observed.payload
+                && old.media_descriptors == observed.media_descriptors
+                && (old.revision_id == observed.revision_id
+                    || (observed.parents.len() == 1 && observed.parents.contains(&old.revision_id)))
+        };
+        unchanged(&self.draft, &current.draft) && unchanged(&self.source, &current.source)
+    }
+
     pub(crate) fn published(root: &Envelope, draft: &Envelope, source: &Envelope) -> Result<Self> {
         let value = Self {
             root: ExpectedHeads(BTreeSet::from([root.revision_id])),
@@ -50,7 +68,7 @@ impl WriterSelection {
         value.values()?;
         Ok(value)
     }
-    pub(crate) fn values(&self) -> Result<(Turn, NormalizedTextSource)> {
+    pub(crate) fn values(&self) -> Result<(Turn, WriterSource)> {
         ensure!(
             self.notebook.is_none(),
             "notebook selection requires its typed export path"
@@ -58,9 +76,7 @@ impl WriterSelection {
         let Record::Turn(draft) = Ledger::decode(&self.draft)? else {
             bail!("not a Writer draft")
         };
-        let Record::NormalizedText(source) = Ledger::decode(&self.source)? else {
-            bail!("not a text source")
-        };
+        let source = WriterSource::decode(Ledger::decode(&self.source)?)?;
         ensure!(
             draft.mode == Mode::Writer
                 && draft.role == Role::Assistant
@@ -70,7 +86,7 @@ impl WriterSelection {
             "invalid Writer selection"
         );
         crate::writer::parse_draft(draft.text.as_deref().context("draft text missing")?)?;
-        Ok((draft, *source))
+        Ok((draft, source))
     }
     pub(crate) fn published_notebook(
         ledger: &Ledger,
@@ -136,7 +152,19 @@ impl WriterSelection {
         )?;
         Ok((draft, *source, *plan))
     }
-    fn draft_value(&self) -> Result<Turn> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn presentation(&self) -> Result<(Turn, Uuid, Option<String>)> {
+        if self.notebook.is_some() {
+            let (draft, source, _) = self.notebook_values()?;
+            Ok((draft, source.document, None))
+        } else {
+            let (draft, source) = self.values()?;
+            let document = source.document.document;
+            Ok((draft, document, source.region.map(|region| region.about)))
+        }
+    }
+
+    pub(crate) fn draft_value(&self) -> Result<Turn> {
         if self.notebook.is_some() {
             Ok(self.notebook_values()?.0)
         } else {
@@ -193,11 +221,29 @@ impl WriterExportInput {
         association: &ExportAssociation,
     ) -> Result<String> {
         let draft = self.selection.draft_value()?;
+        let (correlation, effect) = if let Some(attempt) = &association.capacities {
+            association.validate_attempt()?;
+            ensure!(
+                association.id
+                    == CapacitiesAttempt::association_id(
+                        association.conversation,
+                        attempt.space,
+                        attempt.correlation
+                    ),
+                "foreign Capacities association key"
+            );
+            (attempt.correlation, attempt.id)
+        } else {
+            (
+                association.id,
+                association.attempt.as_ref().context("attempt missing")?.id,
+            )
+        };
         ensure!(
             self.grant.store == ledger.store().as_ref() as *const Store as usize
                 && self.grant.conversation == association.conversation
-                && self.grant.correlation == association.id
-                && self.grant.effect == association.attempt.as_ref().context("attempt missing")?.id
+                && self.grant.correlation == correlation
+                && self.grant.effect == effect
                 && self.grant.draft == draft.id,
             "foreign Writer flow grant"
         );
@@ -305,6 +351,10 @@ impl WriterExportInput {
 pub(crate) struct WriterExportGuard {
     heads: Vec<(Namespace, Uuid, Uuid)>,
     archive: Option<Box<ArchivedNormalizedSource>>,
+    regional_media: Vec<Media>,
+    ready_pin: Option<String>,
+    mode_pin: crate::storage::sync::mode::SyncModeToken,
+    regional_reads: std::sync::Mutex<crate::storage::selection::SelectedReadBudget>,
     live: Arc<Store>,
 }
 impl WriterExportGuard {
@@ -314,7 +364,11 @@ impl WriterExportGuard {
         live: Arc<Store>,
     ) -> Result<Self> {
         let mut archive = None;
+        let mut regional_media = Vec::new();
         for record in records {
+            if let Record::RegionSource(region) = Ledger::decode(record)? {
+                regional_media.extend(region.media());
+            }
             if record.namespace == Namespace::Source
                 && record.domain_schema_version == notebook::NOTEBOOK_SOURCE_SCHEMA
             {
@@ -325,12 +379,25 @@ impl WriterExportGuard {
                 archive = Some(source);
             }
         }
+        let mut reads = crate::storage::selection::SelectedReadBudget::new(
+            0,
+            4096,
+            crate::storage::MAX_RECORD as u64 * 1024,
+            256 * 1024 * 1024,
+        );
+        live.check_runtime_policy(&mut reads)?;
+        let ready_pin = live.target_runtime_pin(&mut reads)?;
+        let mode_pin = live.sync_mode_snapshot()?.token;
         Ok(Self {
             heads: std::iter::once(root)
                 .chain(records)
                 .map(|e| (e.namespace, e.record_id, e.revision_id))
                 .collect(),
             archive,
+            regional_media,
+            regional_reads: std::sync::Mutex::new(reads),
+            ready_pin,
+            mode_pin,
             live,
         })
     }
@@ -346,6 +413,30 @@ impl WriterExportGuard {
         {
             return Ok(false);
         }
+        let mut reads = self
+            .regional_reads
+            .lock()
+            .map_err(|_| anyhow::anyhow!("regional export media allowance unavailable"))?;
+        self.live.check_runtime_policy(&mut reads)?;
+        if self.live.target_runtime_pin(&mut reads)? != self.ready_pin
+            || self.live.sync_mode_snapshot()?.token != self.mode_pin
+        {
+            return Ok(false);
+        }
+        for media in &self.regional_media {
+            reads.charge(0, 1, 0, media.bytes)?;
+            if ledger
+                .store
+                .open_object(&ObjectRef {
+                    sha256: media.sha256.clone(),
+                    bytes: media.bytes,
+                })
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        drop(reads);
         let heads = ledger.store.snapshot_heads_matching(
             &[
                 Namespace::Conversation,
@@ -453,6 +544,9 @@ impl Ledger {
             .filter(|e| e.namespace == Namespace::Source && e.record_id == turn.sources[0])
             .collect();
         ensure!(sources.len() == 1, "source absent or conflicted");
+        if let Record::RegionSource(region) = Self::decode(sources[0])? {
+            self.regional_source_proof(&region, &mut || Ok(()))?;
+        }
         let mut selected = WriterSelection {
             root: expected,
             draft: drafts[0].clone(),
@@ -577,5 +671,11 @@ impl Ledger {
             "foreign Writer selection"
         );
         Ok(selected)
+    }
+}
+
+impl Ledger {
+    pub(crate) fn original_writer_flow(&self, operation: Uuid, fingerprint: &str) -> Result<bool> {
+        Ok(self.replay(operation, fingerprint)?.is_some())
     }
 }

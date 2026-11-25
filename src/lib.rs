@@ -1,5 +1,9 @@
 include!("development_pre_enter_guard.rs");
 
+#[cfg(test)]
+#[path = "../tests/fixtures/epub.rs"]
+mod epub_fixture;
+
 pub mod analysis;
 pub mod archive_maintenance;
 pub mod config;
@@ -8,6 +12,7 @@ pub mod conversation_feedback;
 pub mod conversation_layout;
 pub mod device;
 pub mod handwriting;
+pub mod handwriting_transcription;
 pub mod llm;
 mod measurement;
 pub mod memory;
@@ -17,6 +22,7 @@ pub mod outbox_status;
 pub mod reader_runtime;
 pub mod restore_maintenance;
 pub mod retrieval;
+pub mod shared_preferences;
 pub mod simulator;
 pub mod storage;
 pub mod util;
