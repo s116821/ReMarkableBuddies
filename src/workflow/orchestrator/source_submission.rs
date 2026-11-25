@@ -349,18 +349,30 @@ impl<M: LLMEngine> Orchestrator<M> {
                 .as_ref()
                 .is_some_and(|owner| owner.opened_render_started())
         {
-            let output = request.map_or_else(
-                || format!("A: {message}\n"),
-                |request| crate::workflow::resident_output::format_exchange(request, message),
-            );
-            if let Err(error) = self.workflow.render_resident_answer(
-                &self.ledger,
-                conversation,
-                crate::workflow::resident_output::ResidentOutputText::Plain(&output),
-                Some(binding),
-                &mut || Ok(()),
-            ) {
-                log::warn!("Buddy failure reply remains in conversation history: {error:#}");
+            use crate::workflow::resident_output::{
+                format_exchange, ResidentOutputOutcome, ResidentOutputText,
+            };
+
+            let reply = format!("A: {message}\n");
+            let output = request.map(|request| format_exchange(request, message));
+            let mut render = |body: &str| {
+                self.workflow.render_resident_answer(
+                    &self.ledger,
+                    conversation,
+                    ResidentOutputText::Plain(body),
+                    Some(binding),
+                    &mut || Ok(()),
+                )
+            };
+            let result = match output.as_deref() {
+                Some(full) => match render(full) {
+                    Ok(ResidentOutputOutcome::Unavailable) => render(&reply),
+                    result => result,
+                },
+                None => render(&reply),
+            };
+            if !matches!(result, Ok(ResidentOutputOutcome::SubmittedUnverified)) {
+                log::warn!("Buddy failure reply remains in conversation history: {result:?}");
             }
         }
         Ok(())

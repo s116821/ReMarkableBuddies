@@ -490,7 +490,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         if let Some(opened) = opened {
             opened.exchange = attempt.user.exchange;
-            opened.mode = attempt.user.mode;
+            opened.mode = attempt.user.mode.clone();
         }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let result = match observed_book {
