@@ -30,16 +30,16 @@ Legacy `openspec/...` references in component guides resolve there after migrati
 
 ### Handwritten question marks
 
-Automatic question erasure is disabled in the standard installation. Under the
-planned Reader convention, a handwritten `?` anywhere in a fragment lets Buddy
-erase that fragment after capture. The mark gives permission without a
-separate intent check or confirmation prompt. When enabled, erasure preserves
-surrounding notes, circles, highlights, and underlying content. Unmarked
-handwriting stays in place. Typed requests and Writer keep their existing
-behavior. Buddy will save the screenshot and interpreted question before
-erasure, then show that question on the Buddy page even if it cannot answer.
-You can review and correct the saved interpretation; erasure does not confirm
-that Buddy read it correctly.
+On a source page, a handwritten `?` anywhere in your question marks the
+associated fragment. Use the same lower-right hold to submit. Buddy saves the
+wording it read and the region of the screenshot for later correction. If the
+fragment is readable but Buddy cannot answer, it can send the saved question
+alone to the Buddy page when page output is available.
+
+Automatic question erasure remains disabled in the standard installation.
+The mark gives permission for a future question-only erase after capture,
+without a separate confirmation prompt. Your source handwriting, circles,
+highlights, and underlying content stay in place today.
 
 Tablet support and live handwriting recognition still require qualification.
 See [the technical notes](docs/TECHNICAL.md#marked-questions-and-erasure).

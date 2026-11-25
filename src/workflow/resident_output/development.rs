@@ -1193,6 +1193,9 @@ impl DisplayFormat {
             ResidentOutputText::Plain(text) | ResidentOutputText::WriterSourceDraft(text) => {
                 (text.to_owned(), None)
             }
+            ResidentOutputText::ReaderQuestion(question) => {
+                (super::format_question(question), None)
+            }
             ResidentOutputText::Reader {
                 question,
                 answer,

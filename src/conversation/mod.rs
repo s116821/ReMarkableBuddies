@@ -1357,14 +1357,16 @@ impl Ledger {
         )
     }
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn interpret_captured_pdf(
         &self,
         root: ExpectedHeads,
         user: ExpectedHeads,
         turn: Turn,
         capture: Uuid,
-        selection: &crate::analysis::ReaderSelection,
+        selection: Option<&crate::analysis::ReaderSelection>,
         prepared: &crate::storage::captured::Captured,
+        marked: Option<marked_question::PreparedMark>,
     ) -> Result<(WriteResult, Vec<Envelope>)> {
         let mut published = Vec::new();
         let (result, _) = self.advance_with_capture(
@@ -1374,9 +1376,9 @@ impl Ledger {
             turn,
             None,
             None,
-            Some((capture, selection)),
+            selection.map(|selection| (capture, selection)),
             Some(prepared),
-            None,
+            marked,
             Some(&mut published),
         )?;
         Ok((result, published))
@@ -1686,7 +1688,7 @@ impl Ledger {
             )?);
         }
         if let Some((marked_question, ordinary)) = marked_question {
-            let mut published = Vec::new();
+            let mut marked_records = Vec::new();
             let (result, fresh) = self.publish_with_capture(
                 operation,
                 fingerprint,
@@ -1694,14 +1696,17 @@ impl Ledger {
                 records,
                 binding,
                 captured,
-                Some(&mut published),
+                Some(&mut marked_records),
                 Some(marked_question),
             )?;
             ensure!(fresh, "marked question interpretation is historical");
             let mut current = captured
                 .context("marked question lost captured ownership")?
                 .clone();
-            current.advance(published)?;
+            if let Some(published) = published {
+                published.extend(marked_records.iter().cloned());
+            }
+            current.advance(marked_records)?;
             let receipt = current
                 .records
                 .iter()

@@ -399,6 +399,7 @@ impl Ledger {
             candidate,
             installed_center,
             None,
+            None,
         )
         .map(|(result, _)| result)
     }
@@ -413,6 +414,7 @@ impl Ledger {
         candidate: &Candidate,
         installed_center: Option<crate::analysis::SelectionCenter>,
         captured: Option<&crate::storage::captured::Captured>,
+        marked: Option<super::marked_question::PreparedMark>,
     ) -> Result<(WriteResult, Vec<crate::storage::Envelope>)> {
         let capture_id = frame.source.record.record;
         let selection = installed_center.map(|center| {
@@ -441,8 +443,8 @@ impl Ledger {
             Some((frame, candidate)),
             resident_target,
             captured,
-            None,
-            resident_target.map(|_| &mut published),
+            marked,
+            (resident_target.is_some() || captured.is_some()).then_some(&mut published),
         )?;
         if resident_target.is_some() {
             // The live frame and the saved source target must name the same

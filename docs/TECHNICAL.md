@@ -32,23 +32,23 @@ src/
 
 ## Marked questions and erasure
 
-The standard installed Reader leaves source questions in place. The planned
-convention uses a handwritten `?` anywhere in its associated fragment as
-permission to erase that fragment after capture. The mark requires no extra
-intent check or confirmation and printed punctuation supplies no permission.
-Only the marked fragment may be erased. Unmarked handwriting, notes, circles,
-highlights, and underlying content stay intact. Typed requests and Writer follow
-their existing paths. Transcription confirmation remains an explicit, separate
-action. Save the screenshot, interpreted question and original source link
-before erasure, then present the saved question on the Buddy page even when
-answer generation abstains.
+The ordinary installed Reader observes a handwritten `?` in the same
+recognition pass that reads the associated fragment. A bounded region in the
+captured overview, its exact User interpretation, and the observed source
+identity are saved together in a marked-question receipt. Independent
+transcription and web-intent agreement still govern answering. When no answer
+can be produced, guarded resident placement can submit the saved User text by
+itself to the Buddy page. Its result remains submitted and unverified until
+durable tablet readback is available.
 
-The development code includes bounded erasure and bound Buddy page presentation
-in the ordinary Reader simulator. Installed support still requires an
-active capture bound to the live viewport, a bounded ink effect that preserves
-surrounding content, and verified output from the Buddy page owner. Physical preservation and
-representative live handwriting recognition remain to be qualified. See the
-[active OpenSpec change](https://github.com/s116821/ReMarkableBuddiesDocs/pull/156).
+The mark grants permission for question-only erasure after capture, without a
+separate user confirmation. Printed punctuation leaves ink intact. The current
+installed SDK lacks a bounded ink mutation with matching viewport, footprint
+and readback, so the standard Reader leaves source ink intact. The simulator
+covers modeled erasure and bound presentation. Physical source-ink preservation,
+durable Buddy readback and representative live handwriting recognition still
+require qualification. See the
+[active OpenSpec change](https://github.com/s116821/ReMarkableBuddiesDocs/pull/206).
 
 ## Historical workflow (v0.1)
 
