@@ -9,6 +9,7 @@ use crate::{
                 research::{
                     openai::{OpenAIWebResearch, TransportOptions},
                     ResearchDirective, ResearchInput, ResearchOptions, ResearchPolicy,
+                    ResearchRefusal,
                 },
                 CombinedBudget,
             },
@@ -173,9 +174,13 @@ pub(in crate::workflow) fn answer(
         let search = research
             .search
             .as_ref()
-            .context("Reader follow-up research unavailable")?;
-        let models = search.resolve(config)?;
-        let (model, endpoint, credential) = models.required_search()?;
+            .ok_or(ResearchRefusal::Unavailable)?;
+        let models = search
+            .resolve(config)
+            .map_err(|_| ResearchRefusal::Unavailable)?;
+        let (model, endpoint, credential) = models
+            .required_search()
+            .map_err(|_| ResearchRefusal::Unavailable)?;
         let endpoint = search.endpoint(endpoint);
         #[cfg(all(test, target_os = "linux", feature = "development-resident-bootstrap"))]
         let endpoint = crate::workflow::orchestrator::researched_fixture::endpoint(endpoint)?;

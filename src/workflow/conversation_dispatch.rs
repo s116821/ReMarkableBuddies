@@ -556,7 +556,8 @@ impl<'a> Dispatch<'a> {
                 crate::conversation::receiving::RequestSource::Original { expected, .. },
             ) => Some(expected),
             SourceDirective::Explicit(
-                crate::conversation::receiving::RequestSource::NoDocument,
+                crate::conversation::receiving::RequestSource::NoDocument
+                | crate::conversation::receiving::RequestSource::CapturedPage { .. },
             ) => None,
             SourceDirective::Inherit { expected, .. } => expected.as_ref(),
         };

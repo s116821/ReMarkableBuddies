@@ -139,20 +139,10 @@ fn from_records(
     let current = request(records, conversation, request_turn)?;
     match directive {
         SourceDirective::Explicit(choice) => {
-            match original(records, current, choice, 512 * 1024, allow_notebook)
+            original(records, current, choice, 512 * 1024, allow_notebook)
                 .map_err(|_| Refusal::InvalidSource)?
-            {
-                SourceAssociation::NoDocument => Ok(RequestSource::NoDocument),
-                SourceAssociation::Original {
-                    origin_turn,
-                    source_record,
-                    expected,
-                } => Ok(RequestSource::Original {
-                    origin_turn,
-                    source_record: source_id(&source_record).ok_or(Refusal::InvalidSource)?,
-                    expected,
-                }),
-            }
+                .request_source()
+                .map_err(|_| Refusal::InvalidSource.into())
         }
         SourceDirective::Inherit {
             request_turn: prior_request,
@@ -188,6 +178,14 @@ fn from_records(
                 SourceAssociation::NoDocument => {
                     ensure!(expected.is_none(), Refusal::UnexpectedKey);
                     Ok(RequestSource::NoDocument)
+                }
+                prior @ SourceAssociation::CapturedPage { .. } => {
+                    ensure!(expected.is_none(), Refusal::UnexpectedKey);
+                    let choice = prior.request_source()?;
+                    let source = original(records, current, choice, 512 * 1024, allow_notebook)
+                        .map_err(|_| Refusal::InvalidSource)?;
+                    ensure!(source == prior, Refusal::ChangedSource);
+                    source.request_source()
                 }
                 SourceAssociation::Original {
                     origin_turn,

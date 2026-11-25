@@ -21,12 +21,19 @@ pub(crate) struct OrdinarySearch<'a> {
 
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 impl<'a> OrdinarySearch<'a> {
-    pub(crate) fn for_installed_pdf(model: &'a str) -> Self {
+    pub(crate) fn for_installed_reader(model: &'a str) -> Self {
         Self {
             model,
             #[cfg(test)]
             fixture_endpoint: "http://127.0.0.1:1/v1/responses",
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+impl OrdinarySearch<'static> {
+    pub(crate) fn for_installed_page() -> Self {
+        Self::for_installed_reader(SEARCH_MODEL)
     }
 }
 

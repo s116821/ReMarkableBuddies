@@ -433,12 +433,7 @@ impl FollowupAttachments {
         context: &super::FrozenRequestContext,
     ) -> Result<Self> {
         let view = context.media_view()?;
-        let original = match context.source() {
-            super::SourceAssociation::NoDocument => None,
-            super::SourceAssociation::Original { source_record, .. } => {
-                Some(source_record.as_ref())
-            }
-        };
+        let original = context.source().source_record();
         let images = super::images::resolve_followup(ledger, view, context.request(), original)?;
         let descriptor = super::encoded(
             &serde_json::json!({

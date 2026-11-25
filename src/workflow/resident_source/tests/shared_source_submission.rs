@@ -248,9 +248,19 @@ impl crate::LLMEngine for SubmissionModel {
             }
             (1, false) => {
                 assert!(!self.images.is_empty());
-                Ok(format!("QUESTION: {QUESTION}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: 24 / 6\n---\nANSWER: Four."))
+                let intent = serde_json::json!({"version":1,"intent":"no-restriction"});
+                Ok(format!("QUESTION: {QUESTION}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: 24 / 6\nREQUEST_WEB_JSON: {intent}\n---\nANSWER: Deferred"))
             }
-            (2, false) => Ok(format!("TRANSCRIPTION: {QUESTION}")),
+            (2, false) => Ok(serde_json::json!({
+                "version": 1,
+                "transcription": QUESTION,
+                "request_web": {"version":1,"intent":"no-restriction"}
+            })
+            .to_string()),
+            (3, false) => Ok(serde_json::json!({
+                "status":"answered","text":"Four.","citations":[]
+            })
+            .to_string()),
             _ => panic!("unexpected extra submission or export"),
         }
     }
@@ -548,6 +558,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 cache: base.join("cache"),
                 credentials: base.join("credentials"),
             },
+            "research_policy": "disabled",
             "product_settings": {
                 "reader_enabled": reader_enabled,
                 "writer_enabled": true,
@@ -688,7 +699,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             std::fs::remove_dir_all(base)?;
             continue;
         }
-        assert_eq!(steps.get(), 3);
+        assert_eq!(steps.get(), if writer_request { 3 } else { 4 });
         assert!(!events.borrow().contains(&"current-target-writer-received"));
         assert_eq!(
             events
