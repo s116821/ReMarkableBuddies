@@ -127,6 +127,23 @@ impl ResidentSourceCapture {
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn installed_region(
+        &self,
+        geometry: target::geometry::Geometry,
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<target::InstalledRegion> {
+        let dimensions = self.capture.dimensions();
+        let masked = geometry.mask_png(self.original_source_png(), dimensions, progress)?;
+        target::InstalledRegion::new(
+            self.document(),
+            self.page(),
+            dimensions,
+            geometry,
+            crate::storage::digest(&masked),
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn writer_page_input(&self) -> Result<(Uuid, u32)> {
         let facts = &self.correspondence.expected;
         let position = facts

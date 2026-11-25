@@ -519,6 +519,7 @@ fn run_with_configuration<E: LLMEngine>(
                 owner: &writer_owner,
                 deadline: started + std::time::Duration::from_secs(300),
                 accepted: None,
+                installed_region: None,
             },
             &mut produced,
         );

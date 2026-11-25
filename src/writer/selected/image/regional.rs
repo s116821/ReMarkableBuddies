@@ -243,6 +243,7 @@ impl SourceProof<'_> {
             normalized_sha256: digest(&serde_json::to_vec(&normalized.document.units)?),
             about: r.target.candidate.about()?,
             normalized,
+            installed_region: None,
             normalization_proof: target::NormalizationProof {
                 profile: serde_json::to_value(&page.profile)?,
                 prompt_sha256: page.prompt_sha256.clone(),

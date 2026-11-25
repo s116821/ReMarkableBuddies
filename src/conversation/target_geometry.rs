@@ -158,6 +158,46 @@ impl Geometry {
         }
         Ok(false)
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn overlaps(&self, other: &Self) -> Result<bool> {
+        fn edges(polygon: &[Point]) -> impl Iterator<Item = (Point, Point)> + '_ {
+            polygon
+                .iter()
+                .copied()
+                .zip(polygon.iter().copied().cycle().skip(1))
+        }
+
+        fn contains(polygon: &[Point], p: Point) -> Result<bool> {
+            let mut inside = false;
+            for (a, b) in edges(polygon) {
+                if (a[1] > p[1]) != (b[1] > p[1])
+                    && (cross(point(a), point(b), point(p))? > 0) == (b[1] > a[1])
+                {
+                    inside = !inside;
+                }
+            }
+            Ok(inside)
+        }
+
+        self.validate()?;
+        other.validate()?;
+        for left in &self.components {
+            for right in &other.components {
+                for (a, b) in edges(left) {
+                    for (c, d) in edges(right) {
+                        if intersect(a, b, c, d)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                if contains(left, right[0])? || contains(right, left[0])? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub fn mask_png(
         &self,
         original: &[u8],

@@ -143,6 +143,7 @@ pub fn run<E: LLMEngine>(
             owner: &owner,
             deadline,
             accepted: None,
+            installed_region: None,
         },
         &mut produced,
     )
@@ -153,6 +154,7 @@ pub(crate) struct TargetRun<'a, 'store> {
     pub(crate) owner: &'a Owner<'store>,
     pub(crate) deadline: Instant,
     pub(crate) accepted: Option<&'a Turn>,
+    pub(crate) installed_region: Option<&'a target::InstalledRegion>,
 }
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
@@ -168,6 +170,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         owner,
         deadline,
         accepted,
+        installed_region,
     } = context;
     if input.validate().is_err()
         || !config.admits_writer(false)
@@ -317,6 +320,12 @@ pub(crate) fn run_owned<E: LLMEngine>(
             TextScope::Page { page: 1 },
             guidance.clone(),
         )?;
+        if let Some(region) = installed_region {
+            ensure!(
+                accepted.is_some() && &region.geometry == geometry,
+                "installed save lacks its accepted regional source"
+            );
+        }
         let regional = RegionSource {
             id: normalized.id,
             conversation,
@@ -330,6 +339,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
             normalized_sha256: digest(&serde_json::to_vec(&document.units)?),
             about: target.candidate.about()?,
             normalized,
+            installed_region: installed_region.cloned(),
             normalization_proof: target::NormalizationProof {
                 profile: serde_json::to_value(&page.profile)?,
                 prompt_sha256: page.prompt_sha256.clone(),
@@ -928,6 +938,7 @@ mod proof_tests {
             normalization_profile: "fixture".into(),
             normalized_sha256: digest(&serde_json::to_vec(&normalized.document.units).unwrap()),
             about: "About: Original region".into(),
+            installed_region: None,
             normalization_proof: target::NormalizationProof {
                 profile,
                 prompt_sha256: digest(b"fixture prompt"),

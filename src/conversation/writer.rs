@@ -140,6 +140,13 @@ impl WriterSource {
         }
     }
     pub(crate) fn scope(&self) -> String {
+        if let Some(region) = self
+            .region
+            .as_ref()
+            .and_then(|r| r.installed_region.as_ref())
+        {
+            return region.scope();
+        }
         format!(
             "normalized-document:{}:{}",
             self.document.document,

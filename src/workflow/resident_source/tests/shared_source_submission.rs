@@ -55,6 +55,61 @@ enum Circled {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionAction {
+    Save,
+    Update,
+    Separate,
+    Review,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionShape {
+    Left,
+    Right,
+    Overlap,
+    Missing,
+    Competing,
+}
+impl RegionShape {
+    fn geometry(self) -> serde_json::Value {
+        let polygon = |left, right| {
+            serde_json::json!([
+                [left, 100000],
+                [right, 100000],
+                [right, 900000],
+                [left, 900000]
+            ])
+        };
+        let polygons = match self {
+            Self::Left => vec![polygon(100000, 500000)],
+            Self::Right => vec![polygon(650000, 950000)],
+            Self::Overlap => vec![polygon(400000, 550000)],
+            Self::Missing => return serde_json::Value::Null,
+            Self::Competing => vec![polygon(100000, 500000), polygon(650000, 950000)],
+        };
+        serde_json::json!({"components":polygons})
+    }
+}
+
+impl RegionAction {
+    fn request(self) -> &'static str {
+        match self {
+            Self::Save => "Save a note about only the circled part.",
+            Self::Update => "Save an updated note about the circled part.",
+            Self::Separate => "Save a separate note about the circled part.",
+            Self::Review => "Make a note about the circled part for me to review before saving.",
+        }
+    }
+
+    fn subject(self) -> &'static str {
+        match self {
+            Self::Update => "equation in the selection",
+            _ => "selected equation",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Submission {
     Reader,
     CurrentPage,
@@ -62,6 +117,7 @@ enum Submission {
     Circled(Circled),
     WholeNotebook,
     SaveNotebook(Save),
+    SaveRegion(RegionAction, RegionShape, usize),
     Save(Save),
 }
 
@@ -146,6 +202,65 @@ impl crate::LLMEngine for SubmissionModel {
     fn execute(&mut self) -> Result<String> {
         let step = self.steps.get();
         self.steps.set(step + 1);
+        if let Submission::SaveRegion(action, shape, revision) = self.submission {
+            return match step {
+                0 => {
+                    assert_eq!(self.images.len(), 1);
+                    assert!(self.text[0].contains("writer-export-circled"));
+                    assert!(self.text[0].contains("before it is saved"));
+                    *self.source.borrow_mut() = Some(self.images[0].clone());
+                    let target = serde_json::json!({
+                        "subject": action.subject(),
+                        "geometry": shape.geometry(),
+                        "understanding": {"status":"interpreted"},
+                    });
+                    let response = if action == RegionAction::Review {
+                        serde_json::json!({
+                            "intent":"writer-circled", "request":action.request(), "target":target
+                        })
+                    } else {
+                        serde_json::json!({
+                            "intent":"writer-export-circled", "request":action.request(), "target":target,
+                            "separate_note":action == RegionAction::Separate
+                        })
+                    };
+                    Ok(response.to_string())
+                }
+                1 => {
+                    let original = image::load_from_memory(
+                        &STANDARD.decode(self.source.borrow().as_deref().unwrap())?,
+                    )?
+                    .to_rgb8();
+                    let [masked] = self.images.as_slice() else {
+                        panic!("expected only the masked region")
+                    };
+                    let masked = image::load_from_memory(&STANDARD.decode(masked)?)?.to_rgb8();
+                    let (inside, outside) = match shape {
+                        RegionShape::Left => (32, 150),
+                        RegionShape::Right => (150, 32),
+                        RegionShape::Overlap => (87, 150),
+                        _ => panic!("ambiguous export reached recognition"),
+                    };
+                    assert_eq!(masked.get_pixel(inside, 32), original.get_pixel(inside, 32));
+                    assert_eq!(masked.get_pixel(outside, 32).0, [255, 255, 255]);
+                    Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":REGION_TEXT}]}).to_string())
+                }
+                2 => {
+                    assert!(self.images.is_empty());
+                    let input: serde_json::Value = serde_json::from_str(self.text.last().unwrap())?;
+                    assert_eq!(input["request"], action.request());
+                    assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
+                    assert_eq!(
+                        input["source_provenance"]["region"]["about"],
+                        format!("About: {}", action.subject())
+                    );
+                    Ok(format!(
+                        "# Circled note\n\nRegional draft revision {revision}."
+                    ))
+                }
+                _ => panic!("unexpected circled Writer stage"),
+            };
+        }
         if let Submission::SaveNotebook(save) = self.submission {
             let request = if save == Save::Separate {
                 SEPARATE_NOTEBOOK
@@ -412,6 +527,164 @@ fn seed_history(
         },
     )?;
     Ok(latest)
+}
+
+#[test]
+fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
+    use RegionAction::{Review, Save, Separate, Update};
+    use RegionShape::{Competing, Left, Missing, Overlap, Right};
+
+    let base = std::env::temp_dir().join(format!("region-save-{}", ConversationId::new_v4()));
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "paths": StorePaths {
+            data: base.join("data"),
+            cache: base.join("cache"),
+            credentials: base.join("credentials"),
+        },
+        "product_settings": {
+            "reader_enabled": true,
+            "writer_enabled": true,
+            "export_destination": "mem",
+        }
+    }))?;
+    let store = crate::reader_runtime::ordinary_store(&config, None)
+        .map_err(|report| report.into_ordinary_startup_error())?;
+    let ledger = Ledger::new(store.clone());
+    let mut dispatch =
+        Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+    let destination = Arc::new(crate::writer_flow::tests::Destination::default());
+    dispatch.test_note_destination = Some(destination.clone());
+    let document = ConversationId::new_v4();
+    let page = ConversationId::new_v4();
+    let mut primary = None;
+
+    let attempts = [
+        (Save, Missing, 0, 0),
+        (Save, Competing, 0, 0),
+        (Review, Left, 0, 0),
+        (Save, Left, 1, 1),
+        (Update, Left, 2, 1),
+        (Save, Right, 3, 2),
+        (Save, Overlap, 3, 2),
+        (Separate, Left, 4, 3),
+        (Update, Left, 5, 3),
+        (Save, Left, 5, 3),
+        (Update, Right, 6, 3),
+    ];
+    for (index, (action, shape, writes, notes)) in attempts.into_iter().enumerate() {
+        let displayed = index + 1 == attempts.len();
+        let mode = if displayed {
+            "reconnect-source-handoff-writer-insert"
+        } else {
+            "reconnect-source-handoff-text-refusal"
+        };
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![], Duration::ZERO, &store);
+        let native = Fixture::new();
+        native.declare_source(document, page);
+        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join(format!("profile-{index}")),
+            runtime.identity(),
+        )?;
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            writer_slot: None,
+            writer_slot_fault: false,
+            refinement_slot: None,
+        }));
+        let written = Rc::new(RefCell::new(Vec::new()));
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(RecognitionProbe {
+                    confirmed_source: displayed,
+                    refuse_writer_text: !displayed,
+                    insertion_source: displayed.then_some(page),
+                    rendered_text: Some(written.clone()),
+                    ..RecognitionProbe::default()
+                })),
+        );
+        let steps = Rc::new(Cell::new(0));
+        let model = SubmissionModel {
+            submission: Submission::SaveRegion(action, shape, index),
+            last_visible_text: None,
+            steps: steps.clone(),
+            source: Rc::new(RefCell::new(None)),
+            images: vec![],
+            text: vec![],
+        };
+        if index == 8 {
+            destination.lose_next_ack();
+        }
+        let before = destination.counts();
+        assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
+        let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        if matches!(shape, Missing | Competing) {
+            result?;
+            assert_eq!(steps.get(), 1);
+            assert_eq!(destination.counts(), before);
+        } else if displayed {
+            result?;
+            assert_eq!(
+                written.borrow().as_slice(),
+                &[crate::workflow::resident_output::format_exchange(
+                    action.request(),
+                    format!(
+                        "{SAVED}\n\nCircled note\n\nAbout: {}\n\nRegional draft revision {index}.",
+                        action.subject()
+                    ),
+                )]
+            );
+        } else {
+            let refusal = result.unwrap_err();
+            assert!(
+                refusal.to_string().contains("Writer draft cannot be typed"),
+                "{refusal:#}"
+            );
+            assert_eq!(steps.get(), 3);
+            assert!(written.borrow().is_empty());
+        }
+        assert_eq!(events.borrow().contains(&"insert"), displayed);
+        assert_eq!(destination.counts().2, writes);
+        assert_eq!(destination.remote_note_count(), notes);
+        if matches!(index, 6 | 9) {
+            assert_eq!(destination.counts(), before);
+        }
+        let exports =
+            store.snapshot_heads_matching(&[Namespace::ExportAssociation], 8, |_| true)?;
+        assert_eq!(exports.len(), notes);
+        for export in exports {
+            let Record::Export(export) = Ledger::decode(&export)? else {
+                anyhow::bail!("expected circled association");
+            };
+            assert!(export.source_scope.starts_with(&format!(
+                "normalized-document:{document}:installed-region:{page}:",
+            )));
+            if index == 3 {
+                primary = Some((export.id, export.native_note.clone()));
+            }
+            if primary.as_ref().is_some_and(|(id, _)| *id == export.id) {
+                assert_eq!(primary.as_ref().unwrap().1, export.native_note);
+                assert_eq!(
+                    export.outcome,
+                    if index >= 8 {
+                        Outcome::ReconcileRequired
+                    } else {
+                        Outcome::Completed
+                    }
+                );
+            }
+        }
+    }
+    drop((dispatch, ledger, store));
+    std::fs::remove_dir_all(base)?;
+    Ok(())
 }
 
 #[test]

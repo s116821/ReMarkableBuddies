@@ -32,12 +32,13 @@ impl NoteExport {
 pub(super) enum NoteScope {
     Page,
     Notebook,
+    Region(Uuid),
 }
 
 impl NoteScope {
     fn conversation(self, capture: &ResidentSourceCapture) -> Uuid {
         match self {
-            Self::Page => source_conversation(capture),
+            Self::Page | Self::Region(_) => source_conversation(capture),
             Self::Notebook => writer::stage(capture.document(), "whole-notebook-conversation"),
         }
     }
@@ -45,6 +46,7 @@ impl NoteScope {
     fn correlation(self, capture: &ResidentSourceCapture) -> Uuid {
         match self {
             Self::Page => source_note(capture),
+            Self::Region(id) => crate::conversation::target::InstalledRegion::correlation(id),
             Self::Notebook => writer::stage(capture.document(), "whole-notebook-note"),
         }
     }
@@ -55,6 +57,7 @@ impl NoteScope {
             match self {
                 Self::Page => "separate-current-page-note",
                 Self::Notebook => "separate-whole-notebook-note",
+                Self::Region(_) => "separate-installed-region-note",
             },
         )
     }
@@ -362,7 +365,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 NoteScope::Page => {
                     legacy_page_correlation(&ledger, destination, &selected, conversation, current)?
                 }
-                NoteScope::Notebook => {
+                NoteScope::Notebook | NoteScope::Region(_) => {
                     let association = destination.association_id(conversation, current);
                     if ledger
                         .original_exports(conversation, current)?

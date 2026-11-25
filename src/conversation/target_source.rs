@@ -1448,6 +1448,9 @@ impl Ledger {
     }
 }
 
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod region_export;
+
 impl Ledger {
     /// Reopen/refine/export resolves the exact saved target and original capture,
     /// reuses its established validators and verifies the deterministic mask.
@@ -1486,6 +1489,17 @@ impl Ledger {
                 ),
             "regional saved target correspondence differs"
         );
+        if let Some(exact) = &region.installed_region {
+            let Record::ResidentCapture(capture) = &view.source else {
+                bail!("installed export region requires a resident original");
+            };
+            ensure!(
+                exact.document == capture.before.document
+                    && exact.page == capture.before.page
+                    && Some(&exact.geometry) == view.target.candidate.geometry.as_ref(),
+                "installed export region differs from its historical target"
+            );
+        }
         // One cumulative proof allowance, charged before each actual media read.
         let mut remaining = 64 * 1024 * 1024u64;
         let mut objects = 0usize;
