@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
+    path::Path,
 };
 
 const QUESTION: &str = "Which compass should I use?";
@@ -87,6 +88,13 @@ impl crate::LLMEngine for ReaderModel {
     fn execute(&mut self) -> Result<String> {
         let mut calls = self.calls.borrow_mut();
         calls.push((self.parts.clone(), self.images.clone()));
+        if self
+            .parts
+            .first()
+            .is_some_and(|part| part.starts_with("Answer the Reader request using"))
+        {
+            return Ok("Typed continuation answer.".into());
+        }
         let legacy_analysis = self.parts.first().is_some_and(|part| {
             part.contains("QUESTION_BOX:") && !part.contains("REQUEST_WEB_JSON")
         });
@@ -519,6 +527,51 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
             }
         }
     }
+    // Model the typed receiving boundary with a verified owner observation.
+    // The native keyboard event path is covered separately.
+    let crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate(binding) =
+        ledger.inspect_page_association(conversation, document, buddy)?
+    else {
+        anyhow::bail!("Expected the existing Buddy binding");
+    };
+    let mut visit = binding.receipt().source.clone();
+    visit.page = buddy;
+    visit.content_revision = Some("current-typed-fixture".into());
+    let scope = crate::workflow::conversation_dispatch::RequestScope {
+        conversation,
+        operation: ConversationId::new_v4(),
+        root: ledger.expected(Namespace::Conversation, conversation)?,
+        source: visit.clone(),
+    };
+    let mut typed_dispatch =
+        crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+    let mut typed_model = ReaderModel {
+        parts: vec![],
+        images: vec![],
+        calls: calls.clone(),
+        question: QUESTION,
+        intent: json!({"version":1,"intent":"no-restriction"}),
+        case: Case::Disabled,
+    };
+    let typed = "Clarify that in one line.";
+    typed_dispatch.reader(&ledger, &mut typed_model, typed, None, &scope, &mut || {
+        Ok(visit.clone())
+    })?;
+    {
+        let frames = calls.borrow();
+        let [(parts, images)] = frames.as_slice() else {
+            anyhow::bail!("Expected one typed Reader request");
+        };
+        let frame: Value = serde_json::from_str(&parts[1])?;
+        assert_eq!(frame["request"], typed);
+        assert!(frame["history"]
+            .as_array()
+            .is_some_and(|turns| turns.iter().any(|turn| { turn["text"] == QUESTION })));
+        assert_eq!(frame["archived_sources"], json!([]));
+        assert_eq!(frame["normalized_text"], json!([]));
+        assert_eq!(images, &original_images);
+    }
+
     let records = ledger.inspect(conversation, false)?;
     assert_eq!(
         records
@@ -530,6 +583,93 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
     );
     drop((dispatch, reader, ledger, store));
     std::fs::remove_dir_all(base)?;
+    Ok(())
+}
+
+pub(super) fn check_ordinary_reader_with_archived_notebook(
+    store: &Arc<Store>,
+    root: &Path,
+    templates: &Path,
+    document: ConversationId,
+    pages: &[ConversationId],
+) -> Result<()> {
+    // The preceding installed Writer request produced real retained notebook
+    // normalization, including text from an original other than the current page.
+    let archives = store.snapshot_heads_matching(&[Namespace::Source], 8, |head| {
+        head.payload["record_kind"].as_str() == Some("archived-normalized-source")
+    })?;
+    let [archive] = archives.as_slice() else {
+        anyhow::bail!("Expected one retained notebook archive before Reader");
+    };
+    let Record::ArchivedNormalizedSource(archive) = Ledger::decode(archive)? else {
+        anyhow::bail!("Expected a retained notebook source");
+    };
+    assert_eq!(archive.document, document);
+    assert!(archive
+        .load(store)?
+        .document()
+        .units
+        .iter()
+        .any(|unit| { unit.page == Some(2) && unit.text.contains("Last page.") }));
+
+    let mode = "reconnect-source-handoff";
+    let (mut workflow, events, _) =
+        workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, store);
+    let native = Fixture::new();
+    native.declare_source(document, pages[0]);
+    native.declare_source_order(pages);
+    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
+    let owner = workflow.resident_source.as_mut().unwrap();
+    owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+    owner.session = Some(Box::new(OwnedSession {
+        runtime,
+        _fixture: native,
+        events,
+        delivery_fault: false,
+        observe_file_change: None,
+        writer_slot: None,
+        writer_slot_fault: false,
+        refinement_slot: None,
+    }));
+    let config = crate::config::Config {
+        paths: store.paths.clone(),
+        research_policy: Some(Some(ResearchPolicy::Disabled)),
+        ..Default::default()
+    };
+    let ledger = Ledger::new(store.clone());
+    let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+    let calls = Rc::new(RefCell::new(vec![]));
+    let model = ReaderModel {
+        parts: vec![],
+        images: vec![],
+        calls: calls.clone(),
+        question: "What does the last page say?",
+        intent: json!({"version":1,"intent":"no-restriction"}),
+        case: Case::Disabled,
+    };
+    let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+    super::original_pdf::saved_notebook::with_fixture_paths(root, templates, || {
+        reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))
+    })?;
+
+    let calls = calls.borrow();
+    let [_, verification, answer] = calls.as_slice() else {
+        anyhow::bail!("Expected only two readings and the captured-page answer");
+    };
+    let frame: Value = serde_json::from_str(&answer.0[1])?;
+    let request = &frame["context"]["request_context"];
+    assert_eq!(request["source"]["kind"], "captured-page");
+    assert_eq!(
+        request["source"]["source_record"]["record"]["before"]["page"],
+        json!(pages[0])
+    );
+    assert!(request["retrieval"].is_null());
+    assert_eq!(answer.1, verification.1);
+    assert!(answer.0.iter().all(|part| !part.contains("Last page.")));
+    assert!(answer
+        .0
+        .iter()
+        .all(|part| !part.contains(&archive.id.to_string())));
     Ok(())
 }
 

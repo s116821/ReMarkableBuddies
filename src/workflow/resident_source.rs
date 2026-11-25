@@ -318,6 +318,8 @@ pub(super) struct ResidentSourceOwner {
     opened_output: Option<OpenedOutput>,
     #[cfg(all(test, feature = "installed-resident-output"))]
     ordinary_pdf_fixture: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    #[cfg(all(feature = "installed-resident-output", test))]
+    original_book_fixture_selected: bool,
     #[cfg(all(
         feature = "development-resident-bootstrap",
         feature = "development-input-diagnostics"
@@ -347,6 +349,8 @@ impl ResidentSourceOwner {
             opened_output: None,
             #[cfg(all(test, feature = "installed-resident-output"))]
             ordinary_pdf_fixture: None,
+            #[cfg(all(feature = "installed-resident-output", test))]
+            original_book_fixture_selected: false,
             #[cfg(all(
                 feature = "development-resident-bootstrap",
                 feature = "development-input-diagnostics"
@@ -757,6 +761,11 @@ impl ResidentSourceOwner {
             &mut progress,
             original_pdf::ObservedOriginalPdf::captured_by_owner,
         )
+    }
+
+    #[cfg(all(feature = "installed-resident-output", test))]
+    pub(super) fn original_book_fixture_selected(&self) -> bool {
+        self.original_book_fixture_selected
     }
 
     #[cfg(feature = "installed-resident-output")]
@@ -2379,6 +2388,7 @@ pub(crate) mod tests {
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_with_installed_output();
         owner.ordinary_pdf_fixture = Some((root, PathBuf::new()));
+        owner.original_book_fixture_selected = true;
         owner.factory = Box::new(OwnedFactory {
             source: Some((document, page)),
             events: events.clone(),
@@ -2724,7 +2734,7 @@ pub(crate) mod tests {
         document: ConversationId,
         page: ConversationId,
         root: PathBuf,
-        executable: PathBuf,
+        original_file_executable: Option<PathBuf>,
         mut rounds: OrdinaryPdfFixtureRounds<'_>,
         model: impl FnOnce(&Ledger, PathBuf, Rc<Cell<bool>>) -> M,
         inspect: impl FnOnce(&Ledger, &[Record]) -> Result<()>,
@@ -2825,7 +2835,8 @@ pub(crate) mod tests {
         } else {
             InstalledReaderSelection::fixture_with_installed_output()
         };
-        owner.ordinary_pdf_fixture = Some((root, executable));
+        owner.original_book_fixture_selected = original_file_executable.is_some();
+        owner.ordinary_pdf_fixture = Some((root, original_file_executable.unwrap_or_default()));
         owner.session = Some(Box::new(OwnedSession {
             runtime,
             _fixture: native,

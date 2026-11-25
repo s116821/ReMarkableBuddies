@@ -1,4 +1,4 @@
-//! Ordinary installed Reader on a captured page, with a verified PDF or EPUB index when available.
+//! Ordinary installed Reader and the retained original-file qualification path.
 use super::{
     encode_model_images,
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
@@ -39,6 +39,26 @@ use std::{
 type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryBookSource>>);
 
 pub(super) fn acquire(
+    workflow: &mut Workflow,
+    local: Option<&Dispatch<'_>>,
+) -> Result<Acquisition> {
+    #[cfg(test)]
+    if workflow
+        .resident_source
+        .as_ref()
+        .is_some_and(|owner| owner.original_book_fixture_selected())
+    {
+        return acquire_original_file(workflow, local);
+    }
+    #[cfg(not(test))]
+    let _ = local;
+    Ok((workflow.acquire_reader_evidence()?, Ok(None)))
+}
+
+// The original-file adapter needs explicit scope admission. Only the
+// qualification fixture supplies that admission until a user flow exists.
+#[cfg_attr(not(test), allow(dead_code))]
+fn acquire_original_file(
     workflow: &mut Workflow,
     local: Option<&Dispatch<'_>>,
 ) -> Result<Acquisition> {
@@ -590,7 +610,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                     expected: book.key.clone(),
                 })
             } else if let Some(binding) = attempt.current_reader_answer_page() {
-                ledger.bound_resident_reader_source(&attempt.user, binding)?
+                let original = ledger.bound_resident_reader_capture(&attempt.user, binding)?;
+                SourceDirective::Explicit(original.map_or(RequestSource::NoDocument, |capture| {
+                    RequestSource::CapturedPage {
+                        origin_turn: capture.turn,
+                        source_record: capture.id,
+                    }
+                }))
             } else {
                 SourceDirective::Explicit(RequestSource::CapturedPage {
                     origin_turn: user,

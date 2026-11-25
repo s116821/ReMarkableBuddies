@@ -159,11 +159,16 @@ impl Drop for Content<'_> {
 
 /// Ordinary local follow-up receiving. Its output is a draft and grants no
 /// page mutation authority. Historical answer reports retain their own format.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_up(
     ledger: &crate::conversation::Ledger,
     engine: &mut dyn LLMEngine,
     context: &crate::conversation::ContextView,
     request: &str,
+    bound_page: Option<(
+        &crate::conversation::Turn,
+        Option<&crate::conversation::Record>,
+    )>,
     preference: &crate::config::PersonalizationSnapshot,
     memory: Option<(
         &crate::memory::LocalMemory,
@@ -172,20 +177,28 @@ pub(crate) fn follow_up(
     )>,
     progress: &mut dyn FnMut() -> Result<()>,
 ) -> Result<String> {
-    let images = super::images::resolve(ledger, context)?;
+    let empty = crate::conversation::ContextView::default();
+    let (images, source_view) = if let Some((turn, source)) = bound_page {
+        (
+            super::images::resolve_followup(ledger, &empty, turn, source)?,
+            &empty,
+        )
+    } else {
+        (super::images::resolve(ledger, context)?, context)
+    };
     let mut payload = serde_json::json!({
         "request":request,
         "history":context.turns,
-        "normalized_text":context.normalized_text,
-        "archived_sources":context.archived_sources,
+        "normalized_text":source_view.normalized_text,
+        "archived_sources":source_view.archived_sources,
         "historical_images":images.associations,
     });
-    if !context.region_sources.is_empty() {
-        payload["regional_sources"] = serde_json::to_value(&context.region_sources)?;
+    if !source_view.region_sources.is_empty() {
+        payload["regional_sources"] = serde_json::to_value(&source_view.region_sources)?;
     }
-    if !context.target_uses.is_empty() {
-        payload["target_uses"] = serde_json::to_value(&context.target_uses)?;
-        payload["targets"] = serde_json::to_value(&context.targets)?;
+    if !source_view.target_uses.is_empty() {
+        payload["target_uses"] = serde_json::to_value(&source_view.target_uses)?;
+        payload["targets"] = serde_json::to_value(&source_view.targets)?;
     }
     let payload = super::encoded(&payload, 96 * 1024)?;
     progress()?;

@@ -388,15 +388,39 @@ impl<'a> Dispatch<'a> {
             );
             Ok(())
         };
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let bound_page = match ledger.inspect_page_association(
+            admitted.conversation,
+            admitted.source.document,
+            admitted.source.page,
+        )? {
+            crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate(
+                binding,
+            ) if binding.receipt().evidence_origin == "installed-native-guarded-v1" => Some(
+                ledger
+                    .bound_resident_reader_capture(&persisted_user, binding.receipt())?
+                    .map(crate::conversation::Record::ResidentCapture),
+            ),
+            _ => None,
+        };
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        let bound_page: Option<Option<crate::conversation::Record>> = None;
+        let memory_document = match &bound_page {
+            Some(None) => None,
+            _ => Some(admitted.source.document),
+        };
         let answer = crate::conversation::receiving::answer::follow_up(
             ledger,
             engine,
             &context,
             request,
+            bound_page
+                .as_ref()
+                .map(|source| (&persisted_user, source.as_ref())),
             &self.config.personalization_snapshot()?,
             self.memory
                 .as_deref()
-                .map(|provider| (provider, Some(admitted.source.document), timestamp)),
+                .map(|provider| (provider, memory_document, timestamp)),
             &mut progress,
         );
         let answer = match answer {

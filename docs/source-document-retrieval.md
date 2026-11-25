@@ -73,17 +73,15 @@ The example prints bounded JSON only after complete normalization. It does not
 install an index, persist a cache, select a conversation source or call a model.
 Use `Index::build(result.document)` and keep its returned key for local queries.
 
-### Asking about an open EPUB on the tablet
+### Asking about a page on the tablet
 
-To let ordinary Reader use the original text of the open book, set
-`reader.researched_epub` in the tablet's local configuration. For example,
-`{"reader":{"researched_epub":{}}}` enables book retrieval for a question
-that explicitly declines internet research. Questions that request web
-research also need a supported `research_model` and the usual research policy.
+Use the lower-right finger hold on the source page to submit a question. An
+ordinary Reader request uses the verified page immediately left of the Buddy
+conversation, the current conversation, and relevant memory. A typed follow-up
+uses the same original page when its capture is available. A blank conversation
+without an original can answer from its current conversation and memory.
 
-On an original book page, circle the relevant content, write your question
-and submit with the lower-right finger hold. Reader searches the publication
-in reading order and can cite text from another chapter. Citations identify
-the section in the original EPUB. Handwritten note pages inserted into the book
-use the ordinary handwritten-page flow. A PDF-only configuration continues
-to apply only to PDF files.
+Existing original-file configuration and saved transcriptions stay readable.
+An ordinary request does not extract an entire PDF or EPUB or transcribe other
+notebook pages. A way to explicitly add a whole document to a conversation will
+be specified separately.

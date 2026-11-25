@@ -956,6 +956,11 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
             }
             assert!(written.borrow().is_empty());
         }
+        if index == 0 {
+            installed_reader_memory::check_ordinary_reader_with_archived_notebook(
+                &store, &root, &templates, document, &pages,
+            )?;
+        }
         let drafts = store.snapshot_heads_matching(&[Namespace::Conversation], 8, |entry| {
             entry.payload["record"]["text"].as_str() == Some(&draft)
         })?;

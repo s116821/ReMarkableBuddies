@@ -2,7 +2,7 @@ use super::*;
 use crate::{conversation::Role, epub_fixture};
 use anyhow::Context;
 
-fn book(experiment: &str) -> Vec<u8> {
+pub(super) fn book(experiment: &str) -> Vec<u8> {
     use epub_fixture::{package, xhtml, CONTAINER};
     let spine = package(
         r#"<item id="e" href="experiment.xhtml" media-type="application/xhtml+xml"/><item id="i" href="intro.xhtml" media-type="application/xhtml+xml"/>"#,
@@ -69,7 +69,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
         document,
         page,
         fixture.0.clone(),
-        executable.into(),
+        Some(executable.into()),
         crate::workflow::OrdinaryPdfFixtureRounds {
             epub: true,
             rendered: None,
@@ -160,7 +160,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
         document,
         page,
         fixture.0.clone(),
-        executable.into(),
+        Some(executable.into()),
         crate::workflow::OrdinaryPdfFixtureRounds {
             epub: true,
             rendered: Some(rendered.clone()),
@@ -216,7 +216,7 @@ fn check_bound_failure_after_book_edit(
         document,
         page,
         library.into(),
-        executable.into(),
+        Some(executable.into()),
         crate::workflow::OrdinaryPdfFixtureRounds {
             epub: true,
             rendered: Some(rendered.clone()),
@@ -277,7 +277,7 @@ fn check_marked_book_without_search(
         document,
         page,
         library.into(),
-        executable.into(),
+        Some(executable.into()),
         crate::workflow::OrdinaryPdfFixtureRounds {
             epub: true,
             rendered: Some(rendered.clone()),

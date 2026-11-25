@@ -68,101 +68,58 @@ fn request(records: &[Record], conversation: Uuid, id: Uuid) -> Result<&Turn> {
 
 impl Ledger {
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    pub(crate) fn bound_resident_reader_source(
+    pub(crate) fn bound_resident_reader_capture(
         &self,
         request: &Turn,
         binding: &super::BindingReceipt,
-    ) -> Result<SourceDirective> {
+    ) -> Result<Option<Box<super::ResidentCaptureHistory>>> {
         use std::collections::BTreeMap;
-        use SourceResolutionRefusal as Refusal;
 
         ensure!(
             binding.conversation == request.conversation,
-            Refusal::InvalidSource
+            SourceResolutionRefusal::InvalidSource
         );
+        let adjacent = binding
+            .observed_order
+            .windows(2)
+            .any(|pair| pair == [binding.source.page, binding.observed_page]);
+        if !adjacent || binding.source.document != binding.observed_document {
+            return Ok(None);
+        }
+
+        // Scope each turn from the binding and retained captures. An older
+        // request may have searched a whole file or used a different page.
         let records = self.inspect(request.conversation, false)?;
         let prior = records
             .iter()
             .filter_map(|record| match record {
                 Record::Turn(turn)
-                    if turn.role == Role::User && turn.sequence < request.sequence =>
+                    if turn.role == Role::User
+                        && turn.outcome == Outcome::Interpreted
+                        && turn.sequence < request.sequence =>
                 {
                     Some((turn.id, turn))
                 }
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
-        let latest = records
-            .iter()
-            .filter_map(|record| match record {
-                Record::RequestEvidence(evidence) => prior
-                    .get(&evidence.request_turn)
-                    .filter(|turn| {
-                        turn.mode == Mode::Reader && turn.outcome == Outcome::Interpreted
-                    })
-                    .map(|turn| (turn.sequence, evidence.recorded_ms, evidence.id, evidence)),
-                _ => None,
-            })
-            .max_by_key(|(sequence, time, id, _)| (*sequence, *time, *id));
-
-        if let Some((_, _, _, evidence)) = latest {
-            return match recorded_source(&evidence.frame_json)? {
-                SourceAssociation::NoDocument | SourceAssociation::CapturedPage { .. } => {
-                    Ok(SourceDirective::Inherit {
-                        request_turn: evidence.request_turn,
-                        operation: Some(evidence.operation),
-                        expected: None,
-                    })
-                }
-                SourceAssociation::Original {
-                    origin_turn,
-                    source_record,
-                    ..
-                } => {
-                    let Record::ResidentCapture(capture) = source_record.as_ref() else {
-                        return Err(Refusal::InvalidSource.into());
-                    };
-                    ensure!(
-                        records.contains(source_record.as_ref()),
-                        Refusal::ChangedSource
-                    );
-                    Ok(SourceDirective::Explicit(RequestSource::CapturedPage {
-                        origin_turn,
-                        source_record: capture.id,
-                    }))
-                }
-            };
-        }
-
-        // Older installed conversations may have no request-evidence record.
-        // Their insertion receipt identifies the only eligible original page.
-        // A blank-start receipt adds a page but has no originating Reader image.
         let original = records
             .iter()
             .filter_map(|record| match record {
                 Record::ResidentCapture(capture)
                     if capture.before.document == binding.source.document
-                        && capture.before.page == binding.source.page
-                        && capture.before.page != binding.observed_page =>
+                        && capture.before.page == binding.source.page =>
                 {
                     prior
                         .get(&capture.turn)
-                        .filter(|turn| {
-                            turn.outcome == Outcome::Interpreted
-                                && turn.sources.contains(&capture.id)
-                        })
-                        .map(|turn| (turn.sequence, capture))
+                        .filter(|turn| turn.sources.contains(&capture.id))
+                        .map(|turn| (turn.sequence, capture.id, capture))
                 }
                 _ => None,
             })
-            .max_by_key(|(sequence, _)| *sequence);
-        Ok(SourceDirective::Explicit(original.map_or(
-            RequestSource::NoDocument,
-            |(_, capture)| RequestSource::CapturedPage {
-                origin_turn: capture.turn,
-                source_record: capture.id,
-            },
-        )))
+            .max_by_key(|(sequence, id, _)| (*sequence, *id))
+            .map(|(_, _, capture)| capture.clone());
+        Ok(original)
     }
 
     /// Resolve the caller's declaration as ordinary historical data only.
