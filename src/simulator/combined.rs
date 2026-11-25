@@ -711,15 +711,11 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         document: Uuid::nil(),
         ..images
     };
-    let error = invalid_document
-        .normalize(
-            source.page,
-            &invalid_document.image_digest()?,
-            "fixture",
-            &mut model,
-            &mut |_| Ok(()),
-        )
-        .unwrap_err();
+    let Err(error) =
+        invalid_document.admit_originals(source.page, &invalid_document.image_digest()?)
+    else {
+        anyhow::bail!("missing document identity was accepted");
+    };
     assert_eq!(error.to_string(), "invalid notebook identity");
     assert!(model.seen.is_empty());
 
@@ -1188,6 +1184,143 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
             (Some(6), trailing_notes.as_str()),
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Result<()> {
+    use crate::{
+        handwriting::{self, LocalCorrections, Provider},
+        retrieval::notebook::{
+            NotebookSourceReceipt, OrderedNotebookImages, WRITER_VISUAL_REVISION,
+        },
+    };
+
+    let fixture = SimulatorLedger::new();
+    let ledger = fixture.open_targets()?;
+    let mut source = fixture_source(Uuid::new_v4());
+    let order = [
+        source.page,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    ];
+    let pngs = [12, 24, 36, 48, 60]
+        .map(fixture_png)
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+    let originals: Vec<_> = order
+        .iter()
+        .copied()
+        .zip(pngs.iter().map(Vec::as_slice))
+        .collect();
+    let images = OrderedNotebookImages {
+        document: source.document,
+        order: &order,
+        originals: &originals,
+        buddy_pages: &Default::default(),
+    };
+    let receipt = NotebookSourceReceipt {
+        saved_source_revision: digest(b"sealed notebook"),
+        ordered_image_sha256: images.image_digest()?,
+    };
+    source.content_revision = Some(receipt.saved_source_revision.clone());
+    source.order_revision = Some(images.order_revision()?);
+    let run = |config: &Config| -> Result<(Model, String)> {
+        let conversation = Uuid::new_v4();
+        ledger.create(conversation, Uuid::new_v4(), 1)?;
+        let request = scope(&ledger, conversation, &source)?;
+        let pages: Vec<_> = (1..=5).map(|page| json!({
+            "page":page, "status":"readable", "writing":format!("Target {page}"), "visual_observation":""
+        })).collect();
+        let mut model = Model {
+            replies: [
+                json!({"pages":&pages[..4]}).to_string(),
+                json!({"pages":&pages[4..]}).to_string(),
+                "Map of the five originals".into(),
+                "# Notes\n\nFive original pages.".into(),
+            ]
+            .into(),
+            ..Model::default()
+        };
+        let (report, _) = Dispatch::local(config, &ledger)?.whole_notebook(
+            &ledger,
+            &mut model,
+            "Make a note from the whole notebook.",
+            &images,
+            &receipt,
+            "fixture",
+            &request,
+            &mut || Ok(source.clone()),
+        )?;
+        let draft =
+            ledger.writer_turn(report.draft.expect("Writer produced a draft"), conversation)?;
+        let record = ledger
+            .store()
+            .value(Namespace::Source, draft.sources[0])?
+            .unwrap();
+        let Record::ArchivedNormalizedSource(archive) = Ledger::decode(&record)? else {
+            anyhow::bail!("notebook archive absent");
+        };
+        assert_eq!(archive.source_sha256, receipt.ordered_image_sha256);
+        Ok((model, archive.extractor_revision))
+    };
+
+    let mut config = Config {
+        paths: ledger.store().paths.clone(),
+        ..Config::default()
+    };
+    let (plain, plain_revision) = run(&config)?;
+    assert_eq!(
+        plain_revision,
+        format!("{WRITER_VISUAL_REVISION}{}", digest(b"fixture"))
+    );
+    let profile = Uuid::new_v4();
+    config.handwriting = handwriting::Configuration {
+        enabled: true,
+        profile: Some(profile),
+    };
+    let confirm = |image: &[u8], correction: &str| {
+        let command = json!({
+            "handwriting_version":1, "command":"confirm", "profile":profile,
+            "correction":Uuid::new_v4(), "operation":Uuid::new_v4(), "expected_heads":[],
+            "confirmation":"user-confirmed", "original_text":"Earlier reading",
+            "corrected_text":correction, "confirmed_ms":1,
+            "provenance":{"kind":"caller-confirmed-sample","description":"Synthetic notebook handwriting","source":null},
+            "sample_png_base64":STANDARD.encode(image),
+        });
+        let input = handwriting::parse(&mut Cursor::new(command.to_string().into_bytes())).unwrap();
+        let result = LocalCorrections::new(ledger.store().clone(), &config)
+            .unwrap()
+            .execute(input);
+        assert_eq!(result.status, handwriting::Status::Complete);
+    };
+    // The last original is outside the first batch. Neither batch may use it as an example.
+    confirm(&pngs[4], "Target must stay excluded");
+    let (empty, empty_revision) = run(&config)?;
+    assert_eq!(empty.seen[..2], plain.seen[..2]);
+    assert_eq!(empty_revision, plain_revision);
+
+    let reference = fixture_png(196)?;
+    let correction = "Reference handwriting only";
+    confirm(&reference, correction);
+    let (personalized, revision) = run(&config)?;
+    assert_ne!(revision, plain_revision);
+    assert!(revision.starts_with(WRITER_VISUAL_REVISION));
+    assert_eq!(personalized.seen.len(), 4);
+    for (i, (texts, attachments)) in personalized.seen[..2].iter().enumerate() {
+        assert!(texts.iter().any(|text| text.contains(correction)));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("Target must stay excluded")));
+        assert_eq!(attachments[0], STANDARD.encode(&reference));
+        assert_eq!(attachments[1..], plain.seen[i].1);
+    }
+    for (texts, attachments) in &personalized.seen[2..] {
+        assert!(attachments.is_empty());
+        assert!(texts.iter().all(|text| !text.contains(correction)));
+    }
     Ok(())
 }
 

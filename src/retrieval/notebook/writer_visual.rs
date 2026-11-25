@@ -1,7 +1,8 @@
 //! Writer interpretation of already sealed notebook pages. Observations are unverified.
 use super::{
-    admit_pages_with_pixels, valid_text_controls, Content, Options, PageImage, Progress,
-    SourceUnit, STANDARD,
+    admit_pages_with_pixels, append_confirmed_examples, check_text_input_budget,
+    valid_text_controls, ConfirmedContext, Content, Options, PageImage, Progress, SourceUnit,
+    STANDARD,
 };
 use crate::{config::inspection::strict_json, llm::LLMEngine};
 use anyhow::{ensure, Result};
@@ -36,6 +37,7 @@ enum Status {
 
 pub(super) fn extract(
     pages: &[PageImage<'_>],
+    context: Option<&ConfirmedContext>,
     engine: &mut dyn LLMEngine,
     options: Options,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
@@ -55,13 +57,21 @@ pub(super) fn extract(
         "pages":pages.iter().map(|page| page.page).collect::<Vec<_>>()
     })
     .to_string();
-    let mut parts = vec![
-        json!({"type":"text","text":instruction}),
-        json!({"type":"text","text":manifest}),
-    ];
+    let mut parts = vec![json!({"type":"text","text":instruction})];
+    if let Some(examples) = context {
+        append_confirmed_examples(
+            &mut parts,
+            examples,
+            include_str!("../../handwriting/context-instructions.txt"),
+        );
+    }
+    parts.push(json!({"type":"text","text":manifest}));
     for page in pages {
         parts.push(json!({"type":"text","text":format!("Page {} PNG follows", page.page)}));
         parts.push(json!({"type":"image_url","image_url":STANDARD.encode(page.png)}));
+    }
+    if context.is_some() {
+        check_text_input_budget(&parts)?;
     }
     ensure!(
         serde_json::to_vec(&parts)?.len() <= options.max_input_bytes,
