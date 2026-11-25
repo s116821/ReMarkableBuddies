@@ -414,7 +414,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         control,
     )
 }
-fn run_owned_with_memory<E: LLMEngine>(
+pub(crate) fn run_owned_with_memory<E: LLMEngine>(
     ledger: &Ledger,
     engine: &mut E,
     request: &Request,

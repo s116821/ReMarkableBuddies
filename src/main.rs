@@ -663,10 +663,6 @@ fn main() -> Result<()> {
         route.admits_startup(&config),
         "Reader is disabled in saved settings and no Writer route is available"
     );
-    anyhow::ensure!(
-        config.reader_enabled(),
-        "Reader is disabled in saved settings and native Writer input is unavailable"
-    );
     if config.reader_enabled() && config.reader.selection.is_none() {
         remarkable_reader_buddy::memory::context::admit_ordinary(&config.memory)?;
     }
@@ -680,6 +676,20 @@ fn main() -> Result<()> {
             return Ok(());
         }
     };
+    #[cfg(target_os = "linux")]
+    let resident_selection = remarkable_reader_buddy::workflow::resident_supervisor::recovery::activation::InstalledReaderSelection::load(
+        std::time::Instant::now() + Duration::from_secs(10),
+    )?;
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    let installed_writer = resident_selection
+        .as_ref()
+        .is_some_and(|selection| selection.has_installed_output());
+    #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+    let installed_writer = false;
+    anyhow::ensure!(
+        config.reader_enabled() || installed_writer,
+        "Reader is disabled in saved settings and installed Writer input is unavailable"
+    );
     #[cfg(target_os = "linux")]
     let service_health = match notification_environment {
         Some(environment) => environment.connect()?,
@@ -746,10 +756,6 @@ fn main() -> Result<()> {
         None
     };
     let personalization = config.personalization_snapshot()?;
-    #[cfg(target_os = "linux")]
-    let resident_selection = remarkable_reader_buddy::workflow::resident_supervisor::recovery::activation::InstalledReaderSelection::load(
-        std::time::Instant::now() + Duration::from_secs(10),
-    )?;
     let workflow = Workflow::new(false, effective.trigger_corner, effective.debug_dump)?;
     sleep(Duration::from_millis(1000));
     let _sync_worker = match route {
@@ -793,7 +799,7 @@ fn main() -> Result<()> {
     orchestrator.set_subject_memory(reader_memory);
     info!("Initialization complete; starting main loop");
     match dispatch {
-        None => orchestrator.run_loop(),
+        None => orchestrator.run_reader_loop(&config),
         Some(dispatch) => orchestrator.run_local_loop(dispatch),
     }
 }

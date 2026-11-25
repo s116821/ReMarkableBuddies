@@ -191,7 +191,10 @@ pub fn dispatch(config_path: Option<PathBuf>, input: &mut impl Read) -> CommandR
         ))]
         Ok(CommandRequest::Resident(submission)) => {
             let (conversation, operation) = submission.identities();
-            let result = crate::workflow::resident_supervisor::writer_request::submit(submission);
+            let result = crate::workflow::resident_supervisor::writer_request::submit(
+                submission,
+                config_path,
+            );
             CommandReport::Resident(ResidentReport {
                 status: if result.is_ok() { "queued" } else { "refused" },
                 conversation,

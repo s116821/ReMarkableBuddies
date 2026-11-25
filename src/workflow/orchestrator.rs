@@ -1,11 +1,13 @@
 use anyhow::Result;
 use log::{debug, error, info};
 
+use super::conversation_dispatch::Dispatch;
 use super::reader_attempt::Attempt;
 use super::{indicator::Failure, AnswerPageType, ReturnOutcome, Workflow};
 use crate::analysis::{
     BoundingBox, ReaderSelection, ReaderSourceSubject, ReaderSubject, SelectionCenter,
 };
+use crate::config::Config;
 use crate::conversation::{AttemptReason, Ledger, Outcome};
 use crate::device::screenshot::{SCREENSHOT_VIRTUAL_HEIGHT, SCREENSHOT_VIRTUAL_WIDTH};
 use crate::llm::{openai::OpenAI, LLMEngine};
@@ -160,13 +162,17 @@ impl<M: LLMEngine> Orchestrator<M> {
     /// Processes one outlined/highlighted concept and question per trigger.
     pub fn run_iteration(&mut self) -> Result<()> {
         let _run = crate::measurement::Run::new();
-        self.run_iteration_with_trigger(self.trigger_enabled)
+        self.run_iteration_with_trigger(self.trigger_enabled, None)
     }
 
-    fn run_iteration_with_trigger(&mut self, wait_for_trigger: bool) -> Result<()> {
+    fn run_iteration_with_trigger(
+        &mut self,
+        wait_for_trigger: bool,
+        config: Option<&Config>,
+    ) -> Result<()> {
         let _timing = crate::measurement::Span::new("reader.iteration");
         self.workflow.begin_iteration()?;
-        let result = self.run_iteration_inner(wait_for_trigger);
+        let result = self.run_iteration_inner(wait_for_trigger, config);
         // A failed input guard or service health cannot be cleared by cleanup.
         if self.workflow.runtime_failed() {
             return result.and(Err(anyhow::anyhow!(
@@ -183,7 +189,11 @@ impl<M: LLMEngine> Orchestrator<M> {
         result
     }
 
-    fn run_iteration_inner(&mut self, wait_for_trigger: bool) -> Result<()> {
+    fn run_iteration_inner(
+        &mut self,
+        wait_for_trigger: bool,
+        config: Option<&Config>,
+    ) -> Result<()> {
         info!("=== Starting Reader Buddy Iteration ===");
 
         // Step 1: Wait for trigger
@@ -205,11 +215,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         // Step 2: Capture screenshot (of current/question page)
         let acquired = self.workflow.acquire_reader_evidence()?;
         #[cfg(target_os = "linux")]
-        if let Some(request) = self.workflow.selected_resident_conversation(&acquired)? {
+        if let Some(request) = self.workflow.selected_resident_conversation(
+            &acquired,
+            config.is_none_or(|settings| settings.admits_writer(false)),
+        )? {
             use super::resident_output::SelectedConversationRequest;
             let super::AcquiredEvidence::ResidentHistorical(capture) = acquired else {
                 anyhow::bail!("selected conversation requires the retained native source");
             };
+            let writer_memory =
+                request.installed_writer_memory(self.ledger.store(), self.memory.as_ref())?;
             return match request {
                 SelectedConversationRequest::BlankStart(conversation) => {
                     self.run_blank_start(conversation, &capture)
@@ -217,8 +232,18 @@ impl<M: LLMEngine> Orchestrator<M> {
                 SelectedConversationRequest::WriterRefinement {
                     request,
                     require_current_draft,
-                } => self.run_resident_writer_refinement(&request, &capture, require_current_draft),
+                } => self.run_resident_writer_refinement(
+                    &request,
+                    &capture,
+                    require_current_draft,
+                    writer_memory.as_deref(),
+                ),
             };
+        }
+        // A queued refinement can expire or belong to another open page.
+        // Finish the acquired request before admitting a new gesture.
+        if config.is_some_and(|settings| !settings.reader_enabled()) {
+            return Ok(());
         }
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
         let result = self.run_prepared(&mut attempt);
@@ -324,6 +349,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         request: &crate::writer::Request,
         capture: &crate::conversation::ResidentSourceCapture,
         require_current_draft: bool,
+        memory: Option<&dyn crate::memory::Provider>,
     ) -> Result<()> {
         use super::resident_output::ResidentOutputOutcome;
         use crate::{storage::Namespace, writer};
@@ -378,17 +404,44 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Writer target belongs to a different conversation"
         );
         if require_current_draft {
+            self.workflow.check_request_progress()?;
+            anyhow::ensure!(
+                self.ledger
+                    .expected(Namespace::Conversation, *conversation)?
+                    == expected,
+                "Writer conversation changed before claiming the current draft"
+            );
+            #[cfg(all(
+                feature = "development-resident-bootstrap",
+                feature = "development-input-diagnostics"
+            ))]
+            {
+                let resident =
+                    self.workflow.resident_source.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("installed Writer page owner unavailable")
+                    })?;
+                anyhow::ensure!(
+                    resident
+                        .installed_writer_for_page(
+                            capture,
+                            super::resident_supervisor::writer_request::SlotAction::Claim
+                        )?
+                        .is_some(),
+                    "Writer request changed or expired before claiming the current draft"
+                );
+            }
             info!(
                 "Installed Writer refinement accepted: {}",
                 request.operation()
             );
         }
         let mut produced = None;
-        let report = writer::run_owned(
+        let report = writer::run_owned_with_memory(
             &self.ledger,
             &mut self.llm,
             request,
             &self.personalization,
+            memory,
             &mut || self.workflow.check_request_progress().is_err(),
             writer::OwnedRun {
                 owner: &owner,
@@ -1230,40 +1283,32 @@ impl<M: LLMEngine> Orchestrator<M> {
 
     /// Run the main loop
     pub fn run_loop(&mut self) -> Result<()> {
-        self.run_loop_with_dispatch(None)
+        self.run_loop_with_settings(None)
     }
 
-    pub fn run_local_loop(
-        &mut self,
-        dispatch: super::conversation_dispatch::Dispatch<'_>,
-    ) -> Result<()> {
+    pub fn run_local_loop(&mut self, dispatch: Dispatch<'_>) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
-        self.run_loop_with_dispatch(Some(dispatch))
+        self.run_loop_with_settings(Some(dispatch.config))
     }
 
-    fn run_loop_with_dispatch(
-        &mut self,
-        dispatch: Option<super::conversation_dispatch::Dispatch<'_>>,
-    ) -> Result<()> {
+    pub fn run_reader_loop(&mut self, config: &Config) -> Result<()> {
+        anyhow::ensure!(
+            config.reader_enabled(),
+            "Reader route requires the Reader module"
+        );
+        self.run_loop_with_settings(Some(config))
+    }
+
+    fn run_loop_with_settings(&mut self, config: Option<&Config>) -> Result<()> {
         info!("Starting Reader Buddy main loop");
 
         loop {
             let _run = crate::measurement::Run::new();
-            if self.trigger_enabled {
-                // History remains owned until another Reader trigger or an
-                // invalidating input. Do not begin an iteration while idle.
-                if let Some(dispatch) = &dispatch {
-                    if !self
-                        .workflow
-                        .wait_for_idle_batch(None, |events| dispatch.reader_trigger(events))?
-                    {
-                        continue;
-                    }
-                } else {
-                    self.workflow.wait_for_reader()?;
-                }
+            // History remains owned until another trigger or invalidating input.
+            if self.trigger_enabled && !self.workflow.wait_for_idle_batch(None, config)? {
+                continue;
             }
-            match self.run_iteration_with_trigger(false) {
+            match self.run_iteration_with_trigger(false, config) {
                 Ok(_) => info!("Iteration completed successfully"),
                 Err(e) => {
                     error!("Error in iteration: {}", e);
