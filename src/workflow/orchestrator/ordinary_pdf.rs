@@ -444,14 +444,21 @@ impl<M: LLMEngine> Orchestrator<M> {
             .text
             .as_deref()
             .context("Saved marked question absent")?;
+        let mut source_checked_at_output = false;
         let outcome = self.workflow.render_resident_answer(
             ledger,
             attempt.user.conversation,
             crate::workflow::resident_output::ResidentOutputText::ReaderQuestion(question),
             attempt.resident_answer.as_ref(),
             &mut || {
-                source.check_file()?;
-                current(ledger)
+                current(ledger)?;
+                // As for an ordinary answer, the document table can change
+                // once Buddy's own insertion is admitted.
+                if !source_checked_at_output {
+                    source.check_file()?;
+                    source_checked_at_output = true;
+                }
+                Ok(())
             },
         )?;
         log::info!("Saved marked question Buddy placement: {outcome:?}");

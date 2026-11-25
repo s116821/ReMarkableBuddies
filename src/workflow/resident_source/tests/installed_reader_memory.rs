@@ -110,6 +110,8 @@ impl crate::LLMEngine for ReaderModel {
                 let mark = if self.case.has_mark() {
                     assert!(self.parts[0].contains("HANDWRITTEN_QUESTION_MARK:"));
                     "\nHANDWRITTEN_QUESTION_MARK: present"
+                } else if self.parts[0].contains("HANDWRITTEN_QUESTION_MARK:") {
+                    "\nHANDWRITTEN_QUESTION_MARK: absent"
                 } else {
                     ""
                 };
@@ -421,7 +423,14 @@ fn check_captured_page(case: Case) -> Result<()> {
     native.declare_source(document, page);
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
     let owner = workflow.resident_source.as_mut().unwrap();
-    owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+    owner.selection = if case.question_only() {
+        InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?
+    } else {
+        InstalledReaderSelection::fixture_with_installed_output()
+    };
     owner.session = Some(Box::new(OwnedSession {
         runtime,
         _fixture: native,
