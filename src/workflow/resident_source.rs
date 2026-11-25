@@ -3501,6 +3501,7 @@ pub(crate) mod tests {
             &mut continuation,
             &context,
             "Why again?",
+            None,
             &crate::config::Personalization::default()
                 .snapshot()
                 .unwrap(),
