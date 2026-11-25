@@ -22,6 +22,7 @@ use crate::{
     workflow::{
         conversation_dispatch::{followup_research, Dispatch},
         reader_intent::{self, Intent},
+        resident_output::{format_exchange, ResidentOutputText},
         resident_source::original_pdf::{
             CapturedOriginalBook, ObservedOriginalBook, OrdinaryBookSource, OriginalFilePin,
         },
@@ -425,43 +426,43 @@ impl<M: LLMEngine> Orchestrator<M> {
             Some(marked.region),
         )?;
         let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
-        self.present_ordinary_marked_question(attempt, source, &mut |ledger| {
-            current.with_current(ledger.store(), || Ok(()))
-        })
+        self.present_ordinary_outcome(
+            attempt,
+            source,
+            ResidentOutputText::ReaderQuestion(&marked.text),
+            &mut |ledger| current.with_current(ledger.store(), || Ok(())),
+        )
     }
 
-    fn present_ordinary_marked_question(
+    fn present_ordinary_outcome(
         &mut self,
         attempt: &Attempt,
         source: &OrdinarySource<'_>,
+        output: ResidentOutputText<'_>,
         current: &mut dyn FnMut(&crate::conversation::Ledger) -> Result<()>,
     ) -> Result<()> {
         source.require_current(&mut self.workflow)?;
         let ledger = &self.ledger;
         current(ledger)?;
-        let question = attempt
-            .user
-            .text
-            .as_deref()
-            .context("Saved marked question absent")?;
         let mut source_checked_at_output = false;
         let outcome = self.workflow.render_resident_answer(
             ledger,
             attempt.user.conversation,
-            crate::workflow::resident_output::ResidentOutputText::ReaderQuestion(question),
+            output,
             attempt.resident_answer.as_ref(),
             &mut || {
                 current(ledger)?;
-                // As for an ordinary answer, the document table can change
-                // once Buddy's own insertion is admitted.
-                if !source_checked_at_output {
+                // Bound placement cannot insert. Keep checking the original
+                // file across navigation. Only a fresh marked placement can
+                // change the document table as part of Buddy's own insertion.
+                if attempt.resident_answer.is_some() || !source_checked_at_output {
                     source.check_file()?;
                     source_checked_at_output = true;
                 }
                 Ok(())
             },
         )?;
-        log::info!("Saved marked question Buddy placement: {outcome:?}");
+        log::info!("Saved Reader outcome Buddy placement: {outcome:?}");
         Ok(())
     }
 
@@ -666,17 +667,38 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .as_millis()
                     .try_into()?;
                 source.require_current(&mut self.workflow)?;
-                attempt.user = evidence.record_provider_failure(
+                let (failed, fact) = evidence.record_provider_failure(
                     ledger,
                     crate::writer::stage(attempt.user.exchange, "reader-pdf-provider-failure"),
                     attempt.user.clone(),
                     timestamp,
                 )?;
+                attempt.user = failed;
+                let current = &mut |ledger: &crate::conversation::Ledger| {
+                    evidence.with_current(ledger, || Ok(()))
+                };
                 if marked {
-                    self.present_ordinary_marked_question(attempt, source, &mut |ledger| {
-                        evidence.with_current(ledger, || Ok(()))
-                    })
+                    self.present_ordinary_outcome(
+                        attempt,
+                        source,
+                        ResidentOutputText::ReaderQuestion(&result.question),
+                        current,
+                    )
                     .with_context(|| format!("Reader provider refused: {error:#}"))?;
+                } else if attempt.resident_answer.is_some() {
+                    let feedback = crate::conversation_feedback::describe(&fact)?
+                        .context("Saved Reader provider failure has no feedback")?;
+                    let text = format_exchange(&result.question, feedback.text);
+                    if let Err(output_error) = self.present_ordinary_outcome(
+                        attempt,
+                        source,
+                        ResidentOutputText::Plain(&text),
+                        current,
+                    ) {
+                        // Leave the typed failure in the owned conversation and
+                        // preserve the original provider result for the caller.
+                        log::warn!("Reader failure feedback placement: {output_error:#}");
+                    }
                 }
                 return Err(error);
             }

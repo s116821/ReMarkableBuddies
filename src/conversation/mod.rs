@@ -1480,6 +1480,13 @@ impl Ledger {
         .map(|(result, _)| result)
     }
 
+    fn attempt_outcome_id(operation: Uuid) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("urn:remarkable-buddies:outcome:v1:{operation}").as_bytes(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_with_capture(
         &self,
@@ -1668,10 +1675,7 @@ impl Ledger {
         }
         records.extend(capture);
         if let Some(reason) = reason {
-            let id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("urn:remarkable-buddies:outcome:v1:{operation}").as_bytes(),
-            );
+            let id = Self::attempt_outcome_id(operation);
             records.push(self.envelope(
                 Namespace::Conversation,
                 id,
