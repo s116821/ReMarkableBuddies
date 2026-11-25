@@ -25,6 +25,7 @@ pub(crate) fn is_opened_reply(turn: &Turn) -> bool {
     turn.outcome == Outcome::Failed
         && [
             AttemptReason::NoSelection,
+            AttemptReason::UnclearRequest,
             AttemptReason::ReaderDisabled,
             AttemptReason::TranscriptionDisagreement,
             AttemptReason::ProviderFailure,
@@ -125,6 +126,10 @@ pub(crate) fn describe_reason(
             "Reader is turned off. Enable it in Manager to ask a reading question.",
         ),
         AttemptReason::NoSelection => ("RMB-NO-SELECTION", "No usable source selection was found."),
+        AttemptReason::UnclearRequest => (
+            "RMB-REQUEST-UNCLEAR",
+            "I couldn't tell what you wanted. Clarify your request on the source page and try again.",
+        ),
         AttemptReason::TranscriptionDisagreement => (
             "RMB-READ-UNCERTAIN",
             "The selected text could not be read reliably.",

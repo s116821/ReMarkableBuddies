@@ -117,6 +117,7 @@ impl RegionAction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Submission {
     Reader,
+    Unclear,
     CurrentPage,
     PageVisual(PageVisual),
     BoundHistory,
@@ -465,6 +466,9 @@ impl crate::LLMEngine for SubmissionModel {
                     return Ok(r#"{"intent":"unresolved"}"#.into());
                 }
                 assert_eq!(self.text.len(), 1, "fresh notebook has no history part");
+                if self.submission == Submission::Unclear {
+                    return Ok(r#"{"intent":"unresolved"}"#.into());
+                }
                 if self.submission == Submission::WholeNotebook {
                     return Ok(serde_json::json!({
                         "intent": "writer-whole-notebook",
@@ -1827,6 +1831,15 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             None,
         ),
         (None, Submission::Reader, true, false, None, None),
+        (None, Submission::Unclear, false, false, None, None),
+        (
+            None,
+            Submission::Circled(Circled::MissingOutline),
+            false,
+            false,
+            None,
+            None,
+        ),
         (None, Submission::CurrentPage, false, false, None, None),
         (None, Submission::Reader, false, true, None, None),
         (
@@ -2052,10 +2065,20 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         let records = ledger.inspect(conversation, false)?;
         let write_count = written.borrow().len();
         let disabled_reader = submission == Submission::Reader && !reader_enabled;
-        let refuse = failure.is_some() || disabled_reader;
+        let missing_outline = submission.circled() == Some(Circled::MissingOutline);
+        let unclear = submission == Submission::Unclear;
+        let refuse = failure.is_some() || disabled_reader || missing_outline || unclear;
         if switch_page || refuse {
             assert!(result.is_err(), "{result:?}");
             let (request, message) = match (switch_page, refuse_at) {
+                (false, None) if unclear || missing_outline => {
+                    assert_eq!(steps.get(), 1, "stop after shared routing");
+                    if missing_outline {
+                        (Some(CIRCLE_NOTE), "No usable source selection was found.")
+                    } else {
+                        (None, "I couldn't tell what you wanted. Clarify your request on the source page and try again.")
+                    }
+                }
                 (false, None) if verify_circled_operand => {
                     assert_eq!(
                         steps.get(),
@@ -2135,7 +2158,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             };
             assert_eq!(
                 reply.mode,
-                if submission == Submission::CurrentPage {
+                if submission == Submission::CurrentPage || missing_outline {
                     Mode::Writer
                 } else {
                     Mode::Reader
@@ -2144,7 +2167,12 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             assert!(view.turns.iter().any(|turn| turn.exchange == reply.exchange
                 && turn.role == Role::User
                 && turn.text.as_deref() == request));
-            if refuse_at == Some(0) || disabled_reader || readback_failed {
+            if refuse_at == Some(0)
+                || disabled_reader
+                || readback_failed
+                || missing_outline
+                || unclear
+            {
                 let mut users = records.iter().filter_map(|record| match record {
                     Record::Turn(turn)
                         if turn.exchange == reply.exchange && turn.role == Role::User =>

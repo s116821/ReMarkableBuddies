@@ -472,12 +472,14 @@ impl<M: LLMEngine> Orchestrator<M> {
                             Some(NoteExport::from_separate(separate_note)),
                         );
                     }
-                    SourceIntent::Unresolved => {
+                    SourceIntent::Unresolved | SourceIntent::MissingCircledTarget { .. } => {
                         if self.workflow.opened_submission().is_some() {
-                            return Err(source_submission::RefusedSubmission(
-                                AttemptReason::NoSelection,
-                            )
-                            .into());
+                            let reason = if matches!(intent, SourceIntent::Unresolved) {
+                                AttemptReason::UnclearRequest
+                            } else {
+                                AttemptReason::NoSelection
+                            };
+                            return Err(source_submission::RefusedSubmission(reason).into());
                         }
                         self.workflow.report_failure(Failure::Selection)?;
                         return Ok(());

@@ -54,6 +54,11 @@ pub(super) enum SourceIntent {
         request: String,
     },
     Unresolved,
+    /// Only local validation can reject the outline of a recognized Writer request.
+    #[serde(skip)]
+    MissingCircledTarget {
+        request: String,
+    },
 }
 
 impl SourceIntent {
@@ -62,9 +67,9 @@ impl SourceIntent {
             Self::WriterCurrentPage { request } | Self::WriterExportCurrentPage { request, .. } => {
                 Some((request, "current-page"))
             }
-            Self::WriterCircled { request, .. } | Self::WriterExportCircled { request, .. } => {
-                Some((request, "circled"))
-            }
+            Self::WriterCircled { request, .. }
+            | Self::WriterExportCircled { request, .. }
+            | Self::MissingCircledTarget { request } => Some((request, "circled")),
             Self::WriterWholeNotebook { request }
             | Self::WriterExportWholeNotebook { request, .. } => Some((request, "whole-notebook")),
             Self::ClarifyExport { request } => Some((request, "clarify-export")),
@@ -195,8 +200,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 request, target, ..
             } => {
                 writer::validate_request(request)?;
+                let missing_target = || SourceIntent::MissingCircledTarget {
+                    request: request.clone(),
+                };
                 let Ok(candidate) = target.clone().canonicalize() else {
-                    return Ok(SourceIntent::Unresolved);
+                    return Ok(missing_target());
                 };
                 if !matches!(candidate.understanding, target::Understanding::Interpreted)
                     || !candidate.geometry.as_ref().is_some_and(|geometry| {
@@ -208,11 +216,13 @@ impl<M: LLMEngine> Orchestrator<M> {
                             })
                     })
                 {
-                    return Ok(SourceIntent::Unresolved);
+                    return Ok(missing_target());
                 }
                 *target = candidate;
             }
-            SourceIntent::Reader | SourceIntent::Unresolved => {}
+            SourceIntent::Reader
+            | SourceIntent::Unresolved
+            | SourceIntent::MissingCircledTarget { .. } => {}
         }
         Ok(intent)
     }
