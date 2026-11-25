@@ -404,12 +404,12 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
         "unexpected operation count"
     );
     let mut expected = vec!["Earlier image question?".to_owned(); 2];
+    let preference_part =
+        crate::config::personalization::receiving_prompt_part(&config.personalization.text);
     for (index, ((text, images), request)) in engine.seen.iter().zip(&scenario.requests).enumerate()
     {
         ensure!(
-            text.len() == 3
-                && text[1].ends_with(&config.personalization.text)
-                && images == &attachments,
+            text.len() == 3 && text[1] == preference_part && images == &attachments,
             "receiving parts changed"
         );
         let payload: Value = serde_json::from_str(&text[2])?;
