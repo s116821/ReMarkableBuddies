@@ -3698,7 +3698,7 @@ pub(crate) mod tests {
                     question: "What is the answer to this?",
                     answer: "4",
                     center: crate::analysis::SelectionCenter::from_pixels(0.0, 0.0, 1, 1).unwrap(),
-                    subject: None,
+                    about: None,
                 }
             };
 
