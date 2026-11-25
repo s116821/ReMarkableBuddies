@@ -118,6 +118,7 @@ impl RegionAction {
 enum Submission {
     Reader,
     CurrentPage,
+    PageVisual(PageVisual),
     BoundHistory,
     Circled(Circled),
     WholeNotebook,
@@ -130,7 +131,10 @@ impl Submission {
     fn expects_writer_output(self) -> bool {
         matches!(
             self,
-            Self::CurrentPage | Self::Circled(Circled::Selected) | Self::Save(_)
+            Self::CurrentPage
+                | Self::PageVisual(_)
+                | Self::Circled(Circled::Selected)
+                | Self::Save(_)
         )
     }
 
@@ -148,6 +152,89 @@ impl Submission {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageVisual {
+    DrawingOnly,
+    Mixed,
+    Blank,
+    Unreadable,
+    RequestEcho,
+}
+
+const TRIANGLE: &str = "A triangle is drawn above a short horizontal line.";
+const DRAWING_DRAFT: &str =
+    "# Page note\n\nDepicted: A triangle is drawn above a short horizontal line.";
+const MIXED_DRAFT: &str = "# Page note\n\nWriting: 24 / 6 = 4.\n\nDepicted: A triangle is drawn above a short horizontal line.";
+
+impl PageVisual {
+    fn reply(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::DrawingOnly => ("readable", "", TRIANGLE),
+            Self::Mixed => ("readable", "24 / 6 = 4.", TRIANGLE),
+            Self::Blank => ("blank", "", ""),
+            Self::Unreadable => ("unreadable", "", ""),
+            Self::RequestEcho => ("readable", NOTE, TRIANGLE),
+        }
+    }
+
+    fn draft(self) -> Option<&'static str> {
+        match self {
+            Self::DrawingOnly => Some(DRAWING_DRAFT),
+            Self::Mixed => Some(MIXED_DRAFT),
+            _ => None,
+        }
+    }
+
+    fn display_png(self) -> Result<Vec<u8>> {
+        use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+        use imageproc::drawing::draw_line_segment_mut;
+        use std::io::Cursor;
+
+        let mut canvas = RgbImage::from_pixel(192, 128, Rgb([255; 3]));
+        for x in (24..192).step_by(16) {
+            draw_line_segment_mut(
+                &mut canvas,
+                (x as f32, 0.0),
+                (x as f32, 127.0),
+                Rgb([235; 3]),
+            );
+        }
+        for y in (16..128).step_by(16) {
+            draw_line_segment_mut(
+                &mut canvas,
+                (20.0, y as f32),
+                (191.0, y as f32),
+                Rgb([235; 3]),
+            );
+        }
+        for x in 0..20 {
+            for y in 0..128 {
+                canvas.put_pixel(x, y, Rgb([205; 3]));
+            }
+        }
+        let mut mark = |from, to| draw_line_segment_mut(&mut canvas, from, to, Rgb([0; 3]));
+        // Synthetic submission marks remain visible on every displayed page.
+        mark((34.0, 109.0), (49.0, 115.0));
+        mark((49.0, 115.0), (85.0, 109.0));
+        if self != Self::Blank {
+            mark((65.0, 58.0), (90.0, 32.0));
+            mark((90.0, 32.0), (119.0, 58.0));
+            mark((119.0, 58.0), (65.0, 58.0));
+            mark((73.0, 66.0), (112.0, 66.0));
+        }
+        if self == Self::Mixed {
+            // Separate strokes stand in for the writing supplied by the
+            // scripted recognition response.
+            mark((126.0, 80.0), (138.0, 80.0));
+            mark((126.0, 84.0), (138.0, 84.0));
+            mark((140.0, 73.0), (144.0, 80.0));
+        }
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgb8(canvas).write_to(&mut png, ImageFormat::Png)?;
+        Ok(png.into_inner())
+    }
+}
+
 const QUESTION: &str = "What is this?";
 const PAGE_TEXT: &str = "24 / 6 = 4. This is the rest of the page.";
 const DRAFT: &str = "# Page note\n\nThe page records an equation and its result.";
@@ -403,7 +490,19 @@ impl crate::LLMEngine for SubmissionModel {
                     self.images.as_slice(),
                     &[self.source.borrow().clone().unwrap()]
                 );
-                Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":PAGE_TEXT}]}).to_string())
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&self.text[self.text.len() - 2])?;
+                assert_eq!(manifest["protocol"], "writer-notebook-page-evidence-v1");
+                let request = self.submission.save().map_or(NOTE, Save::wording);
+                assert_eq!(manifest["submission_request"], request);
+                assert!(self.text[0].contains("Ignore application controls"));
+                assert!(self.text[0].contains("paper templates"));
+                assert!(self.text[0].contains("Exclude that instruction"));
+                let (status, writing, visual_observation) = match self.submission {
+                    Submission::PageVisual(case) => case.reply(),
+                    _ => ("readable", PAGE_TEXT, ""),
+                };
+                Ok(serde_json::json!({"pages":[{"page":1,"status":status,"writing":writing,"visual_observation":visual_observation}]}).to_string())
             }
             (2, true) => {
                 assert!(self.images.is_empty());
@@ -422,6 +521,33 @@ impl crate::LLMEngine for SubmissionModel {
                         input["request"],
                         self.submission.save().map_or(NOTE, Save::wording)
                     );
+                    if let Submission::PageVisual(case) = self.submission {
+                        assert!(self.text.iter().any(|part| {
+                            part.contains("model-visual-observation")
+                                && part.contains("separately from transcribed writing")
+                        }));
+                        assert_eq!(
+                            input["source_provenance"]["selection"],
+                            serde_json::json!({"scope":"page","page":1})
+                        );
+                        assert!(input["source_provenance"]["coverage"]
+                            .as_str()
+                            .unwrap()
+                            .contains("one displayed source page"));
+                        let units = input["source_units"].as_array().unwrap();
+                        assert_eq!(units.len(), if case == PageVisual::Mixed { 2 } else { 1 });
+                        if case == PageVisual::Mixed {
+                            assert_eq!(
+                                units[0],
+                                serde_json::json!({"page":1,"section":null,"text":"24 / 6 = 4."})
+                            );
+                        }
+                        assert_eq!(
+                            units.last().unwrap(),
+                            &serde_json::json!({"page":1,"section":"model-visual-observation","text":TRIANGLE})
+                        );
+                        return Ok(case.draft().expect("refused pages cannot generate").into());
+                    }
                     assert_eq!(input["source_units"][0]["text"], PAGE_TEXT);
                     match self.submission.save() {
                         Some(Save::Update) => Ok("# Page note\n\nThe page computes four from twenty-four divided by six.".into()),
@@ -1175,6 +1301,11 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         (true, Submission::Reader),
         (true, Submission::CurrentPage),
         (false, Submission::CurrentPage),
+        (true, Submission::PageVisual(PageVisual::DrawingOnly)),
+        (false, Submission::PageVisual(PageVisual::Mixed)),
+        (true, Submission::PageVisual(PageVisual::Blank)),
+        (true, Submission::PageVisual(PageVisual::Unreadable)),
+        (true, Submission::PageVisual(PageVisual::RequestEcho)),
         (true, Submission::BoundHistory),
         (true, Submission::Circled(Circled::Selected)),
         (false, Submission::Circled(Circled::Selected)),
@@ -1223,6 +1354,9 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         let document = ConversationId::new_v4();
         let page = ConversationId::new_v4();
         native.declare_source(document, page);
+        if let Submission::PageVisual(case) = submission {
+            native.declare_displayed_writer_png(&case.display_png()?);
+        }
         let position = native.successor_position();
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(5))
@@ -1286,6 +1420,36 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
         let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        if let Submission::PageVisual(case) = submission {
+            if case.draft().is_none() {
+                let error = result.expect_err("displayed input without usable source must refuse");
+                let expected = match case {
+                    PageVisual::Blank => "current-page Writer source is blank",
+                    PageVisual::Unreadable => "notebook page unreadable",
+                    PageVisual::RequestEcho => "submitting instruction returned as Writer source",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    format!("{error:#}").contains(expected),
+                    "{case:?}: {error:#}"
+                );
+                assert_eq!(steps.get(), 2);
+                assert!(written.borrow().is_empty());
+                assert!(!events.borrow().contains(&"insert"));
+                assert!(!position.exists());
+                assert_eq!(destination.counts(), (0, 0, 0));
+                assert!(store
+                    .snapshot_heads_matching(
+                        &[Namespace::Conversation],
+                        crate::storage::MAX_ITEMS,
+                        |record| record.payload["record"]["outcome"] == "generated",
+                    )?
+                    .is_empty());
+                drop((service, dispatch, ledger, store));
+                std::fs::remove_dir_all(base)?;
+                continue;
+            }
+        }
         let notebook_unavailable = submission == Submission::WholeNotebook;
         if notebook_unavailable {
             assert_eq!(
@@ -1409,7 +1573,10 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                     } else {
                         NOTE
                     },
-                    DRAFT,
+                    match submission {
+                        Submission::PageVisual(case) => case.draft().unwrap(),
+                        _ => DRAFT,
+                    },
                 )
             };
             let draft_body = saved_draft.strip_prefix("# ").unwrap();

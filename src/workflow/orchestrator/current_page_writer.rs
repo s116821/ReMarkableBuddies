@@ -6,7 +6,7 @@ use crate::{
         ResidentSourceCapture, Role, TextScope, Turn, WriterSelection,
     },
     llm::LLMEngine,
-    retrieval::notebook::{self, Normalized, TranscriptionPolicy},
+    retrieval::notebook,
     storage::{Namespace, Uuid},
     writer,
 };
@@ -167,25 +167,20 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Writer handwriting context unavailable"
         );
         let mut recognition = writer::ModelStage::new(&mut self.llm, recognition_deadline);
-        let (normalized, _) = notebook::normalize_admitted(
+        let normalized = page_image.normalize_displayed_writer(
             capture.document(),
-            &page_image,
             model_profile,
+            &request,
             handwriting
                 .as_ref()
                 .and_then(|capture| capture.context.as_deref()),
-            TranscriptionPolicy::WholePage,
             &mut recognition,
             &mut |_| progress(),
         );
         progress()?;
-        let Normalized::Page(normalized) =
-            normalized.map_err(|_| anyhow::anyhow!("current-page Writer normalization refused"))?
-        else {
-            anyhow::bail!("current-page Writer requires readable source notes");
-        };
+        let document = normalized.context("current-page Writer normalization refused")?;
         ensure!(
-            !normalized.document.units.is_empty(),
+            !document.units.is_empty(),
             "current-page Writer source is blank"
         );
         drop(page_image);
@@ -195,7 +190,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             conversation,
             operation,
             request,
-            document: normalized.document,
+            document,
             selection: TextScope::Page { page },
             guidance: None,
         };
