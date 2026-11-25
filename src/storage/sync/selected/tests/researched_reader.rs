@@ -1197,22 +1197,20 @@ fn ordinary_installed_reader_leaves_mapped_files_out_of_the_request() -> Result<
     use anyhow::Context;
 
     const OTHER_PAGE: &str = "OTHER_PAGE_TEXT_MUST_NOT_BE_SENT";
-    for (format, bytes, redir) in [
-        ("pdf", pdf_bytes(OTHER_PAGE), 0),
-        ("epub", ordinary_epub::book(OTHER_PAGE), 2),
+    for (format, bytes, original_pages, redir) in [
+        ("pdf", pdf_bytes(OTHER_PAGE), 2, 0),
+        ("epub", ordinary_epub::book(OTHER_PAGE), 600, 310),
     ] {
         let fixture = Fixture::new();
         fs::DirBuilder::new().mode(0o700).create(&fixture.0)?;
         let document = Uuid::new_v4();
         let page = Uuid::new_v4();
-        let other = Uuid::new_v4();
         let path = fixture.0.join(format!("{document}.{format}"));
         fs::write(&path, &bytes)?;
         files::atomic_json(
             &fixture.0.join(format!("{document}.content")),
-            &json!({"fileType":format, "cPages":{"original":{"value":4},"pages":[
-                {"id":page,"idx":{"value":"a"},"redir":{"value":redir}},
-                {"id":other,"idx":{"value":"b"},"redir":{"value":redir + 1}}
+            &json!({"fileType":format, "cPages":{"original":{"value":original_pages},"pages":[
+                {"id":page,"idx":{"value":"a"},"redir":{"value":redir}}
             ]}}),
         )?;
         let qualification = researched_fixture::Scope::new(None, false);

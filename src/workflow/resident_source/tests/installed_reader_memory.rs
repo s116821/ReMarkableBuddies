@@ -612,15 +612,41 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         .iter()
         .any(|unit| { unit.page == Some(2) && unit.text.contains("Last page.") }));
 
-    let mode = "reconnect-source-handoff";
+    use crate::workflow::selected_backend::RefusingBackend;
+    use std::{
+        ffi::CString,
+        fs::File,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        },
+    };
+
+    // The archived normalization alone must not cause Reader to re-read the
+    // saved notebook table in order to qualify an additional page.
+    let table = root.join(format!("{document}.content"));
+    let table = CString::new(table.as_os_str().as_bytes())?;
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    ensure!(fd >= 0, "inotify initialization failed");
+    let mut watch = unsafe { File::from_raw_fd(fd) };
+    ensure!(
+        unsafe { libc::inotify_add_watch(watch.as_raw_fd(), table.as_ptr(), libc::IN_ACCESS) } >= 0,
+        "watching the saved notebook table failed"
+    );
+
+    let mode = "reconnect-source-handoff-open-first";
     let (mut workflow, events, _) =
         workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, store);
     let native = Fixture::new();
     native.declare_source(document, pages[0]);
     native.declare_source_order(pages);
+    let (opened, _) = native.opened_page_probe();
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
     let owner = workflow.resident_source.as_mut().unwrap();
-    owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+    owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+        &store.paths.cache.join("archive-reader-output-profile"),
+        runtime.identity(),
+    )?;
     owner.session = Some(Box::new(OwnedSession {
         runtime,
         _fixture: native,
@@ -631,6 +657,24 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         writer_slot_fault: false,
         refinement_slot: None,
     }));
+    let sdk_id = |id: ConversationId| Uuid::from_bytes(*id.as_bytes());
+    let facts = ReaderFacts::new(
+        remarkable_open_sdk::PageKey {
+            document: sdk_id(document),
+            page: sdk_id(pages[0]),
+        },
+        pages.iter().copied().map(sdk_id).collect(),
+    )
+    .unwrap();
+    workflow.device = Box::new(
+        RefusingBackend::with_resident_releases(vec![released(Instant::now())]).with_test_output(
+            Box::new(RecognitionProbe {
+                confirmed_source: true,
+                early_source: Some((facts, Rc::new(RefCell::new(None)))),
+                ..RecognitionProbe::default()
+            }),
+        ),
+    );
     let config = crate::config::Config {
         paths: store.paths.clone(),
         research_policy: Some(Some(ResearchPolicy::Disabled)),
@@ -652,6 +696,16 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))
     })?;
 
+    assert!(
+        opened.is_file(),
+        "Reader did not exercise the page-opening path"
+    );
+    let mut event = [0; 128];
+    assert_eq!(
+        watch.read(&mut event).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "Reader read the saved notebook metadata"
+    );
     let calls = calls.borrow();
     let [_, verification, answer] = calls.as_slice() else {
         anyhow::bail!("Expected only two readings and the captured-page answer");
