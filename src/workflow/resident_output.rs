@@ -113,6 +113,21 @@ impl ResidentOutputText<'_> {
 /// minted by ReaderFacts. No production implementation is supplied here.
 /// Implementations must use existing Ledger bindings/adoption, not a second map.
 pub trait ResidentOutputBackend {
+    #[cfg(feature = "installed-resident-output")]
+    fn opens_submission_page(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "installed-resident-output")]
+    fn bind_opened_page(
+        &mut self,
+        _ledger: &Ledger,
+        _conversation: Uuid,
+        _target: &ReaderFacts,
+    ) -> Result<()> {
+        anyhow::bail!("early Buddy page binding unavailable")
+    }
+
     fn selected_conversation_request(&self) -> Result<Option<SelectedConversationRequest>> {
         Ok(None)
     }
@@ -159,7 +174,7 @@ pub trait ResidentOutputBackend {
         conversation: Uuid,
         runtime: &RuntimeIdentity,
         facts: &ReaderFacts,
-        pixels: &HistoricalCapture,
+        pixels: &[u8],
         blank_start_source: bool,
         deadline: Instant,
         progress: &mut dyn FnMut() -> Result<()>,

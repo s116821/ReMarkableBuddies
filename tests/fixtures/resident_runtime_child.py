@@ -107,11 +107,17 @@ source_facts = source_document + source_page + struct.pack(">H", len(source_orde
 inserted_target = None
 
 def current_source_facts():
+    if mode == "reconnect-source-handoff-open-first" and (root.parent / "source-switch").is_file():
+        if inserted_target is not None:
+            successor_index = source_order.index(source_page) + 1
+            order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
+            return source_document + source_page + struct.pack(">H", len(order)) + b"".join(order)
+        return source_facts
     if inserted_target is not None:
         successor_index = source_order.index(source_page) + 1
         order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
         return source_document + inserted_target + struct.pack(">H", len(order)) + b"".join(order)
-    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages") and (root.parent / "successor-position").is_file():
+    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages", "reconnect-source-handoff-open-first") and (root.parent / "successor-position").is_file():
         return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"
     if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
@@ -194,7 +200,7 @@ while True:
                     response[146] ^= 1
                 send(response)
                 continue
-            if mode == "reconnect-source-handoff-writer-insert" and request[202:204] == b"\x02\x01":
+            if mode in ("reconnect-source-handoff-writer-insert", "reconnect-source-handoff-open-first") and request[202:204] == b"\x02\x01":
                 assert inserted_target is None and request[204:-16] == source_facts
                 inserted_target = request[-16:]
                 assert inserted_target != source_page
@@ -213,7 +219,10 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
-                send(request[:202] + b"\x03" + digest + b"\x00" + current_source_facts())
+                facts = current_source_facts()
+                if mode == "reconnect-source-handoff-open-first" and facts[16:32] != source_page:
+                    (root.parent / "observed-open-page").write_text(str(uuid.UUID(bytes=facts[16:32])))
+                send(request[:202] + b"\x03" + digest + b"\x00" + facts)
                 continue
             if request[202:204] in (b"\x02\x05", b"\x02\x06"):
                 # Independent owned PNG encoder, not a native Reader model.
@@ -228,7 +237,7 @@ while True:
                     break
                 width, height = 192, 128
                 ordinary_pdf = mode == "reconnect-source-handoff-ordinary-pdf"
-                seed = facts[16:32] if mode == "reconnect-source-handoff-research-pages" else b""
+                seed = facts[16:32] if mode in ("reconnect-source-handoff-research-pages", "reconnect-source-handoff-open-first") else b""
                 pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
                           b"".join(hashlib.sha256(seed + struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
                 if (root.parent / "edited-selection").is_file():

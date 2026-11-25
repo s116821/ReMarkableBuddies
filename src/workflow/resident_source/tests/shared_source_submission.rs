@@ -1437,3 +1437,309 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
     }
     Ok(())
 }
+
+struct PageFirstModel {
+    inner: SubmissionModel,
+    observed_open_page: std::path::PathBuf,
+    switch_to_source: Option<std::path::PathBuf>,
+    source_digest: Rc<RefCell<Option<String>>>,
+    first: bool,
+    refuse_at: Option<usize>,
+}
+
+impl crate::LLMEngine for PageFirstModel {
+    fn guarded_timeout(&self) -> Option<Duration> {
+        self.inner.guarded_timeout()
+    }
+
+    fn add_text_content(&mut self, text: &str) {
+        self.inner.add_text_content(text);
+    }
+
+    fn add_image_content(&mut self, image: &str) {
+        self.inner.add_image_content(image);
+    }
+
+    fn clear_content(&mut self) {
+        self.inner.clear_content();
+    }
+
+    fn execute_with_handoff(
+        &mut self,
+        progress: &mut dyn FnMut() -> Result<()>,
+        handoff: &mut crate::llm::ModelHandoff<'_>,
+    ) -> Result<String> {
+        progress()?;
+        let mut result = None;
+        handoff(&mut || {
+            result = Some(self.execute());
+            Ok(())
+        })?;
+        result.context("fixture provider did not receive a request")?
+    }
+
+    fn execute(&mut self) -> Result<String> {
+        if self.first {
+            self.first = false;
+            // Keep the response gated on an independent resident Observe.
+            // The old router-first order reaches this gate before the marker.
+            let opened = std::fs::read_to_string(&self.observed_open_page)
+                .context("provider reached before a Buddy page was observed")?;
+            assert!(ConversationId::parse_str(&opened).is_ok());
+            if self.inner.steps.get() == 0 {
+                let digest = crate::storage::digest(&STANDARD.decode(&self.inner.images[0])?);
+                assert_eq!(
+                    self.source_digest.borrow().as_deref(),
+                    Some(digest.as_str())
+                );
+            }
+        }
+        if self.inner.steps.get() == 3 {
+            if let Some(switch) = &self.switch_to_source {
+                std::fs::write(switch, [])?;
+            }
+        }
+        if self.refuse_at == Some(self.inner.steps.get()) {
+            return Err(crate::llm::ProviderRefused.into());
+        }
+        self.inner.execute()
+    }
+}
+
+#[test]
+fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_page() -> Result<()> {
+    for (writer_enabled, submission, reuse, switch_page, refuse_at) in [
+        (false, Submission::Reader, false, false, None),
+        (true, Submission::Reader, true, false, None),
+        (true, Submission::CurrentPage, false, false, None),
+        (true, Submission::Reader, false, true, None),
+        (true, Submission::Reader, false, false, Some(0)),
+        (true, Submission::Reader, false, false, Some(3)),
+        (true, Submission::CurrentPage, false, false, Some(1)),
+    ] {
+        let mode = "reconnect-source-handoff-open-first";
+        let base =
+            std::env::temp_dir().join(format!("open-before-model-{}", ConversationId::new_v4()));
+        let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+            "paths": StorePaths {
+                data: base.join("data"),
+                cache: base.join("cache"),
+                credentials: base.join("credentials"),
+            },
+            "research_policy": "disabled",
+            "product_settings": { "reader_enabled": true, "writer_enabled": writer_enabled }
+        }))?;
+        let store = Arc::new(Store::open(config.paths.clone())?);
+        let ledger = Ledger::new(store.clone());
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![], Duration::ZERO, &store);
+        let native = Fixture::new();
+        let document = ConversationId::new_v4();
+        let page = ConversationId::new_v4();
+        let buddy = ConversationId::new_v4();
+        native.declare_source(document, page);
+        let document_key = Uuid::parse(&document.to_string()).unwrap();
+        let source_key = Uuid::parse(&page.to_string()).unwrap();
+        let buddy_key = Uuid::parse(&buddy.to_string()).unwrap();
+        let source_facts = ReaderFacts::new(
+            remarkable_open_sdk::PageKey {
+                document: document_key,
+                page: source_key,
+            },
+            vec![source_key],
+        )
+        .unwrap();
+        let existing_facts = ReaderFacts::new(
+            remarkable_open_sdk::PageKey {
+                document: document_key,
+                page: buddy_key,
+            },
+            vec![source_key, buddy_key],
+        )
+        .unwrap();
+        let (observed_open_page, switch) = native.opened_page_probe();
+        let position = native.successor_position();
+        if reuse {
+            native.declare_source_order(&[page, buddy]);
+        }
+        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(5))?;
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?;
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            writer_slot: None,
+            writer_slot_fault: false,
+            refinement_slot: None,
+        }));
+        let was_classified = Rc::new(Cell::new(None));
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let source_digest = Rc::new(RefCell::new(None));
+        let mut backend = RecognitionProbe {
+            conversation: was_classified.clone(),
+            confirmed_source: true,
+            early_source: Some((source_facts.clone(), source_digest.clone())),
+            successor: reuse.then(|| SuccessorProbe {
+                position: position.clone(),
+                interrupt_restore: false,
+            }),
+            rendered_text: Some(written.clone()),
+            ..RecognitionProbe::default()
+        };
+        if reuse {
+            let conversation = ConversationId::new_v4();
+            ledger.create(conversation, ConversationId::new_v4(), 1)?;
+            backend.bind_opened_page(&ledger, conversation, &existing_facts)?;
+            backend.early_source.as_mut().unwrap().0 =
+                ReaderFacts::new(source_facts.page(), existing_facts.order().to_vec()).unwrap();
+        }
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(backend)),
+        );
+        let dispatch =
+            Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+        let steps = Rc::new(Cell::new(usize::from(!writer_enabled)));
+        let model = PageFirstModel {
+            inner: SubmissionModel {
+                submission,
+                last_visible_text: None,
+                steps: steps.clone(),
+                source: Rc::new(RefCell::new(None)),
+                images: vec![],
+                text: vec![],
+            },
+            observed_open_page: observed_open_page.clone(),
+            switch_to_source: switch_page.then_some(switch),
+            source_digest: source_digest.clone(),
+            first: true,
+            refuse_at,
+        };
+        assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
+        let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        let opened = ConversationId::parse_str(&std::fs::read_to_string(observed_open_page)?)?;
+        assert_ne!(opened, page);
+        if reuse {
+            assert_eq!(opened, buddy);
+            assert!(position.exists());
+        }
+        let conversation = was_classified
+            .get()
+            .context("source classification absent")?;
+        let records = ledger.inspect(conversation, false)?;
+        let write_count = written.borrow().len();
+        let refuse = refuse_at.is_some();
+        if switch_page || refuse {
+            assert!(result.is_err(), "{result:?}");
+            let (request, message) = match (switch_page, refuse_at) {
+                (true, None) => (Some(QUESTION), "This request was canceled."),
+                (_, Some(0)) => (
+                    None,
+                    "The response service could not complete this request.",
+                ),
+                (_, Some(3)) => (
+                    Some(QUESTION),
+                    "The response service could not complete this request.",
+                ),
+                (_, Some(1)) => (Some(NOTE), "This request could not be completed."),
+                _ => unreachable!(),
+            };
+            let budget = ContextBudget {
+                max_text_bytes: 4096,
+                max_turns: 12,
+                provider_token_limit: Some(4096),
+            };
+            // Reconstruct the ordinary persisted conversation view after the
+            // service returned, including the exact request and one safe reply.
+            use crate::conversation_layout::{plan, Geometry, PresentationIdentity};
+            let view = ledger.presentation_context(conversation, &budget, |_| Ok(1))?;
+            let display = plan(
+                PresentationIdentity::Persisted {
+                    conversation,
+                    document,
+                    page: opened,
+                },
+                &view,
+                "",
+                Geometry::default(),
+            )?;
+            let matching: Vec<_> = display
+                .exchanges
+                .iter()
+                .flat_map(|item| &item.turns)
+                .filter(|turn| {
+                    turn.role == Role::Assistant && turn.text.as_deref() == Some(message)
+                })
+                .collect();
+            let [reply] = matching.as_slice() else {
+                anyhow::bail!("expected one failure reply, got {:?}", view.turns);
+            };
+            assert_eq!(
+                reply.mode,
+                if submission == Submission::CurrentPage {
+                    Mode::Writer
+                } else {
+                    Mode::Reader
+                }
+            );
+            assert!(view.turns.iter().any(|turn| turn.exchange == reply.exchange
+                && turn.role == Role::User
+                && turn.text.as_deref() == request));
+            assert!(ledger
+                .context(conversation, &budget, |_| Ok(1))?
+                .turns
+                .iter()
+                .all(|turn| turn.id != reply.id));
+            assert_eq!(write_count, usize::from(refuse));
+            if refuse {
+                let expected = request.map_or_else(
+                    || format!("A: {message}\n"),
+                    |request| crate::workflow::resident_output::format_exchange(request, message),
+                );
+                assert_eq!(written.borrow().as_slice(), &[expected]);
+            }
+        } else {
+            result?;
+            assert_eq!(write_count, 1);
+            assert!(
+                written.borrow()[0].contains(if submission == Submission::Reader {
+                    "Four."
+                } else {
+                    "Page note"
+                })
+            );
+            assert!(records
+                .iter()
+                .any(|record| matches!(record, Record::ResidentCapture(capture)
+                if capture.before.document == document && capture.before.page == page
+                    && source_digest.borrow().as_deref() == Some(capture.original_png.sha256.as_str()))));
+        }
+        let attempts = super::super::super::resident_client::attempts(&store)?;
+        assert_eq!(attempts.len(), usize::from(!reuse));
+        assert_eq!(
+            events
+                .borrow()
+                .iter()
+                .filter(|event| **event == "insert")
+                .count(),
+            usize::from(!reuse)
+        );
+        if let Some(attempt) = attempts.first() {
+            assert_eq!(attempt.conversation, conversation);
+            assert!(
+                matches!(attempt.reply, Some(Reply::InsertionObserved { target, .. })
+                if target.page.as_bytes() == opened.as_bytes())
+            );
+        }
+        drop((service, dispatch, ledger, store));
+        std::fs::remove_dir_all(base)?;
+    }
+    Ok(())
+}

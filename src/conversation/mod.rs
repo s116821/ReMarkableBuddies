@@ -2350,11 +2350,28 @@ impl Ledger {
         purpose: ContextPurpose<'_>,
     ) -> Result<ContextView> {
         let token_limit = Self::context_token_limit(selection, budget)?;
+        let opened_feedback: BTreeSet<_> = if matches!(purpose, ContextPurpose::Presentation) {
+            records
+                .iter()
+                .filter_map(|record| match record {
+                    Record::Turn(turn) if crate::conversation_feedback::is_opened_reply(turn) => {
+                        Some(turn.exchange)
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
         let turns: Vec<Turn> = records
             .iter()
             .filter_map(|r| match r {
                 Record::Turn(t)
-                    if purpose.admits(t)
+                    if (purpose.admits(t)
+                        || (opened_feedback.contains(&t.exchange)
+                            && (t.role == Role::User
+                                || crate::conversation_feedback::is_opened_reply(t))))
                         && selection.is_none_or(|range| {
                             t.sequence >= range.start && t.sequence < range.end_exclusive
                         }) =>

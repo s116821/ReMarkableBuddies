@@ -343,6 +343,77 @@ impl Workflow {
         false
     }
 
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn open_installed_submission(
+        &mut self,
+        ledger: &crate::conversation::Ledger,
+        capture: &crate::conversation::ResidentSourceCapture,
+        fresh_conversation: crate::storage::Uuid,
+    ) -> Result<()> {
+        if !self.uses_installed_reader_history() {
+            return Ok(());
+        }
+        let Some(backend) = self.device.resident_output_backend() else {
+            return Ok(());
+        };
+        if !backend.opens_submission_page() {
+            return Ok(());
+        }
+        let owner = self
+            .resident_source
+            .as_mut()
+            .expect("installed owner absent");
+        let health = self
+            .service_health
+            .as_mut()
+            .expect("installed health absent");
+        let association = ledger.resident_answer_association(capture)?;
+        if association.is_none() {
+            use crate::storage::{Namespace, Uuid};
+            if ledger
+                .expected(Namespace::Conversation, fresh_conversation)?
+                .0
+                .is_empty()
+            {
+                let created_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_millis()
+                    .try_into()?;
+                ledger.create(fresh_conversation, Uuid::new_v4(), created_ms)?;
+            }
+        }
+        let conversation = association
+            .as_ref()
+            .map_or(fresh_conversation, |binding| binding.receipt().conversation);
+        owner.open_submission_page(
+            health,
+            backend,
+            ledger,
+            conversation,
+            association.as_ref(),
+            capture.original_source_png(),
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn opened_submission(
+        &self,
+    ) -> Option<&crate::conversation::HistoricalPageAssociation> {
+        self.resident_source.as_ref()?.opened_association()
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn installed_source_association(
+        &self,
+        ledger: &crate::conversation::Ledger,
+        capture: &crate::conversation::ResidentSourceCapture,
+    ) -> Result<Option<crate::conversation::HistoricalPageAssociation>> {
+        match self.opened_submission() {
+            Some(opened) => Ok(Some(opened.clone())),
+            None => ledger.resident_answer_association(capture),
+        }
+    }
+
     /// Read-only request checks replace source-page progress drawing.
     #[cfg(target_os = "linux")]
     pub(super) fn selected_resident_conversation(
@@ -410,9 +481,16 @@ impl Workflow {
             .device
             .resident_output_backend()
             .ok_or_else(|| anyhow::anyhow!("resident output backend unavailable"))?;
+        #[cfg(feature = "installed-resident-output")]
+        let new = self
+            .resident_source
+            .as_ref()
+            .is_some_and(|owner| owner.opened_page_is_new());
+        #[cfg(not(feature = "installed-resident-output"))]
+        let new = false;
         let full = WriterSourceDraft(full);
         let output = if backend.supports_page_text(full, false)?
-            && (association.is_some() || backend.supports_page_text(full, true)?)
+            && ((!new && association.is_some()) || backend.supports_page_text(full, true)?)
         {
             full
         } else {

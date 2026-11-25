@@ -300,13 +300,19 @@ impl<M: LLMEngine> Orchestrator<M> {
         if proposed.trim().eq_ignore_ascii_case("NONE") {
             source.require_current(&mut self.workflow)?;
             prepared.with_current(self.ledger.store(), || Ok(()))?;
+            let opened = self.workflow.opened_submission().is_some();
             self.workflow.report_failure(super::Failure::Selection)?;
-            return attempt.outcome(
+            attempt.outcome(
                 &self.ledger,
                 false,
                 crate::conversation::Outcome::Failed,
                 crate::conversation::AttemptReason::NoSelection,
-            );
+            )?;
+            return if opened {
+                Err(super::source_submission::UnresolvedSubmission.into())
+            } else {
+                Ok(())
+            };
         }
         let marked = source_page
             .then(|| Self::parse_marked_fragment(&proposed))
@@ -426,6 +432,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             Some(marked.region),
         )?;
         let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
+        if self.workflow.opened_submission().is_some() {
+            return Err(super::source_submission::UnresolvedSubmission.into());
+        }
         self.present_ordinary_outcome(
             attempt,
             source,
@@ -677,6 +686,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 let current = &mut |ledger: &crate::conversation::Ledger| {
                     evidence.with_current(ledger, || Ok(()))
                 };
+                if self.workflow.opened_submission().is_some() {
+                    return Err(error);
+                }
                 if marked {
                     self.present_ordinary_outcome(
                         attempt,
@@ -705,7 +717,14 @@ impl<M: LLMEngine> Orchestrator<M> {
             Err(error) => return Err(error),
         };
         attempt.check_selected()?;
-        source.require_current(&mut self.workflow)?;
+        if self.workflow.opened_submission().is_some() {
+            // A returned answer belongs to the retained source and its exact
+            // conversation. Current page authority is checked separately at output.
+            source.check_deadline()?;
+            source.check_file()?;
+        } else {
+            source.require_current(&mut self.workflow)?;
+        }
         attempt.generated_from_pdf(ledger, &mut evidence, result.answer.clone())?;
         self.place_answer(attempt, result, true, &mut |ledger| {
             source.check_file()?;
