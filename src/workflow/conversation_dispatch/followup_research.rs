@@ -38,6 +38,7 @@ pub(in crate::workflow) struct ResearchRequest<'a> {
     pub(in crate::workflow) search: Option<OrdinarySearch<'a>>,
     pub(in crate::workflow) deadline: Instant,
     pub(in crate::workflow) original_image_only: bool,
+    pub(in crate::workflow) display_answer_space: Option<usize>,
 }
 
 impl<'a> FollowupResearch<'a> {
@@ -58,6 +59,7 @@ impl<'a> FollowupResearch<'a> {
                 search,
                 deadline,
                 original_image_only: false,
+                display_answer_space: None,
             },
         }
     }
@@ -139,7 +141,12 @@ pub(in crate::workflow) fn answer(
     let preference = config.personalization_snapshot()?;
     let count = |text: &str| Ok(text.len());
     check()?;
-    let images = FollowupAttachments::acquire(ledger, &context, research.original_image_only)?;
+    let images = FollowupAttachments::acquire(
+        ledger,
+        &context,
+        research.original_image_only,
+        research.display_answer_space,
+    )?;
     let memory = memory
         .map(|provider| {
             Ok::<_, anyhow::Error>((

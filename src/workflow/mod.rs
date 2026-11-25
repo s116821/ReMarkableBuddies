@@ -403,6 +403,29 @@ impl Workflow {
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(super) fn opened_reader_ascii_answer_space(
+        &self,
+        question: &str,
+        center: crate::analysis::SelectionCenter,
+    ) -> Option<usize> {
+        let owner = self.resident_source.as_ref()?;
+        if !owner.opened_page_is_new() {
+            return None;
+        }
+        // The renderer can omit an optional About label to fit the complete answer.
+        let empty_answer = resident_output::ResidentOutputText::Reader {
+            question,
+            answer: "",
+            center,
+            about: None,
+        };
+        resident_output::development::new_unified_ascii_answer_space(
+            owner.opened_association()?.receipt(),
+            empty_answer,
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(super) fn installed_source_association(
         &self,
         ledger: &crate::conversation::Ledger,
