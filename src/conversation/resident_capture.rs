@@ -108,8 +108,9 @@ impl ResidentCorrespondence {
 }
 /// Constructed only by the in-crate admitted Session source route. Construction
 /// verifies correspondence; neither this nor its stored form grants live authority.
+#[derive(Clone)]
 pub struct ResidentSourceCapture {
-    pub(super) capture: HistoricalCapture,
+    pub(super) capture: std::sync::Arc<HistoricalCapture>,
     pub(super) correspondence: ResidentCorrespondence,
 }
 impl ResidentSourceCapture {
@@ -278,7 +279,7 @@ impl ResidentSourceCapture {
         };
         correspondence.validate()?;
         Ok(Self {
-            capture,
+            capture: std::sync::Arc::new(capture),
             correspondence,
         })
     }

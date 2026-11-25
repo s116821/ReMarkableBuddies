@@ -1708,6 +1708,29 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             assert!(view.turns.iter().any(|turn| turn.exchange == reply.exchange
                 && turn.role == Role::User
                 && turn.text.as_deref() == request));
+            if refuse_at == Some(0) || disabled_reader {
+                let mut users = records.iter().filter_map(|record| match record {
+                    Record::Turn(turn)
+                        if turn.exchange == reply.exchange && turn.role == Role::User =>
+                    {
+                        Some(turn)
+                    }
+                    _ => None,
+                });
+                let user = users.next().context("routed user turn absent")?;
+                assert!(users.next().is_none(), "routing duplicated the user turn");
+                let [source] = user.sources.as_slice() else {
+                    anyhow::bail!("expected one captured source on the failed routing turn");
+                };
+                let saved = ledger.stored_resident_images(*source)?;
+                assert_eq!(saved.evidence.turn, user.id);
+                assert_eq!(saved.evidence.before.document, document);
+                assert_eq!(saved.evidence.before.page, page);
+                assert_eq!(
+                    source_digest.borrow().as_deref(),
+                    Some(crate::storage::digest(&saved.original_png).as_str())
+                );
+            }
             assert!(ledger
                 .context(conversation, &budget, |_| Ok(1))?
                 .turns

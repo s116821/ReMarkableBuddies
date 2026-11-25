@@ -351,6 +351,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     Mode::Reader
                 },
                 request: None,
+                routing_source: None,
             });
             let result = self.run_source_submission(
                 acquired,
@@ -395,7 +396,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && dispatch.shared_source_writer_enabled()
             {
                 use source_submission::SourceIntent;
-                let intent = self.classify_source_submission(capture, dispatch)?;
+                let intent =
+                    self.classify_source_submission(capture, dispatch, opened.as_deref_mut())?;
                 if let (Some(opened), Some((request, stage))) =
                     (opened.as_deref_mut(), intent.writer_exchange())
                 {

@@ -77,6 +77,7 @@ pub(super) struct OpenedRequest {
     pub(super) exchange: crate::storage::Uuid,
     pub(super) mode: crate::conversation::Mode,
     pub(super) request: Option<String>,
+    pub(super) routing_source: Option<ResidentSourceCapture>,
 }
 
 impl<M: LLMEngine> Orchestrator<M> {
@@ -84,6 +85,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         &mut self,
         capture: &ResidentSourceCapture,
         dispatch: &Dispatch<'_>,
+        opened: Option<&mut OpenedRequest>,
     ) -> Result<SourceIntent> {
         dispatch.require_ledger(&self.ledger)?;
         let association = self
@@ -154,6 +156,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                 model.0.add_text_content(context);
             }
             model.0.add_image_content(&image);
+            if let Some(request) = opened {
+                request.routing_source = Some(capture.clone());
+            }
             drop(image);
             let mut guarded = writer::ModelStage::new(&mut *model.0, deadline);
             guarded.execute_with_progress(&mut || {
@@ -282,7 +287,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             .iter()
             .rev()
             .find(|turn| turn.role == Role::User && turn.text.is_some())
-            .or_else(|| turns.iter().find(|turn| turn.role == Role::User));
+            .or_else(|| turns.iter().find(|turn| turn.role == Role::User))
+            .copied();
         let request = user
             .and_then(|turn| turn.text.as_deref())
             .or(opened.request.as_deref());
@@ -301,14 +307,40 @@ impl<M: LLMEngine> Orchestrator<M> {
             updated_ms: timestamp,
             completion: None,
         };
-        if let Some(user) = user {
+        // A refusal during routing happens before Reader or Writer saves its own user turn.
+        let routed_user = if let (None, Some(source)) = (user, opened.routing_source.as_ref()) {
+            if let Err(error) = self.ledger.prepare_resident_historical(
+                Uuid::new_v4(),
+                expected.clone(),
+                original.clone(),
+                Uuid::new_v4(),
+                source,
+            ) {
+                log::warn!("Could not retain the routed source for this request: {error:#}");
+            }
+            // Preparation can publish before readback fails. Honor the turn actually stored.
+            expected = self
+                .ledger
+                .expected(Namespace::Conversation, conversation)?;
+            self.ledger
+                .store()
+                .value(Namespace::Conversation, original.id)?
+                .map(|value| match crate::conversation::Ledger::decode(&value)? {
+                    Record::Turn(turn) => Ok(turn),
+                    _ => anyhow::bail!("Expected the routed user turn"),
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let Some(user) = user.or(routed_user.as_ref()) {
             if user.outcome == Outcome::Prepared {
                 if let Some(request) = request {
                     let interpreted = Turn {
                         outcome: Outcome::Interpreted,
                         text: Some(request.to_owned()),
                         updated_ms: timestamp,
-                        ..(**user).clone()
+                        ..user.clone()
                     };
                     self.ledger.advance(
                         Uuid::new_v4(),
