@@ -51,7 +51,7 @@ installation includes an automatic answer-page mode. With that mode enabled,
 start with a single notebook page.
 
 1. Circle `24 / 6` and write “What is the answer to this?” beside it. You can also highlight a passage or draw another closed shape around your subject.
-2. Hold one finger still in the **lower-right corner** for three seconds, then release once.
+2. Hold one finger in the **lower-right corner** for three seconds, then release once.
 3. A successful run puts the question and the answer **4** on a new page immediately after yours. The circle and expression stay on the source page. If the conversation already has an answer page, Buddy can reuse it.
 
 Buddy captures the page and independently verifies the handwritten question
@@ -75,7 +75,7 @@ preview on reMarkable 2 with Writer enabled. The `v0.78.3` release predates
 this input. With automatic page insertion enabled, a one-page notebook is enough.
 
 1. Open the notebook page you want to use. Write “Make a note from this page” for a whole-page draft. To use one passage or drawing, circle it and write “Make a note about the circled part” beside it.
-2. Hold one finger still in the **lower-right corner** for three seconds, then release once.
+2. Hold one finger in the **lower-right corner** for three seconds, then release once.
 3. On a successful run, the adjacent Buddy page shows the request Buddy read and the draft beneath it. For a circled note, check the **About** line against the content you selected.
 
 This gesture saves a draft in Buddy. Export to a connected notes service is
@@ -535,11 +535,17 @@ Set the environment variable: `export OPENAI_API_KEY=your-key`
 - Ensure the outline is complete (no gaps)
 
 ### Touch trigger not working
-- Verify the trigger corner setting (default is **lower-right**)
-- Make sure you're using your hand/finger, not the pen
-- **Hold for 3 full seconds** - a quick tap won't trigger
-- The trigger zone is 68x68 pixels in the specified corner
-- Keep your finger still in the zone for the full duration
+
+The default target is the lower-right corner of the display, roughly the last
+9% of its width and the bottom 7% of its height. If you chose a different
+corner, use that one. Keep one fingertip there for three seconds, then lift it
+to trigger the request. Starting with Buddy v0.78.4, your finger can shift
+within the corner during the hold.
+
+After a reboot, the notebook can appear before Buddy is listening. If a hold
+does nothing, check `systemctl status reader-buddy.service`. For a running
+service, look for `Initialization complete; starting main loop` from its latest
+start in [this boot’s Buddy log](#viewing-logs-with-journalctl).
 
 ### Manual workflow cannot find an answer page
 
