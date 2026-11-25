@@ -42,6 +42,8 @@ fn plain_markdown(markdown: &str) -> String {
                 text.push_str(&content);
             }
             Event::InlineMath(_) | Event::DisplayMath(_) => text.push_str(&markdown[range]),
+            Event::Start(Tag::Strikethrough) => text.push_str("[crossed out: "),
+            Event::End(TagEnd::Strikethrough) => text.push(']'),
             Event::Start(Tag::Emphasis) | Event::End(TagEnd::Emphasis)
                 if markdown[range.clone()].starts_with('*')
                     && markdown[..range.start]
@@ -160,10 +162,19 @@ mod tests {
         let display = writer_draft_text(&draft, Some(about)).unwrap();
         assert_eq!(
             display,
-            "Diagram\n\nAbout: the **V_1** label\n\nInputs\n\n- Pump and unused Tank\n\
+            "Diagram\n\nAbout: the **V_1** label\n\nInputs\n\n- Pump and [crossed out: unused] Tank\n\
              - Use *literal*, $x_1 = y_2$, and 2*3*4.\n\n\
              x * y and label (https://example.com)\n\n\
              let s = \"**code**\";"
+        );
+    }
+
+    #[test]
+    fn writer_projection_distinguishes_crossed_out_and_corrected_values() {
+        let draft = "# Measurements\n\nPressure: ~~10~~ 12 psi";
+        assert_eq!(
+            writer_draft_text(draft, None).unwrap(),
+            "Measurements\n\nPressure: [crossed out: 10] 12 psi"
         );
     }
 }

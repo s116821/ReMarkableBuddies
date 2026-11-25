@@ -5,7 +5,9 @@ use crate::storage::{Uuid, MAX_ITEMS};
 use anyhow::{ensure, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(target_os = "linux")]
 mod writer_draft;
+#[cfg(target_os = "linux")]
 pub(crate) use writer_draft::writer_draft_text;
 
 pub(crate) const CONVERSATION_TITLE: &str = "ReMarkableBuddies";
