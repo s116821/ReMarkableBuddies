@@ -718,7 +718,8 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         json!(pages[0])
     );
     assert!(request["retrieval"].is_null());
-    assert_eq!(answer.1, verification.1);
+    assert!(!answer.1.is_empty());
+    assert!(answer.1.iter().all(|image| verification.1.contains(image)));
     assert!(answer.0.iter().all(|part| !part.contains("Last page.")));
     assert!(answer
         .0

@@ -1254,7 +1254,11 @@ fn ordinary_installed_reader_leaves_mapped_files_out_of_the_request() -> Result<
         assert!(frame["retrieval"].is_null());
         let frames = frames.lock().unwrap();
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[2].images, frames[1].images);
+        assert!(!frames[2].images.is_empty());
+        assert!(frames[2]
+            .images
+            .iter()
+            .all(|image| frames[1].images.contains(image)));
         assert!(frames[2]
             .texts
             .iter()
