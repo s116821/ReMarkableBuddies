@@ -2,6 +2,7 @@
 use super::{NormalizedDocument, SourceFormat, SourceUnit};
 use crate::{
     config::inspection::strict_json,
+    handwriting::ConfirmedContext,
     llm::LLMEngine,
     storage::{digest, Uuid},
 };
@@ -11,7 +12,10 @@ use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, io::Cursor};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 #[cfg(any(test, all(target_os = "linux", feature = "installed-resident-output")))]
 pub(crate) mod saved_render;
@@ -37,6 +41,13 @@ pub struct PageImage<'a> {
     pub png: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PatternedPaper {
+    PaperOnly,
+    Ink,
+}
+
 /// Full-page images and verified output-page identities from the source owner.
 /// The order is the native notebook order, including any Buddy pages.
 pub(crate) struct OrderedNotebookImages<'a> {
@@ -44,6 +55,7 @@ pub(crate) struct OrderedNotebookImages<'a> {
     pub order: &'a [Uuid],
     pub originals: &'a [(Uuid, &'a [u8])],
     pub buddy_pages: &'a BTreeSet<Uuid>,
+    pub patterned_paper: &'a BTreeMap<Uuid, PatternedPaper>,
 }
 
 /// Evidence from the acquisition owner, sealed after verifying that the saved
@@ -55,7 +67,15 @@ pub(crate) struct NotebookSourceReceipt {
     pub ordered_image_sha256: String,
 }
 
-impl OrderedNotebookImages<'_> {
+pub(crate) struct OriginalNotebookPages<'a> {
+    document: Uuid,
+    pages: Vec<PageImage<'a>>,
+    patterned_paper: BTreeMap<u32, PatternedPaper>,
+    source_sha256: String,
+    pub(crate) target_hashes: BTreeSet<String>,
+}
+
+impl<'a> OrderedNotebookImages<'a> {
     /// The source owner uses this same identity when re-observing current order.
     pub(crate) fn order_revision(&self) -> Result<String> {
         Ok(digest(&serde_json::to_vec(&(
@@ -67,6 +87,10 @@ impl OrderedNotebookImages<'_> {
     }
 
     pub(crate) fn image_digest(&self) -> Result<String> {
+        Ok(self.image_identity()?.0)
+    }
+
+    fn image_identity(&self) -> Result<(String, BTreeSet<String>)> {
         let options = Options::default();
         ensure!(
             (1..=MAX_ORDERED_NOTEBOOK_PAGES).contains(&self.originals.len()),
@@ -78,22 +102,39 @@ impl OrderedNotebookImages<'_> {
             .iter()
             .map(|(page, png)| (*page, digest(png)))
             .collect();
-        Ok(digest(&serde_json::to_vec(&(
-            "native-ordered-notebook-pngs-v1",
-            self.order_revision()?,
-            originals,
-        ))?))
+        let order_revision = self.order_revision()?;
+        let bytes = if self.patterned_paper.is_empty() {
+            serde_json::to_vec(&(
+                "native-ordered-notebook-pngs-v1",
+                order_revision,
+                &originals,
+            ))?
+        } else {
+            ensure!(
+                self.patterned_paper
+                    .keys()
+                    .all(|page| originals.iter().any(|(original, _)| original == page)),
+                "patterned paper evidence names a non-original page"
+            );
+            serde_json::to_vec(&(
+                "native-ordered-notebook-pngs-and-paper-v2",
+                order_revision,
+                &originals,
+                self.patterned_paper,
+            ))?
+        };
+        Ok((
+            digest(&bytes),
+            originals.into_iter().map(|(_, hash)| hash).collect(),
+        ))
     }
 
-    pub(crate) fn normalize(
+    pub(crate) fn admit_originals(
         &self,
         current_page: Uuid,
         expected_image_digest: &str,
-        model_profile: &str,
-        engine: &mut dyn LLMEngine,
-        progress: &mut dyn FnMut(Progress) -> Result<()>,
-    ) -> Result<NormalizedDocument> {
-        let options = Options::default();
+    ) -> Result<OriginalNotebookPages<'a>> {
+        ensure!(!self.document.is_nil(), "invalid notebook identity");
         ensure!(
             (1..=MAX_ORDERED_NOTEBOOK_PAGES).contains(&self.originals.len())
                 && self.order.len() == self.originals.len() + self.buddy_pages.len()
@@ -103,6 +144,7 @@ impl OrderedNotebookImages<'_> {
         let mut seen = BTreeSet::new();
         let mut originals = self.originals.iter();
         let mut pages = Vec::with_capacity(self.originals.len());
+        let mut patterned_paper = BTreeMap::new();
         for (index, &id) in self.order.iter().enumerate() {
             ensure!(
                 !id.is_nil() && seen.insert(id),
@@ -115,31 +157,65 @@ impl OrderedNotebookImages<'_> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("original notebook page missing"))?;
             ensure!(page == id, "original notebook page order changed");
-            pages.push(PageImage {
-                page: (index + 1).try_into()?,
-                png,
-            });
+            let page = (index + 1).try_into()?;
+            if let Some(&paper) = self.patterned_paper.get(&id) {
+                patterned_paper.insert(page, paper);
+            }
+            pages.push(PageImage { page, png });
         }
         ensure!(
             originals.next().is_none() && self.buddy_pages.is_subset(&seen),
             "incomplete notebook page accounting"
         );
-        let image_digest = self.image_digest()?;
+        let (source_sha256, target_hashes) = self.image_identity()?;
         ensure!(
-            image_digest == expected_image_digest,
+            source_sha256 == expected_image_digest,
             "notebook images differ from acquisition receipt"
         );
+        Ok(OriginalNotebookPages {
+            document: self.document,
+            pages,
+            patterned_paper,
+            source_sha256,
+            target_hashes,
+        })
+    }
+}
+
+impl OriginalNotebookPages<'_> {
+    pub(crate) fn normalize(
+        self,
+        model_profile: &str,
+        context: Option<&ConfirmedContext>,
+        engine: &mut dyn LLMEngine,
+        progress: &mut dyn FnMut(Progress) -> Result<()>,
+    ) -> Result<NormalizedDocument> {
         ensure!(
-            !self.document.is_nil()
-                && !model_profile.trim().is_empty()
+            !model_profile.trim().is_empty()
                 && model_profile.len() <= 128
                 && !model_profile.chars().any(char::is_control),
             "invalid notebook identity"
         );
+        let profile_digest = match context {
+            Some(examples) => digest(&serde_json::to_vec(&(
+                "writer-notebook-confirmed-handwriting-v1",
+                model_profile,
+                examples.identity(),
+            ))?),
+            None => digest(model_profile.as_bytes()),
+        };
+        let options = Options::default();
         let mut units = Vec::new();
         let mut text_bytes = 0;
-        for batch in pages.chunks(options.max_pages) {
-            let next = writer_visual::extract(batch, engine, options, progress)?;
+        for batch in self.pages.chunks(options.max_pages) {
+            let next = writer_visual::extract(
+                batch,
+                &self.patterned_paper,
+                context,
+                engine,
+                options,
+                progress,
+            )?;
             text_bytes += next.iter().map(|unit| unit.text.len()).sum::<usize>();
             ensure!(
                 text_bytes <= crate::writer::notebook::MAX_SELECTED_BYTES,
@@ -147,14 +223,16 @@ impl OrderedNotebookImages<'_> {
             );
             units.extend(next);
         }
+        let paper_revision = if self.patterned_paper.is_empty() {
+            ""
+        } else {
+            "stock-paper-ink-only-v2:"
+        };
         Ok(NormalizedDocument {
             document: self.document,
             format: SourceFormat::Notebook,
-            source_sha256: image_digest,
-            extractor_revision: format!(
-                "{WRITER_VISUAL_REVISION}{}",
-                digest(model_profile.as_bytes())
-            ),
+            source_sha256: self.source_sha256,
+            extractor_revision: format!("{WRITER_VISUAL_REVISION}{paper_revision}{profile_digest}"),
             units,
         })
     }
@@ -835,6 +913,39 @@ pub fn normalize(
     Ok(*page)
 }
 
+fn append_confirmed_examples(
+    parts: &mut Vec<Value>,
+    context: &ConfirmedContext,
+    instructions: &str,
+) {
+    parts.push(json!({"type":"text","text":instructions}));
+    if context.has_absent_original() {
+        parts.push(json!({"type":"text","text":crate::handwriting::ABSENT_ORIGINAL_INSTRUCTION}));
+    }
+    for (index, example) in context.examples.iter().enumerate() {
+        let descriptor = json!({
+            "kind": "confirmed-example",
+            "index": index + 1,
+            "original_text": example.original_text,
+            "corrected_text": example.corrected_text,
+        });
+        parts.push(json!({"type":"text","text":descriptor.to_string()}));
+        parts.push(json!({"type":"image_url","image_url":STANDARD.encode(&example.png)}));
+    }
+}
+
+fn check_text_input_budget(parts: &[Value]) -> Result<()> {
+    let text = parts
+        .iter()
+        .filter(|part| part["type"] == "text")
+        .collect::<Vec<_>>();
+    ensure!(
+        serde_json::to_vec(&text)?.len() <= 32_768,
+        "notebook text input exceeds bound"
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn normalize_inner(
     document: Uuid,
@@ -966,19 +1077,7 @@ fn normalize_inner(
         } else {
             include_str!("../handwriting/context-instructions.txt")
         };
-        parts.push(json!({"type":"text","text":addendum}));
-        if absent_original {
-            parts.push(
-                json!({"type":"text","text":crate::handwriting::ABSENT_ORIGINAL_INSTRUCTION}),
-            );
-        }
-        for (i, e) in context.examples.iter().enumerate() {
-            let descriptor = json!({"kind":"confirmed-example", "index":i+1,
-                "original_text":e.original_text,"corrected_text":e.corrected_text})
-            .to_string();
-            parts.push(json!({"type":"text","text":descriptor}));
-            parts.push(json!({"type":"image_url","image_url":STANDARD.encode(&e.png)}));
-        }
+        append_confirmed_examples(&mut parts, context, addendum);
     }
     parts.push(json!({"type":"text","text":manifest}));
     for p in pages {
@@ -986,14 +1085,7 @@ fn normalize_inner(
         parts.push(json!({"type":"image_url","image_url":STANDARD.encode(p.png)}));
     }
     if prepared.is_some() {
-        let text_parts = parts
-            .iter()
-            .filter(|p| p["type"] == "text")
-            .collect::<Vec<_>>();
-        ensure!(
-            serde_json::to_vec(&text_parts)?.len() <= 32768,
-            "notebook text input exceeds bound"
-        );
+        check_text_input_budget(&parts)?;
     }
     let descriptor = serde_json::to_vec(&parts)?;
     ensure!(
