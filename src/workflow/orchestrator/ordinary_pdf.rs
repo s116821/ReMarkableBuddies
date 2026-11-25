@@ -38,6 +38,8 @@ use std::{
 
 type Acquisition = (AcquiredEvidence, Result<Option<OrdinaryBookSource>>);
 
+const QUESTION_VERIFICATION_SCOPE: &str = "Use the page layout to distinguish the handwritten request from its subject. A circle, outline, or highlight can mark the material the request refers to. When a separate question is written nearby, transcribe only that question, even when it refers to the marked content as 'this'. A marked equation, label, or passage is source material even when handwritten. If the request itself is inside the outline, transcribe only the writing that forms the request. Report unclear if you cannot distinguish the request from its subject.";
+
 pub(super) fn acquire(
     workflow: &mut Workflow,
     local: Option<&Dispatch<'_>>,
@@ -369,7 +371,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             attempt,
             prepared,
             source,
-            &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
+            &format!("{QUESTION_VERIFICATION_SCOPE}\n{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
             verification,
             true,
         );
