@@ -31,20 +31,7 @@ fn scene_with_samples(stroke: Option<(f32, u32, &[f32])>) -> Vec<u8> {
     subblock(&mut info, 0x5c, &size);
     record(&mut scene, 13, 1, &info);
 
-    let mut tree = vec![0x1f, 0, 2, 0x2f, 0, 2, 0x31, 0];
-    subblock(&mut tree, 0x4c, &[0x1f, 0, 1]);
-    record(&mut scene, 1, 1, &tree);
-    let mut layer = vec![0x1f, 0, 2];
-    subblock(&mut layer, 0x2c, &[0x1f, 0, 0, 0x2c, 2, 0, 0, 0, 0, 1]);
-    subblock(&mut layer, 0x3c, &[0x1f, 0, 0, 0x21, 1]);
-    record(&mut scene, 2, 1, &layer);
-
-    let group = [
-        0x1f, 0, 1, 0x2f, 0, 3, 0x3f, 0, 0, 0x4f, 0, 0, 0x54, 0, 0, 0, 0,
-    ];
-    let mut group = group.to_vec();
-    subblock(&mut group, 0x6c, &[2, 0x2f, 0, 2]);
-    record(&mut scene, 4, 1, &group);
+    append_layer(&mut scene, 2, [0, 3], [0, 0]);
 
     if let Some((y, tool, samples)) = stroke {
         TestStroke {
@@ -56,11 +43,30 @@ fn scene_with_samples(stroke: Option<(f32, u32, &[f32])>) -> Vec<u8> {
     scene
 }
 
+fn append_layer(scene: &mut Vec<u8>, layer_id: u8, group_id: [u8; 2], left: [u8; 2]) {
+    let mut tree = vec![0x1f, 0, layer_id, 0x2f, 0, layer_id, 0x31, 0];
+    subblock(&mut tree, 0x4c, &[0x1f, 0, 1]);
+    record(scene, 1, 1, &tree);
+    let mut layer = vec![0x1f, 0, layer_id];
+    subblock(&mut layer, 0x2c, &[0x1f, 0, 0, 0x2c, 2, 0, 0, 0, 0, 1]);
+    subblock(&mut layer, 0x3c, &[0x1f, 0, 0, 0x21, 1]);
+    record(scene, 2, 1, &layer);
+
+    let mut group = vec![0x1f, 0, 1, 0x2f];
+    group.extend(group_id);
+    group.push(0x3f);
+    group.extend(left);
+    group.extend([0x4f, 0, 0, 0x54, 0, 0, 0, 0]);
+    subblock(&mut group, 0x6c, &[2, 0x2f, 0, layer_id]);
+    record(scene, 4, 1, &group);
+}
+
 #[derive(Clone, Copy)]
 struct TestStroke {
     // The fixture's sequence numbers all fit in a single varuint byte.
     id: [u8; 2],
     left: [u8; 2],
+    layer: u8,
     tool: u32,
     color: remarkable_rm::PenColor,
     width: u16,
@@ -71,6 +77,7 @@ impl Default for TestStroke {
         Self {
             id: [0, 4],
             left: [0, 0],
+            layer: 2,
             tool: Pen::FinelinerV2 as u32,
             color: remarkable_rm::PenColor::Black,
             width: 8,
@@ -97,7 +104,7 @@ impl TestStroke {
         }
         subblock(&mut ink, 0x5c, &points);
         ink.extend([0x6f, 0, 5]);
-        let mut envelope = vec![0x1f, 0, 2, 0x2f];
+        let mut envelope = vec![0x1f, 0, self.layer, 0x2f];
         envelope.extend(self.id);
         envelope.push(0x3f);
         envelope.extend(self.left);
@@ -302,6 +309,36 @@ fn overlapping_inks_follow_sibling_links_before_concurrent_author_order() -> Res
             stroke.append(&mut scene, 500.0, &[-30.0, 30.0]);
         }
         assert!(saved_scene(&scene).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn overlapping_layers_follow_the_root_group_order() -> Result<()> {
+    use remarkable_rm::PenColor;
+    let red = TestStroke {
+        id: [1, 4],
+        color: PenColor::Red,
+        ..Default::default()
+    };
+    let blue = TestStroke {
+        id: [2, 4],
+        layer: 7,
+        color: PenColor::Blue,
+        ..Default::default()
+    };
+    // With independent groups the higher author draws first. Linking blue's
+    // group after red's reverses the visible colour at the same crossing.
+    for (left, red_on_top) in [([0, 0], true), ([0, 3], false)] {
+        let mut scene = scene(None);
+        append_layer(&mut scene, blue.layer, [1, 3], left);
+        blue.append(&mut scene, 500.0, &[-30.0, 30.0]);
+        red.append(&mut scene, 500.0, &[-30.0, 30.0]);
+        let mut raster = NotebookRaster::default();
+        raster.push(saved_page(Uuid::new_v4(), &scene), &mut || Ok(()))?;
+        let image = image::load_from_memory(&raster.originals[0].1)?.to_rgb8();
+        let [r, _, b] = image.get_pixel(DEFAULT_WIDTH / 2, 500).0;
+        assert!(if red_on_top { r > b } else { b > r });
     }
     Ok(())
 }
