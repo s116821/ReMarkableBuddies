@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn writer_projection_keeps_bound_about_math_and_literal_code() {
         let about = crate::conversation::target::Candidate {
-            subject: r"the **V\_1** label",
+            subject: r"the **V\_1** label".into(),
             geometry: Some(crate::conversation::target::geometry::Geometry {
                 components: vec![vec![
                     [100000, 100000],
