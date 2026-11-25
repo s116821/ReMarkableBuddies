@@ -117,7 +117,10 @@ def current_source_facts():
         successor_index = source_order.index(source_page) + 1
         order = source_order[:successor_index] + [inserted_target] + source_order[successor_index:]
         return source_document + inserted_target + struct.pack(">H", len(order)) + b"".join(order)
-    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages", "reconnect-source-handoff-open-first") and (root.parent / "successor-position").is_file():
+    if mode == "reconnect-source-handoff-open-first" and (root.parent / "successor-position").is_file():
+        target = source_order[source_order.index(source_page) + 1]
+        return source_document + target + struct.pack(">H", len(source_order)) + b"".join(source_order)
+    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages") and (root.parent / "successor-position").is_file():
         return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"
     if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():

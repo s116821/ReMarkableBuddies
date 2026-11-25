@@ -17,6 +17,8 @@ mod circled_writer;
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod current_page_writer;
 #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+mod installed_notebook;
+#[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
 mod ordinary_pdf;
 #[cfg(target_os = "linux")]
 mod researched;
@@ -116,6 +118,8 @@ pub struct Orchestrator<M: LLMEngine = OpenAI> {
     handwriting_operation: Option<crate::handwriting::runtime::Capture>,
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     ordinary_book_cache: Option<super::resident_source::original_pdf::OrdinaryBookCache>,
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    ordinary_notebook_cache: Option<installed_notebook::CachedNotebook>,
 }
 struct ModelContent<'a, M: LLMEngine>(&'a mut M);
 impl<M: LLMEngine> Drop for ModelContent<'_, M> {
@@ -181,6 +185,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             handwriting_operation: None,
             #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
             ordinary_book_cache: None,
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            ordinary_notebook_cache: None,
             personalization: crate::config::Personalization::default()
                 .snapshot()
                 .expect("valid default preference"),
