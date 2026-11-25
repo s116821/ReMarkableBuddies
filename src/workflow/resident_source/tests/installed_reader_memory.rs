@@ -25,6 +25,7 @@ enum Case {
     StaleRequest,
     MarkedOnly,
     MarkedUnavailable,
+    ProviderRefused,
 }
 
 impl Case {
@@ -121,6 +122,9 @@ impl crate::LLMEngine for ReaderModel {
                 )
             }
             2 => json!({"version":1, "transcription":self.question, "request_web":self.intent}).to_string(),
+            3 if self.case == Case::ProviderRefused => {
+                return Err(crate::llm::ProviderRefused.into());
+            }
             3 if self.case == Case::Required => json!({
                 "status":"answered", "text":format!("{NOTEBOOK} [R1]"), "citations":["R1"]
             }).to_string(),
@@ -228,11 +232,21 @@ fn installed_marked_notebook_question_is_saved_and_shown_without_an_answer() -> 
     Ok(())
 }
 
+#[test]
+fn installed_provider_failure_is_shown_only_on_the_existing_buddy_page() -> Result<()> {
+    check_bound_reader_page(BoundStart::FailureOnBuddy)?;
+    check_bound_reader_page(BoundStart::FailureOnOriginal)?;
+    check_bound_reader_page(BoundStart::FailureWithUnconfirmedTarget)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BoundStart {
     Original,
     Legacy,
     Blank,
+    FailureOnBuddy,
+    FailureOnOriginal,
+    FailureWithUnconfirmedTarget,
 }
 
 fn check_bound_reader_page(start: BoundStart) -> Result<()> {
@@ -242,7 +256,19 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
 
     let mode = "reconnect-source-handoff-research-pages";
     let blank_start = start == BoundStart::Blank;
-    let rounds = if blank_start { 2 } else { 3 };
+    let provider_failure = matches!(
+        start,
+        BoundStart::FailureOnBuddy
+            | BoundStart::FailureOnOriginal
+            | BoundStart::FailureWithUnconfirmedTarget
+    );
+    let rounds = if provider_failure {
+        1
+    } else if blank_start {
+        2
+    } else {
+        3
+    };
     let releases = (0..rounds).map(|_| released(Instant::now())).collect();
     let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
     let document = ConversationId::new_v4();
@@ -253,7 +279,12 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
     native.declare_source(document, original);
     native.declare_research_successor(buddy);
     let position = native.successor_position();
-    if blank_start {
+    if blank_start
+        || matches!(
+            start,
+            BoundStart::FailureOnBuddy | BoundStart::FailureWithUnconfirmedTarget
+        )
+    {
         std::fs::write(&position, b"buddy")?;
     }
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
@@ -297,11 +328,34 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
         },
     )?;
     let owner = workflow.resident_source.as_mut().unwrap();
-    owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+    let rendered = Rc::new(RefCell::new(vec![]));
+    owner.selection = if provider_failure {
+        use crate::workflow::selected_backend::RefusingBackend;
+
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(RecognitionProbe {
+                    confirmed_source: start == BoundStart::FailureOnOriginal,
+                    successor: (start == BoundStart::FailureOnOriginal).then(|| SuccessorProbe {
+                        position: position.clone(),
+                        interrupt_restore: false,
+                    }),
+                    rendered_text: (start != BoundStart::FailureWithUnconfirmedTarget)
+                        .then(|| rendered.clone()),
+                    ..RecognitionProbe::default()
+                })),
+        );
+        InstalledReaderSelection::fixture_for_installed_output(
+            &base.join("output-profile"),
+            runtime.identity(),
+        )?
+    } else {
+        InstalledReaderSelection::fixture_with_installed_output()
+    };
     owner.session = Some(Box::new(OwnedSession {
         runtime,
         _fixture: native,
-        events,
+        events: events.clone(),
         delivery_fault: false,
         observe_file_change: None,
         writer_slot: None,
@@ -325,10 +379,56 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
         calls: calls.clone(),
         question: QUESTION,
         intent: json!({"version":1, "intent":"no-restriction"}),
-        case: Case::Disabled,
+        case: if provider_failure {
+            Case::ProviderRefused
+        } else {
+            Case::Disabled
+        },
     };
     let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+    if provider_failure {
+        let error = reader
+            .run_iteration_with_trigger(true, Some(&dispatch), Some(&config))
+            .expect_err("The scripted answer provider refused");
+        assert!(error.is::<crate::llm::ProviderRefused>(), "{error:#}");
+        assert_eq!(calls.borrow().len(), 3);
+        assert!(!events.borrow().contains(&"insert"));
+        if start == BoundStart::FailureWithUnconfirmedTarget {
+            assert!(rendered.borrow().is_empty());
+        } else {
+            assert_eq!(
+                rendered.borrow().as_slice(),
+                [format!(
+                    "Q: {QUESTION}\n\nA: The response service could not complete this request.\n"
+                )]
+            );
+        }
+        let records = ledger.inspect(conversation, false)?;
+        let fact = records
+            .iter()
+            .find_map(|record| match record {
+                Record::OutcomeFact(fact) => Some(fact),
+                _ => None,
+            })
+            .context("Provider failure fact absent")?;
+        assert!(records
+            .iter()
+            .any(|record| matches!(record, Record::Turn(turn)
+            if turn.id == fact.turn && turn.outcome == crate::conversation::Outcome::Failed
+                && turn.text.as_deref() == Some(QUESTION))));
+        assert!(!records
+            .iter()
+            .any(|record| matches!(record, Record::Turn(turn)
+            if turn.role == crate::conversation::Role::Assistant)));
+        assert_eq!(
+            crate::conversation::feedback::describe_stored(&ledger, conversation, fact.id)?.code,
+            "RMB-RESPONSE-UNAVAILABLE",
+        );
+        drop((dispatch, reader, ledger, store));
+        std::fs::remove_dir_all(base)?;
+        return Ok(());
+    }
     let mut original_images = Vec::new();
     let mut origin_turn = None;
     for round in 0..rounds {

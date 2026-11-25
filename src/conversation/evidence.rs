@@ -241,7 +241,7 @@ impl FollowupEvidence {
         operation: Uuid,
         mut user: Turn,
         timestamp: u64,
-    ) -> Result<Turn> {
+    ) -> Result<(Turn, super::OutcomeFact)> {
         ensure!(user.id == self.request, "Captured PDF request differs");
         let (envelope, reference) = self
             .capture
@@ -272,9 +272,19 @@ impl FollowupEvidence {
             None,
             Some(&mut published),
         )?;
+        let fact_id = Ledger::attempt_outcome_id(operation);
+        let envelope = published
+            .iter()
+            .find(|record| {
+                record.namespace == Namespace::Conversation && record.record_id == fact_id
+            })
+            .context("Reader provider failure outcome absent")?;
+        let Record::OutcomeFact(fact) = Ledger::decode(envelope)? else {
+            anyhow::bail!("Reader provider failure outcome differs");
+        };
         self.capture.advance(published)?;
         self.root = write.historical.applied_root_revision;
-        Ok(user)
+        Ok((user, fact))
     }
 
     pub(crate) fn complete(
