@@ -35,6 +35,7 @@ const PROFILE_REVISION: &str = "notebook-ocr-unverified-v2:";
 const MIB: usize = 1024 * 1024;
 const MAX_ORDERED_NOTEBOOK_PAGES: usize = 32;
 pub(crate) const WRITER_VISUAL_REVISION: &str = "writer-notebook-visual-v1:";
+pub(crate) const WRITER_DISPLAYED_VISUAL_REVISION: &str = "writer-displayed-visual-v1:";
 
 pub struct PageImage<'a> {
     pub page: u32,
@@ -182,6 +183,26 @@ impl<'a> OrderedNotebookImages<'a> {
     }
 }
 
+fn writer_visual_profile(
+    model_profile: &str,
+    context: Option<&ConfirmedContext>,
+) -> Result<String> {
+    ensure!(
+        !model_profile.trim().is_empty()
+            && model_profile.len() <= 128
+            && !model_profile.chars().any(char::is_control),
+        "invalid notebook identity"
+    );
+    Ok(match context {
+        Some(examples) => digest(&serde_json::to_vec(&(
+            "writer-notebook-confirmed-handwriting-v1",
+            model_profile,
+            examples.identity(),
+        ))?),
+        None => digest(model_profile.as_bytes()),
+    })
+}
+
 impl OriginalNotebookPages<'_> {
     pub(crate) fn normalize(
         self,
@@ -190,27 +211,14 @@ impl OriginalNotebookPages<'_> {
         engine: &mut dyn LLMEngine,
         progress: &mut dyn FnMut(Progress) -> Result<()>,
     ) -> Result<NormalizedDocument> {
-        ensure!(
-            !model_profile.trim().is_empty()
-                && model_profile.len() <= 128
-                && !model_profile.chars().any(char::is_control),
-            "invalid notebook identity"
-        );
-        let profile_digest = match context {
-            Some(examples) => digest(&serde_json::to_vec(&(
-                "writer-notebook-confirmed-handwriting-v1",
-                model_profile,
-                examples.identity(),
-            ))?),
-            None => digest(model_profile.as_bytes()),
-        };
+        let profile_digest = writer_visual_profile(model_profile, context)?;
         let options = Options::default();
         let mut units = Vec::new();
         let mut text_bytes = 0;
         for batch in self.pages.chunks(options.max_pages) {
             let next = writer_visual::extract(
                 batch,
-                &self.patterned_paper,
+                writer_visual::Source::SavedPages(&self.patterned_paper),
                 context,
                 engine,
                 options,
@@ -741,6 +749,8 @@ pub(crate) struct AdmittedTarget {
     png: Vec<u8>,
     identity: ImageIdentity,
     source_sha256: String,
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    white: bool,
 }
 impl AdmittedTarget {
     pub(crate) fn source_sha256(&self) -> &str {
@@ -748,6 +758,46 @@ impl AdmittedTarget {
     }
     pub(crate) fn sha256(&self) -> &str {
         &self.identity.png_sha256
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn normalize_displayed_writer(
+        &self,
+        document: Uuid,
+        model_profile: &str,
+        request: &str,
+        context: Option<&ConfirmedContext>,
+        engine: &mut dyn LLMEngine,
+        progress: &mut dyn FnMut(Progress) -> Result<()>,
+    ) -> Result<NormalizedDocument> {
+        let profile_digest = writer_visual_profile(model_profile, context)?;
+        let options = target_options();
+        let units = writer_visual::extract(
+            &[PageImage {
+                page: self.page,
+                png: &self.png,
+            }],
+            writer_visual::Source::DisplayedPage {
+                request,
+                white: self.white,
+            },
+            context,
+            engine,
+            options,
+            progress,
+        )?;
+        let document = NormalizedDocument {
+            document,
+            format: SourceFormat::Notebook,
+            source_sha256: self.source_sha256.clone(),
+            extractor_revision: format!("{WRITER_DISPLAYED_VISUAL_REVISION}{profile_digest}"),
+            units,
+        };
+        ensure!(
+            serde_json::to_vec(&document)?.len() <= options.max_result_bytes,
+            "displayed Writer page evidence exceeds bound"
+        );
+        Ok(document)
     }
 }
 fn target_options() -> Options {
@@ -767,13 +817,28 @@ pub(crate) fn admit_target(
     png: Vec<u8>,
     progress: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> Result<AdmittedTarget> {
-    let (mut images, source_sha256) =
-        admit_pages(&[PageImage { page, png: &png }], target_options(), progress)?;
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    let mut white = false;
+    let (mut images, source_sha256) = admit_pages_with_pixels(
+        &[PageImage { page, png: &png }],
+        target_options(),
+        progress,
+        |pixels| {
+            #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+            {
+                white = pixels.iter().all(|byte| *byte == u8::MAX);
+            }
+            #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+            let _ = pixels;
+        },
+    )?;
     Ok(AdmittedTarget {
         page,
         png,
         identity: images.remove(0),
         source_sha256,
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        white,
     })
 }
 #[derive(Default)]

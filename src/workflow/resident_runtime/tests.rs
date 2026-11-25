@@ -50,6 +50,11 @@ impl Fixture {
         .unwrap();
     }
     #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_displayed_writer_png(&self, png: &[u8]) {
+        fs::write(self.0.join("displayed-writer.png"), png).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
     pub(crate) fn declare_edited_selection(&self) {
         fs::write(self.0.join("edited-selection"), []).unwrap();
     }

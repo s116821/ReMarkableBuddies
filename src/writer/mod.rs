@@ -675,6 +675,14 @@ fn run_owned_source<E: LLMEngine>(
         if let Some(region) = &source.region {
             payload["source_provenance"] = serde_json::json!({"coverage":"all text recognized from exact masked region; unverified", "source_units_page_labels":"Regional normalization canvas labels only, not physical notebook page numbers", "region":region});
         }
+        if source
+            .document
+            .extractor_revision
+            .starts_with(crate::retrieval::notebook::WRITER_DISPLAYED_VISUAL_REVISION)
+        {
+            payload["source_provenance"]["coverage"] =
+                serde_json::json!("visible content of one displayed source page; model interpretation remains unverified");
+        }
         if !history.region_sources.is_empty() {
             payload["regional_sources"] = serde_json::to_value(&history.region_sources)?;
         }
@@ -810,6 +818,20 @@ fn run_owned_source<E: LLMEngine>(
         }
         if accepted.is_some() {
             content.0.add_text_content("Ground the note only in source_units from the masked region. Use conversation history and preferences to understand the request and format. They do not supply facts about the selected content.");
+        }
+        use crate::retrieval::notebook::{VISUAL_SECTION, WRITER_DISPLAYED_VISUAL_REVISION};
+        if source
+            .document
+            .extractor_revision
+            .starts_with(WRITER_DISPLAYED_VISUAL_REVISION)
+            && source
+                .selected()
+                .iter()
+                .any(|unit| unit.section.as_deref() == Some(VISUAL_SECTION))
+        {
+            content.0.add_text_content(&format!(
+                "Source units labeled {VISUAL_SECTION} record unverified descriptions of depicted shapes or relationships. Include useful observations as depicted, separately from transcribed writing. Do not quote an observation as the user's words or infer facts beyond the supplied source."
+            ));
         }
         content.0.add_text_content(&payload);
         for image in &images.attachments {

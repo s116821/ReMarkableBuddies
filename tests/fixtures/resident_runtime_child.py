@@ -264,6 +264,10 @@ while True:
                        + chunk(b"IDAT", zlib.compress(rows, 0 if ordinary_pdf else -1))
                        + chunk(b"IEND", b""))
                 assert len(png) > 65536
+                displayed_writer = root.parent / "displayed-writer.png"
+                if displayed_writer.is_file():
+                    png = displayed_writer.read_bytes()
+                    width, height = struct.unpack_from(">II", png, 16)
                 image_hash = hashlib.sha256(png).digest()
                 if mode in ("reconnect-capture-corrupt", "reconnect-source-handoff-corrupt"):
                     png = png[:-1] + bytes([png[-1] ^ 1])
