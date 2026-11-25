@@ -231,6 +231,13 @@ while True:
                 seed = facts[16:32] if mode == "reconnect-source-handoff-research-pages" else b""
                 pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
                           b"".join(hashlib.sha256(seed + struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
+                if (root.parent / "edited-selection").is_file():
+                    # Represent fresh ink on the same native page and inside the left selection.
+                    pixels = bytearray(pixels)
+                    for y in range(30, 37):
+                        for x in range(30, 37):
+                            offset = (y * width + x) * 3
+                            pixels[offset:offset + 3] = b"\xff\x00\xf0"
                 def chunk(tag, data):
                     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
                 rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))

@@ -47,6 +47,9 @@ impl Save {
 }
 const CIRCLE_NOTE: &str = "Make a note about the circled part.";
 const REGION_TEXT: &str = "Selected equation: 24 / 6 = 4.";
+const INITIAL_CIRCLED_SAVE: usize = 3;
+const EDITED_CIRCLED_SAVE: usize = 4;
+const EDITED_REGION_TEXT: &str = "Corrected equation: 30 / 6 = 5.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Circled {
@@ -205,6 +208,12 @@ impl crate::LLMEngine for SubmissionModel {
         let step = self.steps.get();
         self.steps.set(step + 1);
         if let Submission::SaveRegion(action, shape, revision) = self.submission {
+            let edited = revision == EDITED_CIRCLED_SAVE;
+            let transcription = if edited {
+                EDITED_REGION_TEXT
+            } else {
+                REGION_TEXT
+            };
             return match step {
                 0 => {
                     assert_eq!(self.images.len(), 1);
@@ -245,20 +254,24 @@ impl crate::LLMEngine for SubmissionModel {
                     };
                     assert_eq!(masked.get_pixel(inside, 32), original.get_pixel(inside, 32));
                     assert_eq!(masked.get_pixel(outside, 32).0, [255, 255, 255]);
-                    Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":REGION_TEXT}]}).to_string())
+                    assert_eq!(original.get_pixel(32, 32).0 == [255, 0, 240], edited);
+                    Ok(serde_json::json!({"pages":[{"page":1,"status":"transcribed","text":transcription}]}).to_string())
                 }
                 2 => {
                     assert!(self.images.is_empty());
                     let input: serde_json::Value = serde_json::from_str(self.text.last().unwrap())?;
                     assert_eq!(input["request"], action.request());
-                    assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
+                    assert_eq!(input["source_units"][0]["text"], transcription);
                     assert_eq!(
                         input["source_provenance"]["region"]["about"],
                         format!("About: {}", action.subject())
                     );
-                    Ok(format!(
-                        "# Circled note\n\nRegional draft revision {revision}."
-                    ))
+                    let body = if edited || revision == INITIAL_CIRCLED_SAVE {
+                        transcription.to_owned()
+                    } else {
+                        format!("Regional draft revision {revision}.")
+                    };
+                    Ok(format!("# Circled note\n\n{body}"))
                 }
                 _ => panic!("unexpected circled Writer stage"),
             };
@@ -559,6 +572,7 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
     let document = ConversationId::new_v4();
     let page = ConversationId::new_v4();
     let mut primary = None;
+    let mut initial_proof = None;
 
     let attempts = [
         (Save, Missing, 0, 0),
@@ -584,6 +598,9 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
             workflow_with_store(mode, vec![], Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
+        if index == EDITED_CIRCLED_SAVE {
+            native.declare_edited_selection();
+        }
         let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
         let owner = workflow.resident_source.as_mut().unwrap();
         owner.selection = InstalledReaderSelection::fixture_for_installed_output(
@@ -668,11 +685,59 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
             assert!(export.source_scope.starts_with(&format!(
                 "normalized-document:{document}:installed-region:{page}:",
             )));
-            if index == 3 {
+            if index == INITIAL_CIRCLED_SAVE {
                 primary = Some((export.id, export.native_note.clone()));
             }
             if primary.as_ref().is_some_and(|(id, _)| *id == export.id) {
                 assert_eq!(primary.as_ref().unwrap().1, export.native_note);
+                if matches!(index, INITIAL_CIRCLED_SAVE | EDITED_CIRCLED_SAVE) {
+                    let content = destination
+                        .remote_note_content(export.native_note.as_deref().context("no remote ID")?)
+                        .context("remote note absent")?;
+                    if index == INITIAL_CIRCLED_SAVE {
+                        assert!(content.contains(REGION_TEXT), "{content}");
+                    } else {
+                        assert!(content.contains(EDITED_REGION_TEXT), "{content}");
+                        assert!(!content.contains(REGION_TEXT), "{content}");
+                    }
+                    let records = ledger.inspect(export.conversation, false)?;
+                    let latest = records
+                        .iter()
+                        .filter_map(|record| match record {
+                            Record::Turn(turn)
+                                if turn.role == Role::Assistant
+                                    && turn.outcome == Outcome::Generated =>
+                            {
+                                Some(turn)
+                            }
+                            _ => None,
+                        })
+                        .max_by_key(|turn| turn.sequence)
+                        .context("no generated regional draft")?;
+                    let source = store
+                        .value(Namespace::Source, latest.sources[0])?
+                        .context("no retained region")?;
+                    let Record::RegionSource(source) = Ledger::decode(&source)? else {
+                        anyhow::bail!("unexpected retained source");
+                    };
+                    let proof = source
+                        .installed_region
+                        .clone()
+                        .context("no installed proof")?;
+                    if index == INITIAL_CIRCLED_SAVE {
+                        assert!(serde_json::to_value(&proof)?
+                            .get("association_mask_sha256")
+                            .is_none());
+                        initial_proof = Some((proof, source.original.sha256, source.target));
+                    } else {
+                        let (prior, original, target) = initial_proof.as_ref().unwrap();
+                        assert!(proof.same_footprint(prior));
+                        assert_eq!(proof.id, prior.id);
+                        assert_ne!(proof.mask_sha256, prior.mask_sha256);
+                        assert_ne!(&source.original.sha256, original);
+                        assert_ne!(&source.target, target);
+                    }
+                }
                 assert_eq!(
                     export.outcome,
                     if index >= 8 {
