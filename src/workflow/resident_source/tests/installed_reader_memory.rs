@@ -249,11 +249,59 @@ enum BoundStart {
     FailureWithUnconfirmedTarget,
 }
 
-fn check_bound_reader_page(start: BoundStart) -> Result<()> {
+pub(super) fn bind_existing_reader_page(
+    ledger: &Ledger,
+    runtime: &RuntimeIdentity,
+    conversation: ConversationId,
+    document: ConversationId,
+    original: ConversationId,
+    buddy: ConversationId,
+) -> Result<()> {
     use crate::conversation::{
         BindingAcquisition, BindingReceipt, ExpectedHeads, SourceObservation,
     };
+    let hex = |bytes: [u8; 32]| {
+        bytes
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    ledger.create(conversation, ConversationId::new_v4(), 1)?;
+    let operation = ConversationId::new_v4();
+    ledger.bind(
+        operation,
+        ledger.expected(Namespace::Conversation, conversation)?,
+        ExpectedHeads::default(),
+        BindingReceipt {
+            operation,
+            conversation,
+            request_fingerprint: "bound-reader-research".into(),
+            adapter_fingerprint: hex(runtime.adapter_sha256),
+            source: SourceObservation {
+                document,
+                page: original,
+                session: "fixture-session".into(),
+                visit: "fixture-visit".into(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: hex(runtime.profile_sha256),
+                evidence_procedure: "fixture-research-pages".into(),
+            },
+            intended_target: Some(buddy),
+            observed_document: document,
+            observed_page: buddy,
+            expected_order: vec![original, buddy],
+            observed_order: vec![original, buddy],
+            persisted_revision: "fixture-binding".into(),
+            observed_ms: 3,
+            evidence_origin: "installed-native-guarded-v1".into(),
+            acquisition: BindingAcquisition::ExistingAdjacent,
+        },
+    )?;
+    Ok(())
+}
 
+fn check_bound_reader_page(start: BoundStart) -> Result<()> {
     let mode = "reconnect-source-handoff-research-pages";
     let blank_start = start == BoundStart::Blank;
     let provider_failure = matches!(
@@ -288,44 +336,14 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
         std::fs::write(&position, b"buddy")?;
     }
     let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
-    let hex = |bytes: [u8; 32]| {
-        bytes
-            .into_iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    };
     let ledger = Ledger::new(store.clone());
-    ledger.create(conversation, ConversationId::new_v4(), 1)?;
-    let operation = ConversationId::new_v4();
-    ledger.bind(
-        operation,
-        ledger.expected(Namespace::Conversation, conversation)?,
-        ExpectedHeads::default(),
-        BindingReceipt {
-            operation,
-            conversation,
-            request_fingerprint: "bound-reader-research".into(),
-            adapter_fingerprint: hex(runtime.identity().adapter_sha256),
-            source: SourceObservation {
-                document,
-                page: original,
-                session: "fixture-session".into(),
-                visit: "fixture-visit".into(),
-                content_revision: None,
-                order_revision: None,
-                capability_revision: hex(runtime.identity().profile_sha256),
-                evidence_procedure: "fixture-research-pages".into(),
-            },
-            intended_target: Some(buddy),
-            observed_document: document,
-            observed_page: buddy,
-            expected_order: vec![original, buddy],
-            observed_order: vec![original, buddy],
-            persisted_revision: "fixture-binding".into(),
-            observed_ms: 3,
-            evidence_origin: "installed-native-guarded-v1".into(),
-            acquisition: BindingAcquisition::ExistingAdjacent,
-        },
+    bind_existing_reader_page(
+        &ledger,
+        runtime.identity(),
+        conversation,
+        document,
+        original,
+        buddy,
     )?;
     let owner = workflow.resident_source.as_mut().unwrap();
     let rendered = Rc::new(RefCell::new(vec![]));

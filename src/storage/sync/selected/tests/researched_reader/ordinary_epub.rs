@@ -74,6 +74,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
             epub: true,
             rendered: None,
             source_targets: false,
+            edit_book_during_navigation: false,
             count: questions.len(),
             before_round: Some(&mut change_book),
         },
@@ -164,6 +165,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
             epub: true,
             rendered: Some(rendered.clone()),
             source_targets: false,
+            edit_book_during_navigation: false,
             count: 1,
             before_round: None,
         },
@@ -180,7 +182,69 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
     assert!(shown.contains(question));
     assert!(shown.contains(&format!("[S1] Document {document}, book/experiment.xhtml")));
     drop(scope);
-    check_marked_book_without_search(executable, &fixture.0, document, page)
+    check_marked_book_without_search(executable, &fixture.0, document, page)?;
+    check_bound_failure_after_book_edit(executable, &fixture.0, document, page)
+}
+
+fn check_bound_failure_after_book_edit(
+    executable: &std::path::Path,
+    library: &std::path::Path,
+    document: Uuid,
+    page: Uuid,
+) -> Result<()> {
+    use crate::conversation::AttemptReason;
+
+    let question = "What measures beta velocity? Don't use the internet.";
+    let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let scope = researched_fixture::Scope::new(None, false);
+    let mut model = Scripted::new(Reading::Deny, false, false, Events::default());
+    model.ordinary_pdf_questions = vec![question];
+    model.answer_refused = true;
+    let frames = model.frames.clone();
+    let (mut results, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+        document,
+        page,
+        library.into(),
+        executable.into(),
+        crate::workflow::OrdinaryPdfFixtureRounds {
+            epub: true,
+            rendered: Some(rendered.clone()),
+            source_targets: false,
+            edit_book_during_navigation: true,
+            count: 1,
+            before_round: None,
+        },
+        |_, _, _| model,
+        |_, _| Ok(()),
+    )?;
+    let error = results
+        .pop()
+        .context("Bound EPUB result absent")?
+        .expect_err("Expected the provider refusal");
+    assert!(error.is::<crate::llm::ProviderRefused>(), "{error:#}");
+    assert!(
+        rendered.borrow().is_empty(),
+        "The edited source reached the renderer"
+    );
+    assert_eq!(scope.constructions(), 0);
+    assert_eq!(scope.ordinary_pdf_workers().len(), 1);
+    assert_eq!(frames.lock().unwrap().len(), 3);
+    let failure = records
+        .iter()
+        .find_map(|record| match record {
+            Record::OutcomeFact(fact) if fact.reason == AttemptReason::ProviderFailure => {
+                Some(fact)
+            }
+            _ => None,
+        })
+        .context("The original provider failure was not retained")?;
+    assert!(records.iter().any(|record| matches!(record,
+        Record::Turn(turn) if turn.id == failure.turn && turn.text.as_deref() == Some(question)
+    )));
+    assert!(!records.iter().any(|record| matches!(record,
+        Record::Turn(turn) if turn.role == Role::Assistant
+    )));
+    Ok(())
 }
 
 fn check_marked_book_without_search(
@@ -207,6 +271,7 @@ fn check_marked_book_without_search(
             epub: true,
             rendered: Some(rendered.clone()),
             source_targets: true,
+            edit_book_during_navigation: false,
             count: 1,
             before_round: None,
         },

@@ -2446,6 +2446,7 @@ pub(crate) mod tests {
         pub epub: bool,
         pub rendered: Option<Rc<RefCell<Vec<String>>>>,
         pub source_targets: bool,
+        pub edit_book_during_navigation: bool,
         pub count: usize,
         pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
     }
@@ -2469,7 +2470,11 @@ pub(crate) mod tests {
                 rounds.count == 1,
                 "The placement fixture starts from one original page"
             );
-            "reconnect-source-handoff-writer-insert"
+            if rounds.edit_book_during_navigation {
+                "reconnect-source-handoff-research-pages"
+            } else {
+                "reconnect-source-handoff-writer-insert"
+            }
         } else {
             "reconnect-source-handoff-ordinary-pdf"
         };
@@ -2507,9 +2512,27 @@ pub(crate) mod tests {
             workflow_with_store(mode, releases, Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
+        let successor = rounds
+            .edit_book_during_navigation
+            .then(ConversationId::new_v4);
+        if let Some(successor) = successor {
+            native.declare_research_successor(successor);
+        }
+        let position = native.successor_position();
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(5))
             .context("Start ordinary PDF fixture resident session")?;
+        let ledger = Ledger::new(store.clone());
+        if let Some(successor) = successor {
+            installed_reader_memory::bind_existing_reader_page(
+                &ledger,
+                runtime.identity(),
+                ConversationId::new_v4(),
+                document,
+                page,
+                successor,
+            )?;
+        }
         let order_change = native.ordinary_pdf_order_change();
         let change_file_on_observe = Rc::new(Cell::new(false));
         let extension = if rounds.epub { "epub" } else { "pdf" };
@@ -2518,7 +2541,12 @@ pub(crate) mod tests {
         owner.selection = if let Some(rendered) = &rounds.rendered {
             let output = RecognitionProbe {
                 confirmed_source: true,
-                insertion_source: Some(page),
+                insertion_source: successor.is_none().then_some(page),
+                successor: successor.map(|_| SuccessorProbe {
+                    position: position.clone(),
+                    interrupt_restore: false,
+                }),
+                book_edit_on_navigation: successor.map(|_| pdf.clone()),
                 rendered_text: Some(rendered.clone()),
                 ..RecognitionProbe::default()
             };
@@ -2554,7 +2582,6 @@ pub(crate) mod tests {
             b"PRIVATE_RESEARCH_FIXTURE",
         )
         .context("Write ordinary PDF fixture model credential")?;
-        let ledger = Ledger::new(store.clone());
         let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)
             .context("Admit ordinary PDF fixture local dispatch")?;
         let mut reader = Orchestrator::new(
@@ -2588,9 +2615,15 @@ pub(crate) mod tests {
             if rounds.rendered.is_some() {
                 assert_eq!(
                     events.iter().filter(|&&event| event == "insert").count(),
-                    1,
-                    "Expected one insertion after the original question page"
+                    usize::from(successor.is_none()),
+                    "Expected placement to use its assigned page"
                 );
+                if rounds.edit_book_during_navigation {
+                    assert!(
+                        position.exists(),
+                        "Expected navigation to the bound Buddy page"
+                    );
+                }
             } else {
                 let (observations, remainder) = events[acquisition.len()..].as_chunks::<2>();
                 assert!(remainder.is_empty());
@@ -3040,6 +3073,8 @@ pub(crate) mod tests {
         insertion_source: Option<ConversationId>,
         #[cfg(feature = "installed-resident-output")]
         rendered_text: Option<Rc<RefCell<Vec<String>>>>,
+        #[cfg(feature = "installed-resident-output")]
+        book_edit_on_navigation: Option<PathBuf>,
     }
 
     struct SuccessorProbe {
@@ -3310,6 +3345,14 @@ pub(crate) mod tests {
                 LogicalDirection::Next => {
                     assert!(!probe.position.exists());
                     std::fs::write(&probe.position, [])?;
+                    #[cfg(feature = "installed-resident-output")]
+                    if let Some(book) = &self.book_edit_on_navigation {
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(book)?
+                            .write_all(b"fixture book changed during navigation")?;
+                    }
                 }
                 LogicalDirection::Previous => {
                     assert!(probe.position.exists());

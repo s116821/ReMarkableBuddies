@@ -452,9 +452,10 @@ impl<M: LLMEngine> Orchestrator<M> {
             attempt.resident_answer.as_ref(),
             &mut || {
                 current(ledger)?;
-                // As for an ordinary answer, the document table can change
-                // once Buddy's own insertion is admitted.
-                if !source_checked_at_output {
+                // Bound placement cannot insert. Keep checking the original
+                // file across navigation. Only a fresh marked placement can
+                // change the document table as part of Buddy's own insertion.
+                if attempt.resident_answer.is_some() || !source_checked_at_output {
                     source.check_file()?;
                     source_checked_at_output = true;
                 }
