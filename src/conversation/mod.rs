@@ -517,9 +517,34 @@ impl Ledger {
         turn: Turn,
         sources: Vec<ImageUse>,
     ) -> Result<WriteResult> {
+        self.append_observed(operation, expected, turn, sources)
+            .map(|(result, _)| result)
+    }
+    /// A native composer clear proof requires this call's successful commit.
+    /// Replayed receipts and concurrent winners remain valid history, but cannot
+    /// authorize clearing a draft observed by a different submission attempt.
+    #[cfg(buddy_development_native_composer)]
+    pub(crate) fn append_fresh(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+    ) -> Result<WriteResult> {
+        let (result, fresh) = self.append_observed(operation, expected, turn, sources)?;
+        ensure!(fresh, "composer submission was not freshly committed");
+        Ok(result)
+    }
+    fn append_observed(
+        &self,
+        operation: Uuid,
+        expected: ExpectedHeads,
+        turn: Turn,
+        sources: Vec<ImageUse>,
+    ) -> Result<(WriteResult, bool)> {
         let fingerprint = Self::fingerprint(&("append", &turn, &sources))?;
         if let Some(prior) = self.replay(operation, &fingerprint)? {
-            return Ok(prior);
+            return Ok((prior, false));
         }
         self.append_unreplayed(operation, expected, turn, sources, fingerprint)
     }
@@ -530,7 +555,7 @@ impl Ledger {
         mut turn: Turn,
         sources: Vec<ImageUse>,
         fingerprint: String,
-    ) -> Result<WriteResult> {
+    ) -> Result<(WriteResult, bool)> {
         ensure!(
             !turn.id.is_nil() && !turn.exchange.is_nil(),
             "nil turn identity"
@@ -545,7 +570,7 @@ impl Ledger {
                 // but before this root read. Recover only its exact receipt;
                 // changed operations and unrelated stale heads still refuse.
                 if let Some(prior) = self.replay(operation, &fingerprint)? {
-                    return Ok(prior);
+                    return Ok((prior, false));
                 }
                 return Err(error);
             }
@@ -628,7 +653,7 @@ impl Ledger {
             Record::Root(root),
             vec![],
         )?;
-        self.publish(operation, fingerprint, envelope, records, binding)
+        self.publish_observed(operation, fingerprint, envelope, records, binding)
     }
     /// Prepare explicitly synthetic SDK fixture evidence; never grants native authority.
     pub fn prepare_sdk_fixture(

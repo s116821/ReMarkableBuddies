@@ -36,7 +36,7 @@ impl Keyboard {
         let device = if no_draw {
             None
         } else {
-            Some(Self::create_virtual_device())
+            Some(Self::create_virtual_device().expect("create virtual keyboard"))
         };
 
         let rm2_keyboard = matches!(
@@ -52,7 +52,28 @@ impl Keyboard {
         }
     }
 
-    fn create_virtual_device() -> evdev::uinput::VirtualDevice {
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        buddy_development_native_composer
+    ))]
+    pub(crate) fn composer_trial() -> Result<Self> {
+        anyhow::ensure!(
+            matches!(
+                super::DeviceModel::detect(),
+                super::DeviceModel::Remarkable2
+            ),
+            "composer keyboard requires reMarkable2"
+        );
+        Ok(Self {
+            device: Some(Self::create_virtual_device()?),
+            rm2_keyboard: true,
+            key_map: Self::create_key_map(true),
+            progress_count: 0,
+            no_draw_progress: true,
+        })
+    }
+
+    fn create_virtual_device() -> Result<evdev::uinput::VirtualDevice> {
         debug!("Creating virtual keyboard");
         let mut keys = AttributeSet::<EvdevKey>::new();
 
@@ -120,13 +141,10 @@ impl Keyboard {
         keys.insert(EvdevKey::KEY_LEFTCTRL);
         keys.insert(EvdevKey::KEY_LEFTALT);
 
-        VirtualDevice::builder()
-            .unwrap()
+        Ok(VirtualDevice::builder()?
             .name("Virtual Keyboard")
-            .with_keys(&keys)
-            .unwrap()
-            .build()
-            .unwrap()
+            .with_keys(&keys)?
+            .build()?)
     }
 
     fn create_key_map(rm2_keyboard: bool) -> HashMap<char, (EvdevKey, bool)> {
@@ -255,12 +273,18 @@ impl Keyboard {
         key_map
     }
 
-    #[cfg(feature = "development-resident-bootstrap")]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn supports_text(&self, text: &str) -> bool {
         self.device.is_some() && text.chars().all(|ch| self.key_map.contains_key(&ch))
     }
     /// Release only keys on this actual owned virtual descriptor, even on failure.
-    #[cfg(feature = "development-resident-bootstrap")]
+    #[cfg(all(
+        feature = "development-resident-bootstrap",
+        feature = "development-input-diagnostics"
+    ))]
     pub(crate) fn release_all(&mut self) -> Result<()> {
         let mut keys = self
             .key_map

@@ -11,3 +11,15 @@ compile_error!("Development pre-Enter build admission refused");
     not(feature = "development-resident-bootstrap")
 ))]
 compile_error!("Development pre-Enter requires development-resident-bootstrap");
+
+#[cfg(all(
+    buddy_development_native_composer,
+    not(buddy_development_native_composer_admitted)
+))]
+compile_error!("Development composer build admission refused");
+
+#[cfg(all(
+    buddy_development_native_composer,
+    not(feature = "development-resident-bootstrap")
+))]
+compile_error!("Development composer requires development-resident-bootstrap");
