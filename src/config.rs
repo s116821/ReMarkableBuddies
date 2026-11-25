@@ -104,6 +104,8 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub research_policy: Option<Option<ResearchPolicy>>,
+    // Append new fields to preserve legacy positional Config array prefixes.
+    pub handwriting: crate::handwriting::Configuration,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -119,6 +121,7 @@ impl Default for Config {
             model_credential: None,
             sync: SyncPolicy::default(),
             memory: crate::memory::Configuration::default(),
+            handwriting: crate::handwriting::Configuration::default(),
             reader: crate::reader_runtime::Configuration::default(),
             personalization: Personalization::default(),
             research_policy: None,
@@ -158,6 +161,11 @@ impl Config {
         );
         self.sync.validate()?;
         self.memory.validate()?;
+        self.handwriting.validate()?;
+        ensure!(
+            !self.handwriting.enabled || (!self.sync.enabled && self.reader.selection.is_none()),
+            "handwriting requires ordinary local configuration"
+        );
         self.reader.validate()?;
         ensure!(
             !(self.reader.selection.is_some() && self.sync.enabled),

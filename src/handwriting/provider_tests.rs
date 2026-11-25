@@ -679,3 +679,60 @@ fn inspect_whole_report_limit_refuses_without_truncating_conflicting_text() {
     assert!(bytes.len() <= 256 * 1024 + 1);
     drop(report);
 }
+
+#[test]
+fn runtime_selector_withholds_real_conflict_and_uses_stable_recency_ties() {
+    let mut local = Local::new();
+    let store = local.open();
+    let initial = admitted(&request()).unwrap();
+    let value = initial.correction().unwrap().clone();
+    let sample = initial.sample().unwrap().to_vec();
+    local.config.handwriting = Configuration {
+        enabled: true,
+        profile: Some(value.profile),
+    };
+    let root = envelope(&store, &value, BTreeSet::new());
+    let parent = root.revision_id;
+    import(&store, root, Some(&sample));
+    for text in ["first conflicting reading", "second conflicting reading"] {
+        let mut branch = value.clone();
+        branch.corrected_text = text.into();
+        branch.confirmed_ms = u64::MAX;
+        import(
+            &store,
+            envelope(&store, &branch, BTreeSet::from([parent])),
+            Some(&sample),
+        );
+    }
+    let mut expected = Vec::new();
+    for _ in 0..4 {
+        let mut v = request();
+        v["correction"] = json!(Uuid::new_v4());
+        v["operation"] = json!(Uuid::new_v4());
+        v["confirmed_ms"] = json!(7);
+        let report = local.execute(&store, &v);
+        assert_eq!(report.status, Status::Complete);
+        expected.push((report.facts[0].record, report.facts[0].revision));
+    }
+    expected.sort();
+    expected.truncate(3);
+    let lifetime = Arc::new(crate::mode_maintenance::admit_local_dispatch(&store).unwrap());
+    let runtime = crate::handwriting::runtime::Runtime::new(&local.config, store.clone(), lifetime)
+        .unwrap()
+        .unwrap();
+    let captured = runtime.capture(&store, &BTreeSet::new(), &mut || Ok(()));
+    assert!(captured.failure.is_none());
+    assert_eq!(captured.selection.as_ref().unwrap().conflicted, 1);
+    assert_eq!(
+        captured
+            .context
+            .as_ref()
+            .unwrap()
+            .identity()
+            .examples
+            .iter()
+            .map(|e| (e.record, e.revision))
+            .collect::<Vec<_>>(),
+        expected
+    );
+}

@@ -2,6 +2,8 @@
 mod combined;
 mod device;
 mod exchange_history;
+#[cfg(test)]
+mod handwriting_tests;
 mod raster;
 #[cfg(test)]
 mod reader_persistence_tests;
