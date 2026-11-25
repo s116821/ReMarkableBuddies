@@ -131,16 +131,24 @@ impl ResidentSourceCapture {
         &self,
         geometry: target::geometry::Geometry,
         progress: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<target::InstalledRegion> {
+    ) -> Result<target::InstalledRegionCapture> {
         let dimensions = self.capture.dimensions();
-        let masked = geometry.mask_png(self.original_source_png(), dimensions, progress)?;
-        target::InstalledRegion::new(
+        let original = self.original_source_png();
+        let (masked, coverage_sha256) =
+            geometry.mask_with_coverage(original, dimensions, progress)?;
+        let region = target::InstalledRegion::new(
             self.document(),
             self.page(),
             dimensions,
             geometry,
             crate::storage::digest(&masked),
-        )
+            coverage_sha256,
+        )?;
+        Ok(target::InstalledRegionCapture {
+            region,
+            original_sha256: crate::storage::digest(original),
+            masked,
+        })
     }
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]

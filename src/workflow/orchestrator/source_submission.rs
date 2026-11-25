@@ -108,7 +108,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             let model = ModelContent(&mut self.llm);
             model.0.clear_content();
             let destination = dispatch.config.export_destination();
-            model.0.add_text_content(&format!("{ROUTING_PROMPT}\nConfigured destination: {destination:?}.\nFor writer-circled, the target field uses this geometry contract: {}", target::candidate_geometry_contract()));
+            model.0.add_text_content(&format!("{ROUTING_PROMPT}\nConfigured destination: {destination:?}.\nFor writer-circled and writer-export-circled, the target field uses this geometry contract: {}", target::candidate_geometry_contract()));
             if let Some((_, _, context)) = &history {
                 model.0.add_text_content(context);
             }

@@ -57,7 +57,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             operation,
             user_id,
             region.as_ref().map_or(WriterCapture::Draft, |region| {
-                WriterCapture::Save(NoteScope::Region(region.id))
+                WriterCapture::Save(NoteScope::Region(region.region.id))
             }),
         )?;
         let capture_id = retained.evidence.id;
@@ -119,7 +119,8 @@ impl<M: LLMEngine> Orchestrator<M> {
             "circled Writer did not generate a fresh draft"
         );
         self.require_same_resident_source(deadline)?;
-        if let Some((export, region)) = export.zip(region) {
+        if let Some((export, prepared)) = export.zip(region) {
+            let region = prepared.region;
             drop(owner);
             let selected = produced.context("fresh regional Writer selection unavailable")?;
             let updating = matches!(export, NoteExport::Update);

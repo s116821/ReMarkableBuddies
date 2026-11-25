@@ -1546,7 +1546,17 @@ impl Ledger {
             .geometry
             .as_ref()
             .context("regional bounded target absent")?;
-        let expected = geometry.mask_png(&original, region.dimensions, progress)?;
+        let expected = if let Some(exact) = &region.installed_region {
+            let (masked, coverage) =
+                geometry.mask_with_coverage(&original, region.dimensions, progress)?;
+            ensure!(
+                exact.coverage_sha256 == coverage,
+                "saved region raster coverage differs"
+            );
+            masked
+        } else {
+            geometry.mask_png(&original, region.dimensions, progress)?
+        };
         ensure!(
             expected == derived,
             "saved region mask/recipe differs from original target"

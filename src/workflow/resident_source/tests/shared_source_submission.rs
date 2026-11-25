@@ -65,6 +65,7 @@ enum RegionAction {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RegionShape {
     Left,
+    LeftSubpixel,
     Right,
     Overlap,
     Missing,
@@ -82,6 +83,7 @@ impl RegionShape {
         };
         let polygons = match self {
             Self::Left => vec![polygon(100000, 500000)],
+            Self::LeftSubpixel => vec![polygon(100001, 500000)],
             Self::Right => vec![polygon(650000, 950000)],
             Self::Overlap => vec![polygon(400000, 550000)],
             Self::Missing => return serde_json::Value::Null,
@@ -236,7 +238,7 @@ impl crate::LLMEngine for SubmissionModel {
                     };
                     let masked = image::load_from_memory(&STANDARD.decode(masked)?)?.to_rgb8();
                     let (inside, outside) = match shape {
-                        RegionShape::Left => (32, 150),
+                        RegionShape::Left | RegionShape::LeftSubpixel => (32, 150),
                         RegionShape::Right => (150, 32),
                         RegionShape::Overlap => (87, 150),
                         _ => panic!("ambiguous export reached recognition"),
@@ -563,7 +565,7 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
         (Save, Competing, 0, 0),
         (Review, Left, 0, 0),
         (Save, Left, 1, 1),
-        (Update, Left, 2, 1),
+        (Update, RegionShape::LeftSubpixel, 2, 1),
         (Save, Right, 3, 2),
         (Save, Overlap, 3, 2),
         (Separate, Left, 4, 3),

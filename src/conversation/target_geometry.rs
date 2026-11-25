@@ -204,6 +204,27 @@ impl Geometry {
         dimensions: [u32; 2],
         progress: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<u8>> {
+        self.render_mask(original, dimensions, progress, false)
+            .map(|(png, _)| png)
+    }
+
+    pub(crate) fn mask_with_coverage(
+        &self,
+        original: &[u8],
+        dimensions: [u32; 2],
+        progress: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<(Vec<u8>, String)> {
+        let (png, coverage) = self.render_mask(original, dimensions, progress, true)?;
+        Ok((png, coverage.context("exact raster coverage absent")?))
+    }
+
+    fn render_mask(
+        &self,
+        original: &[u8],
+        dimensions: [u32; 2],
+        progress: &mut dyn FnMut() -> Result<()>,
+        record_coverage: bool,
+    ) -> Result<(Vec<u8>, Option<String>)> {
         self.validate()?;
         progress()?;
         let [width, height] = dimensions;
@@ -231,11 +252,12 @@ impl Geometry {
         limits.max_alloc = Some(MAX_PIXELS * 16);
         reader.limits(limits);
         let source = reader.decode()?.into_rgba8();
-        let capacity = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|n| n.checked_mul(3))
-            .context("target canvas overflow")?;
-        let mut rgb = Vec::with_capacity(usize::try_from(capacity)?);
+        let pixels = usize::try_from(u64::from(width) * u64::from(height))?;
+        let capacity = pixels.checked_mul(3).context("target canvas overflow")?;
+        let mut rgb = Vec::with_capacity(capacity);
+        // One bit per pixel, in row-major order. White selected pixels must
+        // count toward coverage even though the rendered PNG is also white.
+        let mut coverage = record_coverage.then(|| vec![0u8; pixels.div_ceil(8)]);
         for (offset, pixel) in source.pixels().enumerate() {
             if offset % 4096 == 0 {
                 progress()?;
@@ -243,6 +265,9 @@ impl Geometry {
             let x = u32::try_from(offset % width as usize)?;
             let y = u32::try_from(offset / width as usize)?;
             if self.includes(x, y, width, height)? {
+                if let Some(bits) = &mut coverage {
+                    bits[offset / 8] |= 1 << (offset % 8);
+                }
                 let alpha = u32::from(pixel[3]);
                 for channel in &pixel.0[..3] {
                     rgb.push(
@@ -258,7 +283,16 @@ impl Geometry {
         PngEncoder::new_with_quality(&mut output, CompressionType::Fast, FilterType::NoFilter)
             .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)?;
         ensure!(output.len() <= MAX_PNG_BYTES, "target mask encoded bound");
-        Ok(output)
+        let coverage = coverage
+            .map(|bits| {
+                ensure!(
+                    bits.iter().any(|&byte| byte != 0),
+                    "region covers no source pixel"
+                );
+                Ok::<_, anyhow::Error>(crate::storage::digest(&bits))
+            })
+            .transpose()?;
+        Ok((output, coverage))
     }
 }
 
@@ -311,6 +345,31 @@ mod tests {
         let union = union.canonicalize().unwrap();
         assert!(union.includes(1, 0, 2, 2).unwrap());
     }
+    #[test]
+    fn coverage_distinguishes_white_pixels_and_ignores_subpixel_vertices() -> Result<()> {
+        let source = image::RgbImage::from_pixel(2, 1, image::Rgb([255; 3]));
+        let mut original = Vec::new();
+        PngEncoder::new(&mut original).write_image(
+            source.as_raw(),
+            2,
+            1,
+            image::ExtendedColorType::Rgb8,
+        )?;
+        let shape = |left, right| Geometry {
+            components: vec![vec![[left, 0], [right, 0], [right, SCALE], [left, SCALE]]],
+        };
+        let masked =
+            |region: Geometry| region.mask_with_coverage(&original, [2, 1], &mut || Ok(()));
+        let (left_png, left_coverage) = masked(shape(0, 500_000))?;
+        let (subpixel_png, subpixel_coverage) = masked(shape(1, 500_000))?;
+        let (right_png, right_coverage) = masked(shape(500_000, SCALE))?;
+        assert_eq!(left_png, subpixel_png);
+        assert_eq!(left_coverage, subpixel_coverage);
+        assert_eq!(left_png, right_png);
+        assert_ne!(left_coverage, right_coverage);
+        Ok(())
+    }
+
     #[test]
     fn mask_preserves_canvas_and_alpha_and_is_deterministic() {
         let source =

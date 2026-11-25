@@ -154,7 +154,7 @@ pub(crate) struct TargetRun<'a, 'store> {
     pub(crate) owner: &'a Owner<'store>,
     pub(crate) deadline: Instant,
     pub(crate) accepted: Option<&'a Turn>,
-    pub(crate) installed_region: Option<&'a target::InstalledRegion>,
+    pub(crate) installed_region: Option<&'a target::InstalledRegionCapture>,
 }
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
@@ -236,8 +236,18 @@ pub(crate) fn run_owned<E: LLMEngine>(
             );
             frame.check(ledger)
         };
-        let masked =
-            geometry.mask_png(frame.original(), frame.source().dimensions, &mut progress)?;
+        let masked = if let Some(prepared) = installed_region {
+            ensure!(
+                accepted.is_some()
+                    && &prepared.region.geometry == geometry
+                    && prepared.region.dimensions == frame.source().dimensions
+                    && prepared.original_sha256 == frame.source().original.sha256,
+                "installed save lacks its accepted regional source"
+            );
+            prepared.masked.clone()
+        } else {
+            geometry.mask_png(frame.original(), frame.source().dimensions, &mut progress)?
+        };
         let derived = crate::storage::Media {
             sha256: digest(&masked),
             bytes: masked.len() as u64,
@@ -320,12 +330,6 @@ pub(crate) fn run_owned<E: LLMEngine>(
             TextScope::Page { page: 1 },
             guidance.clone(),
         )?;
-        if let Some(region) = installed_region {
-            ensure!(
-                accepted.is_some() && &region.geometry == geometry,
-                "installed save lacks its accepted regional source"
-            );
-        }
         let regional = RegionSource {
             id: normalized.id,
             conversation,
@@ -339,7 +343,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
             normalized_sha256: digest(&serde_json::to_vec(&document.units)?),
             about: target.candidate.about()?,
             normalized,
-            installed_region: installed_region.cloned(),
+            installed_region: installed_region.map(|prepared| prepared.region.clone()),
             normalization_proof: target::NormalizationProof {
                 profile: serde_json::to_value(&page.profile)?,
                 prompt_sha256: page.prompt_sha256.clone(),

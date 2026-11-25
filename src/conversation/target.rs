@@ -281,7 +281,15 @@ pub struct InstalledRegion {
     pub(crate) dimensions: [u32; 2],
     pub(crate) geometry: geometry::Geometry,
     pub(crate) mask_sha256: String,
+    pub(crate) coverage_sha256: String,
 }
+
+pub(crate) struct InstalledRegionCapture {
+    pub(crate) region: InstalledRegion,
+    pub(crate) original_sha256: String,
+    pub(crate) masked: Vec<u8>,
+}
+
 impl InstalledRegion {
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn new(
@@ -290,6 +298,7 @@ impl InstalledRegion {
         dimensions: [u32; 2],
         geometry: geometry::Geometry,
         mask_sha256: String,
+        coverage_sha256: String,
     ) -> Result<Self> {
         let mut region = Self {
             id: Uuid::nil(),
@@ -298,6 +307,7 @@ impl InstalledRegion {
             dimensions,
             geometry,
             mask_sha256,
+            coverage_sha256,
         };
         region.id = region.identity()?;
         region.validate()?;
@@ -312,7 +322,7 @@ impl InstalledRegion {
                 self.document,
                 self.page,
                 self.dimensions,
-                &self.geometry,
+                &self.coverage_sha256,
                 &self.mask_sha256,
             ))?,
         ))
@@ -325,6 +335,7 @@ impl InstalledRegion {
                 && !self.page.is_nil()
                 && self.geometry.components.len() == 1
                 && valid_digest(&self.mask_sha256)
+                && valid_digest(&self.coverage_sha256)
                 && self.id == self.identity()?,
             "invalid installed region identity"
         );
