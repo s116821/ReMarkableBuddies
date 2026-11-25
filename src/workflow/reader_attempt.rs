@@ -446,19 +446,21 @@ impl Attempt {
     pub(super) fn prepare_with_resident_association(
         ledger: &Ledger,
         acquired: AcquiredEvidence,
-        opened: Option<HistoricalPageAssociation>,
+        opened: Option<(HistoricalPageAssociation, Uuid)>,
     ) -> Result<Self> {
         let timestamp = now()?;
         let destination = match &acquired {
             AcquiredEvidence::Sdk { destination, .. } => *destination,
             _ => None,
         };
-        let resident_answer = match &acquired {
-            AcquiredEvidence::ResidentHistorical(capture) => match opened {
-                Some(opened) => Some(opened),
-                None => ledger.resident_answer_association(capture)?,
-            },
-            _ => None,
+        let (resident_answer, exchange) = match (&acquired, opened) {
+            (AcquiredEvidence::ResidentHistorical(_), Some((page, exchange))) => {
+                (Some(page), exchange)
+            }
+            (AcquiredEvidence::ResidentHistorical(capture), None) => {
+                (ledger.resident_answer_association(capture)?, Uuid::new_v4())
+            }
+            _ => (None, Uuid::new_v4()),
         };
         let modeled_binding = match destination {
             Some(target) => match ledger.inspect_page_association(
@@ -478,7 +480,7 @@ impl Attempt {
         let user = Turn {
             id: Uuid::new_v4(),
             conversation,
-            exchange: Uuid::new_v4(),
+            exchange,
             sequence: 0,
             role: Role::User,
             mode: Mode::Reader,

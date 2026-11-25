@@ -96,6 +96,8 @@ pub enum Fault {
     AfterObjects,
     BeforeCommit,
     AfterCommit,
+    #[cfg(test)]
+    ReadObject,
     BeforeActivation,
     AfterActivation,
 }
@@ -1352,6 +1354,14 @@ impl Store {
             .collect())
     }
     pub fn read_object(&self, reference: &ObjectRef) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("store mutex unavailable"))?;
+            Self::trip(&mut inner, Fault::ReadObject)?;
+        }
         let mut source = self.open_object(reference)?;
         source.chunk(0, source.len())
     }
