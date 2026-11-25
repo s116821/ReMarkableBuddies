@@ -30,7 +30,7 @@ mod ordinary_startup {
                         Ok(vec![]),
                     ]
                 } else {
-                    vec![]
+                    vec![Ok(vec![]), Ok(vec![]), Ok(vec![])]
                 }))
             },
             |_, input| {
@@ -62,7 +62,7 @@ mod ordinary_startup {
                             Ok(vec![Interaction::Invalidated]),
                             Err(anyhow::anyhow!("lost observer")),
                         ],
-                        _ => vec![],
+                        _ => vec![Ok(vec![])],
                     }))
                 },
                 |_, input| {
