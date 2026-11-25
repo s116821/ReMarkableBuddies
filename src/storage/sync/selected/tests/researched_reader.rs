@@ -574,6 +574,7 @@ struct Scripted<'a> {
     answer_refused: bool,
     ordinary_pdf_questions: Vec<&'static str>,
     mark_ordinary_pdf_question: bool,
+    captured_page_only: bool,
 }
 impl<'a> Scripted<'a> {
     fn new(reading: Reading, required: bool, has_fact: bool, events: Events) -> Self {
@@ -593,6 +594,7 @@ impl<'a> Scripted<'a> {
             answer_refused: false,
             ordinary_pdf_questions: Vec::new(),
             mark_ordinary_pdf_question: false,
+            captured_page_only: false,
         }
     }
     fn question(&self) -> &'static str {
@@ -727,6 +729,10 @@ impl LLMEngine for Scripted<'_> {
                     json!({"version":1,"transcription":question,"request_web":match self.reading {
                     Reading::Unclear=>json!({"version":1,"intent":"unclear"}), Reading::Disagree=>json!({"version":1,"intent":"no-restriction"}), _=>intent }}).to_string()
                 }
+            }
+            2 if self.captured_page_only => {
+                json!({"status":"answered","text":"Captured page answer.","citations":[]})
+                    .to_string()
             }
             2 => {
                 let mut citations = vec!["S1"];
@@ -1185,6 +1191,84 @@ fn assert_held_search(observed: &HeldSearchObservation, run: &Run, partial_body:
 }
 
 #[cfg(feature = "installed-resident-output")]
+#[test]
+fn ordinary_installed_reader_leaves_mapped_files_out_of_the_request() -> Result<()> {
+    use crate::workflow::OrdinaryPdfFixtureRounds;
+    use anyhow::Context;
+
+    const OTHER_PAGE: &str = "OTHER_PAGE_TEXT_MUST_NOT_BE_SENT";
+    for (format, bytes, original_pages, redir) in [
+        ("pdf", pdf_bytes(OTHER_PAGE), 2, 0),
+        ("epub", ordinary_epub::book(OTHER_PAGE), 600, 310),
+    ] {
+        let fixture = Fixture::new();
+        fs::DirBuilder::new().mode(0o700).create(&fixture.0)?;
+        let document = Uuid::new_v4();
+        let page = Uuid::new_v4();
+        let path = fixture.0.join(format!("{document}.{format}"));
+        fs::write(&path, &bytes)?;
+        files::atomic_json(
+            &fixture.0.join(format!("{document}.content")),
+            &json!({"fileType":format, "cPages":{"original":{"value":original_pages},"pages":[
+                {"id":page,"idx":{"value":"a"},"redir":{"value":redir}}
+            ]}}),
+        )?;
+        let qualification = researched_fixture::Scope::new(None, false);
+        let mut model = Scripted::new(Reading::Deny, false, false, Events::default());
+        model.captured_page_only = true;
+        let frames = model.frames.clone();
+        let (mut results, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+            document,
+            page,
+            fixture.0.clone(),
+            None,
+            OrdinaryPdfFixtureRounds {
+                epub: format == "epub",
+                rendered: None,
+                source_targets: false,
+                bound_successor_for_book_edit: None,
+                count: 1,
+                before_round: None,
+            },
+            |_, _, _| model,
+            |_, _| Ok(()),
+        )?;
+        results
+            .remove(0)
+            .with_context(|| format!("Ordinary {format} request"))?;
+        assert!(qualification.ordinary_pdf_workers().is_empty());
+        assert_eq!(qualification.constructions(), 0);
+        let frame = records
+            .iter()
+            .find_map(|record| match record {
+                Record::RequestEvidence(evidence) => Some(&evidence.frame_json),
+                _ => None,
+            })
+            .context("ordinary request evidence absent")?;
+        let frame: Value = serde_json::from_str(frame)?;
+        assert_eq!(frame["source"]["kind"], "captured-page");
+        assert_eq!(
+            frame["source"]["source_record"]["record"]["before"]["page"],
+            json!(page)
+        );
+        assert!(frame["retrieval"].is_null());
+        let frames = frames.lock().unwrap();
+        assert_eq!(frames.len(), 3);
+        assert!(!frames[2].images.is_empty());
+        assert!(frames[2]
+            .images
+            .iter()
+            .all(|image| frames[1].images.contains(image)));
+        assert!(frames[2]
+            .texts
+            .iter()
+            .all(|text| !text.contains(OTHER_PAGE)));
+        assert_eq!(fs::read(path)?, bytes);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "installed-resident-output")]
 fn assert_pdf_reuse_between_service_questions(
     executable: &std::path::Path,
     oversized: &[u8],
@@ -1285,7 +1369,7 @@ fn assert_pdf_reuse_between_service_questions(
             document,
             page,
             fixture.0.clone(),
-            executable.into(),
+            Some(executable.into()),
             OrdinaryPdfFixtureRounds {
                 epub: false,
                 rendered: None,
@@ -1515,7 +1599,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
             document,
             page,
             root.clone(),
-            executable.clone(),
+            Some(executable.clone()),
             crate::workflow::OrdinaryPdfFixtureRounds {
                 epub: false,
                 rendered: None,

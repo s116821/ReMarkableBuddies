@@ -314,21 +314,40 @@ impl<'a> Dispatch<'a> {
             "invalid Reader request"
         );
         admitted.check(ledger, observe)?;
-        let context = ledger.context_range(
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let installed_binding = match ledger.inspect_page_association(
             admitted.conversation,
-            history_range,
-            &ContextBudget {
-                max_text_bytes: 16 * 1024,
-                max_turns: 64,
-                provider_token_limit: Some(16 * 1024),
-            },
-            |turns| {
-                Ok(turns
-                    .iter()
-                    .map(|t| t.text.as_ref().map_or(0, String::len))
-                    .sum())
-            },
-        )?;
+            admitted.source.document,
+            admitted.source.page,
+        )? {
+            crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate(
+                binding,
+            ) if binding.receipt().evidence_origin == "installed-native-guarded-v1" => {
+                Some(binding)
+            }
+            _ => None,
+        };
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        let installed_binding: Option<Box<crate::conversation::HistoricalPageAssociation>> = None;
+        let budget = ContextBudget {
+            max_text_bytes: 16 * 1024,
+            max_turns: 64,
+            provider_token_limit: Some(16 * 1024),
+        };
+        let count = |turns: &[Turn]| {
+            Ok(turns
+                .iter()
+                .map(|turn| turn.text.as_ref().map_or(0, String::len))
+                .sum())
+        };
+        let context = if installed_binding.is_some() {
+            crate::conversation::ContextView {
+                turns: ledger.model_turns(admitted.conversation, history_range, &budget, count)?,
+                ..Default::default()
+            }
+        } else {
+            ledger.context_range(admitted.conversation, history_range, &budget, count)?
+        };
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis()
@@ -388,15 +407,33 @@ impl<'a> Dispatch<'a> {
             );
             Ok(())
         };
+        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+        let bound_page = installed_binding
+            .as_ref()
+            .map(|binding| {
+                ledger
+                    .bound_resident_reader_capture(&persisted_user, binding.receipt())
+                    .map(|source| source.map(crate::conversation::Record::ResidentCapture))
+            })
+            .transpose()?;
+        #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
+        let bound_page: Option<Option<crate::conversation::Record>> = None;
+        let memory_document = match &bound_page {
+            Some(None) => None,
+            _ => Some(admitted.source.document),
+        };
         let answer = crate::conversation::receiving::answer::follow_up(
             ledger,
             engine,
             &context,
             request,
+            bound_page
+                .as_ref()
+                .map(|source| (&persisted_user, source.as_ref())),
             &self.config.personalization_snapshot()?,
             self.memory
                 .as_deref()
-                .map(|provider| (provider, Some(admitted.source.document), timestamp)),
+                .map(|provider| (provider, memory_document, timestamp)),
             &mut progress,
         );
         let answer = match answer {
@@ -627,6 +664,7 @@ impl<'a> Dispatch<'a> {
             |text| Ok(text.len()),
             Some(head),
             notebook,
+            crate::conversation::receiving::FollowupMedia::All,
         )?;
         check_visit()?;
         check_source()?;

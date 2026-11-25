@@ -756,6 +756,15 @@ fn installed_circled_save_keeps_an_exact_region_association() -> Result<()> {
 
 #[test]
 fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> Result<()> {
+    check_installed_notebook_save(false)
+}
+
+#[test]
+fn installed_ordinary_reader_leaves_archived_notebook_text_out_of_the_request() -> Result<()> {
+    check_installed_notebook_save(true)
+}
+
+fn check_installed_notebook_save(check_reader_scope: bool) -> Result<()> {
     use std::{
         fs,
         io::Write,
@@ -986,6 +995,12 @@ fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> R
         assert_eq!(events.borrow().contains(&"insert"), path == Displayed);
         assert_eq!(destination.counts().2, writes);
         assert_eq!(destination.remote_note_count(), notes);
+        if check_reader_scope {
+            installed_reader_memory::check_ordinary_reader_with_archived_notebook(
+                &store, &root, &templates, document, &pages,
+            )?;
+            break;
+        }
     }
     fs::remove_dir_all(base)?;
     Ok(())

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
+    path::Path,
 };
 
 const QUESTION: &str = "Which compass should I use?";
@@ -87,6 +88,13 @@ impl crate::LLMEngine for ReaderModel {
     fn execute(&mut self) -> Result<String> {
         let mut calls = self.calls.borrow_mut();
         calls.push((self.parts.clone(), self.images.clone()));
+        if self
+            .parts
+            .first()
+            .is_some_and(|part| part.starts_with("Answer the Reader request using"))
+        {
+            return Ok("Typed continuation answer.".into());
+        }
         let legacy_analysis = self.parts.first().is_some_and(|part| {
             part.contains("QUESTION_BOX:") && !part.contains("REQUEST_WEB_JSON")
         });
@@ -519,6 +527,15 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
             }
         }
     }
+    check_typed_reader_on_bound_page(
+        &ledger,
+        &config,
+        conversation,
+        document,
+        buddy,
+        QUESTION,
+        &original_images,
+    )?;
     let records = ledger.inspect(conversation, false)?;
     assert_eq!(
         records
@@ -530,6 +547,256 @@ fn check_bound_reader_page(start: BoundStart) -> Result<()> {
     );
     drop((dispatch, reader, ledger, store));
     std::fs::remove_dir_all(base)?;
+    Ok(())
+}
+
+fn check_typed_reader_on_bound_page(
+    ledger: &Ledger,
+    config: &crate::config::Config,
+    conversation: ConversationId,
+    document: ConversationId,
+    buddy: ConversationId,
+    prior_question: &str,
+    original_images: &[String],
+) -> Result<()> {
+    // Model the typed receiving boundary with a verified owner observation.
+    // The native keyboard event path is covered separately.
+    let crate::conversation::HistoricalPageAssociationInspection::HistoricalCandidate(binding) =
+        ledger.inspect_page_association(conversation, document, buddy)?
+    else {
+        anyhow::bail!("Expected the existing Buddy binding");
+    };
+    let mut visit = binding.receipt().source.clone();
+    visit.page = buddy;
+    visit.content_revision = Some("current-typed-fixture".into());
+    let scope = crate::workflow::conversation_dispatch::RequestScope {
+        conversation,
+        operation: ConversationId::new_v4(),
+        root: ledger.expected(Namespace::Conversation, conversation)?,
+        source: visit.clone(),
+    };
+    let calls = Rc::new(RefCell::new(vec![]));
+    let mut typed_dispatch =
+        crate::workflow::conversation_dispatch::Dispatch::local(config, ledger)?;
+    let mut typed_model = ReaderModel {
+        parts: vec![],
+        images: vec![],
+        calls: calls.clone(),
+        question: QUESTION,
+        intent: json!({"version":1,"intent":"no-restriction"}),
+        case: Case::Disabled,
+    };
+    let typed = "Clarify that in one line.";
+    typed_dispatch.reader(ledger, &mut typed_model, typed, None, &scope, &mut || {
+        Ok(visit.clone())
+    })?;
+    {
+        let frames = calls.borrow();
+        let [(parts, images)] = frames.as_slice() else {
+            anyhow::bail!("Expected one typed Reader request");
+        };
+        let frame: Value = serde_json::from_str(&parts[1])?;
+        assert_eq!(frame["request"], typed);
+        assert!(frame["history"]
+            .as_array()
+            .is_some_and(|turns| turns.iter().any(|turn| { turn["text"] == prior_question })));
+        assert_eq!(frame["archived_sources"], json!([]));
+        assert_eq!(frame["normalized_text"], json!([]));
+        assert_eq!(images, original_images);
+    }
+
+    Ok(())
+}
+
+pub(super) fn check_ordinary_reader_with_archived_notebook(
+    store: &Arc<Store>,
+    root: &Path,
+    templates: &Path,
+    document: ConversationId,
+    pages: &[ConversationId],
+) -> Result<()> {
+    // The preceding installed Writer request produced real retained notebook
+    // normalization, including text from an original other than the current page.
+    let archives = store.snapshot_heads_matching(&[Namespace::Source], 8, |head| {
+        head.payload["record_kind"].as_str() == Some("archived-normalized-source")
+    })?;
+    let [archive] = archives.as_slice() else {
+        anyhow::bail!("Expected one retained notebook archive before Reader");
+    };
+    let Record::ArchivedNormalizedSource(archive) = Ledger::decode(archive)? else {
+        anyhow::bail!("Expected a retained notebook source");
+    };
+    assert_eq!(archive.document, document);
+    assert!(archive
+        .load(store)?
+        .document()
+        .units
+        .iter()
+        .any(|unit| { unit.page == Some(1) && unit.text.contains("First page.") }));
+
+    use crate::workflow::selected_backend::RefusingBackend;
+    use std::{
+        ffi::CString,
+        fs::File,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::ffi::OsStrExt,
+        },
+    };
+
+    let mode = "reconnect-source-handoff-open-first";
+    let (mut workflow, events, _) =
+        workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, store);
+    let native = Fixture::new();
+    let source_page = *pages.last().context("Expected a source page")?;
+    let buddy = ConversationId::new_v4();
+    let order = pages.iter().copied().chain([buddy]).collect::<Vec<_>>();
+    native.declare_source(document, source_page);
+    native.declare_source_order(&order);
+    let position = native.successor_position();
+    let (opened, _) = native.opened_page_probe();
+    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
+    let owner = workflow.resident_source.as_mut().unwrap();
+    owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+        &store.paths.cache.join("archive-reader-output-profile"),
+        runtime.identity(),
+    )?;
+    owner.session = Some(Box::new(OwnedSession {
+        runtime,
+        _fixture: native,
+        events,
+        delivery_fault: false,
+        observe_file_change: None,
+        writer_slot: None,
+        writer_slot_fault: false,
+        refinement_slot: None,
+    }));
+    let sdk_id = |id: ConversationId| Uuid::parse(&id.to_string()).unwrap();
+    let facts = |page, order: &[ConversationId]| {
+        ReaderFacts::new(
+            remarkable_open_sdk::PageKey {
+                document: sdk_id(document),
+                page: sdk_id(page),
+            },
+            order.iter().copied().map(sdk_id).collect(),
+        )
+        .unwrap()
+    };
+    let ledger = Ledger::new(store.clone());
+    let conversation = archive.conversation;
+    let rendered = Rc::new(RefCell::new(Vec::new()));
+    let mut backend = RecognitionProbe {
+        confirmed_source: true,
+        early_source: Some((facts(source_page, pages), Rc::new(RefCell::new(None)))),
+        successor: Some(SuccessorProbe {
+            position,
+            interrupt_restore: false,
+        }),
+        rendered_text: Some(rendered.clone()),
+        ..RecognitionProbe::default()
+    };
+    backend.bind_opened_page(&ledger, conversation, &facts(buddy, &order))?;
+    backend.early_source.as_mut().unwrap().0 = facts(source_page, &order);
+    workflow.device = Box::new(
+        RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+            .with_test_output(Box::new(backend)),
+    );
+    let config = crate::config::Config {
+        paths: store.paths.clone(),
+        research_policy: Some(Some(ResearchPolicy::Disabled)),
+        ..Default::default()
+    };
+    let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+    let calls = Rc::new(RefCell::new(vec![]));
+    let model = ReaderModel {
+        parts: vec![],
+        images: vec![],
+        calls: calls.clone(),
+        question: "What does the first page say?",
+        intent: json!({"version":1,"intent":"no-restriction"}),
+        case: Case::Disabled,
+    };
+    // Watch both the native mapping and the committed archive body. The
+    // asset is already linked to a chronological turn in this conversation.
+    let generation: ConversationId =
+        crate::storage::files::json(&store.paths.data.join("CURRENT"), 128)?;
+    let object = store
+        .paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("objects")
+        .join(&archive.media.sha256);
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    ensure!(fd >= 0, "inotify initialization failed");
+    let mut watch = unsafe { File::from_raw_fd(fd) };
+    for path in [root.join(format!("{document}.content")), object] {
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        ensure!(
+            unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) }
+                >= 0,
+            "watching the excluded notebook data failed"
+        );
+    }
+
+    let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+    super::original_pdf::saved_notebook::with_fixture_paths(root, templates, || {
+        reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))
+    })?;
+
+    assert!(
+        opened.is_file(),
+        "Reader did not exercise the page-opening path"
+    );
+    assert!(rendered.borrow().iter().any(|text| text.contains(NOTEBOOK)));
+    let calls = calls.borrow();
+    let [_, verification, answer] = calls.as_slice() else {
+        anyhow::bail!("Expected only two readings and the captured-page answer");
+    };
+    let frame: Value = serde_json::from_str(&answer.0[1])?;
+    let request = &frame["context"]["request_context"];
+    assert_eq!(request["source"]["kind"], "captured-page");
+    assert_eq!(
+        request["source"]["source_record"]["record"]["before"]["page"],
+        json!(source_page)
+    );
+    assert!(request["retrieval"].is_null());
+    assert!(!answer.1.is_empty());
+    assert!(answer.1.iter().all(|image| verification.1.contains(image)));
+    assert!(answer.0.iter().all(|part| !part.contains("First page.")));
+    let prior = request["history"]
+        .as_array()
+        .and_then(|turns| turns.iter().find(|turn| turn["id"] == json!(archive.turn)))
+        .context("Writer text from the same conversation absent")?;
+    assert!(prior["sources"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(archive.id)));
+    let prompt_history = ledger.recent_model_turns(
+        conversation,
+        &crate::conversation::ContextBudget {
+            max_text_bytes: 16 * 1024,
+            max_turns: 64,
+            provider_token_limit: Some(16 * 1024),
+        },
+        |_| Ok(1),
+    )?;
+    assert!(prompt_history.iter().any(|turn| turn.id == archive.turn));
+    check_typed_reader_on_bound_page(
+        &ledger,
+        &config,
+        conversation,
+        document,
+        buddy,
+        prior["text"].as_str().context("Writer request is absent")?,
+        &answer.1,
+    )?;
+    let mut event = [0; 128];
+    assert_eq!(
+        watch.read(&mut event).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "Reader read excluded notebook data"
+    );
     Ok(())
 }
 

@@ -140,6 +140,12 @@ impl fmt::Display for ReceivingRefusal {
 }
 impl std::error::Error for ReceivingRefusal {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowupMedia {
+    All,
+    BoundPage,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Frame {
@@ -719,7 +725,7 @@ impl Ledger {
             retrieval,
             token_count,
             records,
-            false,
+            None,
             None,
         )
     }
@@ -735,9 +741,27 @@ impl Ledger {
         retrieval: Option<&dyn Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
-        keep_media: bool,
+        followup_media: Option<FollowupMedia>,
         verified_notebook: Option<&Media>,
     ) -> Result<FrozenRequestContext> {
+        let bound_page = followup_media == Some(FollowupMedia::BoundPage);
+        let bound_media = if bound_page {
+            match &source {
+                RequestSource::NoDocument => Vec::new(),
+                RequestSource::CapturedPage { source_record, .. } => {
+                    let record = records
+                        .iter()
+                        .find(|record| source_id(record) == Some(*source_record))
+                        .ok_or(ReceivingRefusal::OriginalUnavailable)?;
+                    source_media(record)?
+                }
+                RequestSource::Original { .. } => {
+                    return Err(ReceivingRefusal::AssociationMismatch.into());
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let mut context = Self::assemble_request_data(
             conversation,
             request_turn,
@@ -748,10 +772,14 @@ impl Ledger {
             token_count,
             records,
             "ordinary-historical",
-            keep_media,
+            followup_media == Some(FollowupMedia::All),
             verified_notebook.is_some(),
             |media| {
-                verified_notebook == Some(media)
+                // Keep the existing historical frame for replay. Its
+                // missing-media list records failures only within the
+                // media this answer actually needs to open.
+                (bound_page && !bound_media.contains(media))
+                    || verified_notebook == Some(media)
                     || self
                         .store
                         .open_object(&ObjectRef {

@@ -2205,12 +2205,12 @@ impl Ledger {
     /// Admit the most recent eligible turns as one explicit chronological range.
     /// If that range exceeds the byte or provider budget, refuse the range intact.
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-    pub(crate) fn recent_model_context(
+    pub(crate) fn recent_model_turns(
         &self,
         conversation: Uuid,
         budget: &ContextBudget,
         token_count: impl Fn(&[Turn]) -> Result<usize>,
-    ) -> Result<ContextView> {
+    ) -> Result<Vec<Turn>> {
         ensure!(budget.max_turns > 0, "empty recent context budget");
         let records = self.inspect(conversation, false)?;
         let selection = {
@@ -2229,7 +2229,34 @@ impl Ledger {
                 None
             }
         };
-        self.model_context_from_records(records, selection, budget, token_count)
+        Self::context_turns(
+            &records,
+            selection,
+            budget,
+            Some(&token_count),
+            ContextPurpose::Model,
+        )
+        .map(|(turns, _)| turns)
+    }
+
+    /// Build only the chronological model history. A bound Reader obtains
+    /// its one eligible source separately.
+    pub(crate) fn model_turns(
+        &self,
+        conversation: Uuid,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: impl Fn(&[Turn]) -> Result<usize>,
+    ) -> Result<Vec<Turn>> {
+        let records = self.inspect(conversation, false)?;
+        Self::context_turns(
+            &records,
+            selection,
+            budget,
+            Some(&token_count),
+            ContextPurpose::Model,
+        )
+        .map(|(turns, _)| turns)
     }
 
     fn model_context_from_records(
@@ -2341,14 +2368,13 @@ impl Ledger {
         )
     }
 
-    fn context_records_for(
-        records: Vec<Record>,
+    fn context_turns(
+        records: &[Record],
         selection: Option<TurnRange>,
         budget: &ContextBudget,
         token_count: Option<&TurnCounter<'_>>,
-        media_available: impl Fn(&Media) -> bool,
         purpose: ContextPurpose<'_>,
-    ) -> Result<ContextView> {
+    ) -> Result<(Vec<Turn>, usize)> {
         let token_limit = Self::context_token_limit(selection, budget)?;
         let opened_feedback: BTreeSet<_> = if matches!(purpose, ContextPurpose::Presentation) {
             records
@@ -2404,6 +2430,19 @@ impl Ledger {
                 .into());
             }
         }
+        Ok((turns, bytes))
+    }
+
+    fn context_records_for(
+        records: Vec<Record>,
+        selection: Option<TurnRange>,
+        budget: &ContextBudget,
+        token_count: Option<&TurnCounter<'_>>,
+        media_available: impl Fn(&Media) -> bool,
+        purpose: ContextPurpose<'_>,
+    ) -> Result<ContextView> {
+        let (turns, bytes) =
+            Self::context_turns(&records, selection, budget, token_count, purpose)?;
         let turn_ids = turns.iter().map(|turn| turn.id).collect::<BTreeSet<_>>();
         let target_uses = records
             .iter()

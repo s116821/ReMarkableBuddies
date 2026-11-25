@@ -239,11 +239,11 @@
       "additionalProperties": false,
       "properties": {
         "researched_pdf": {
-          "description": "Local opt-in for original-PDF researched Reader requests. A selection chooses the registered shared document. Ordinary local Reader uses the guarded current original page. An absent search model does not authorize web research.",
+          "description": "Configuration for explicitly admitted original-PDF researched Reader requests. A selection chooses the registered shared document. Ordinary Reader keeps the original page scope. An absent search model does not authorize web research.",
           "$ref": "#/$defs/researchedDocument"
         },
         "researched_epub": {
-          "description": "Local opt-in for research on the open original EPUB in ordinary Reader. Passages cite EPUB spine sections. A search model is needed for web research.",
+          "description": "Configuration for the original EPUB research adapter. Passages cite EPUB spine sections when the adapter is explicitly admitted. Ordinary Reader does not index the open EPUB. A search model is needed for adapter web research.",
           "$ref": "#/$defs/researchedDocument"
         },
         "selection": {
