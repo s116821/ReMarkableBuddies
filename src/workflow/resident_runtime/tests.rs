@@ -28,6 +28,11 @@ impl Fixture {
         .unwrap();
     }
     #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_edited_selection(&self) {
+        fs::write(self.0.join("edited-selection"), []).unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
     pub(crate) fn declare_source_order(&self, pages: &[StoreUuid]) {
         fs::write(
             self.0.join("declared-source-order.json"),

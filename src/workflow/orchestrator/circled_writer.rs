@@ -33,7 +33,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         let (capture_operation, _) = capture.writer_page_input()?;
         let operation = writer::stage(capture_operation, "circled");
         let user_id = writer::stage(operation, "user");
-        let region = export
+        let mut region = export
             .as_ref()
             .map(|_| {
                 let geometry = candidate
@@ -43,6 +43,19 @@ impl<M: LLMEngine> Orchestrator<M> {
                 capture.installed_region(geometry, &mut || self.workflow.check_request_progress())
             })
             .transpose()?;
+        let updating = matches!(export, Some(NoteExport::Update));
+        let existing = match (&mut region, updating) {
+            (Some(prepared), true) => self
+                .ledger
+                .installed_region_association(&prepared.region)
+                .and_then(|prior| {
+                    if let Some(prior) = &prior {
+                        prepared.region.retain_association(prior)?;
+                    }
+                    Ok(prior.is_some())
+                }),
+            _ => Ok(false),
+        };
         let store = self.ledger.store().clone();
         let owner = writer::Owner::acquire(&store).context("Writer is already active")?;
 
@@ -123,18 +136,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             let region = prepared.region;
             drop(owner);
             let selected = produced.context("fresh regional Writer selection unavailable")?;
-            let updating = matches!(export, NoteExport::Update);
-            let (selected, result) = if updating
-                && self
-                    .ledger
-                    .installed_region_conflict(&region)
-                    .unwrap_or(true)
-            {
-                (
-                    selected,
-                    "Draft saved. I couldn't match this selection to an earlier save. Check the earlier note or ask for a separate one.",
-                )
-            } else {
+            let (selected, result) = if let Ok(had_association) = existing {
                 self.export_resident_draft(
                     dispatch,
                     ResidentSave {
@@ -146,13 +148,23 @@ impl<M: LLMEngine> Orchestrator<M> {
                     selected,
                     deadline,
                     |_, ledger| {
-                        ensure!(
-                            !updating || !ledger.installed_region_conflict(&region)?,
-                            "regional export overlap changed before writing"
-                        );
+                        if updating {
+                            let prior = ledger.installed_region_association(&region)?;
+                            ensure!(
+                                prior
+                                    .as_ref()
+                                    .map_or(!had_association, |value| value.id == region.id),
+                                "regional export association changed before writing"
+                            );
+                        }
                         Ok(())
                     },
                 )?
+            } else {
+                (
+                    selected,
+                    "Draft saved. I couldn't match this selection to one earlier save. Check the earlier note or ask for a separate one.",
+                )
             };
             return self.present_resident_writer_result(
                 conversation,

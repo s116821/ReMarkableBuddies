@@ -282,6 +282,9 @@ pub struct InstalledRegion {
     pub(crate) geometry: geometry::Geometry,
     pub(crate) mask_sha256: String,
     pub(crate) coverage_sha256: String,
+    /// Original association input when this draft captures different ink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    association_mask_sha256: Option<String>,
 }
 
 pub(crate) struct InstalledRegionCapture {
@@ -308,6 +311,7 @@ impl InstalledRegion {
             geometry,
             mask_sha256,
             coverage_sha256,
+            association_mask_sha256: None,
         };
         region.id = region.identity()?;
         region.validate()?;
@@ -323,7 +327,9 @@ impl InstalledRegion {
                 self.page,
                 self.dimensions,
                 &self.coverage_sha256,
-                &self.mask_sha256,
+                self.association_mask_sha256
+                    .as_ref()
+                    .unwrap_or(&self.mask_sha256),
             ))?,
         ))
     }
@@ -336,10 +342,38 @@ impl InstalledRegion {
                 && self.geometry.components.len() == 1
                 && valid_digest(&self.mask_sha256)
                 && valid_digest(&self.coverage_sha256)
+                && self
+                    .association_mask_sha256
+                    .as_deref()
+                    .is_none_or(valid_digest)
                 && self.id == self.identity()?,
             "invalid installed region identity"
         );
         Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn same_footprint(&self, other: &Self) -> bool {
+        self.document == other.document
+            && self.page == other.page
+            && self.dimensions == other.dimensions
+            && self.coverage_sha256 == other.coverage_sha256
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn retain_association(&mut self, previous: &Self) -> Result<()> {
+        ensure!(
+            self.same_footprint(previous),
+            "different installed region footprint"
+        );
+        let initial_mask = previous
+            .association_mask_sha256
+            .as_ref()
+            .unwrap_or(&previous.mask_sha256);
+        self.association_mask_sha256 =
+            (initial_mask != &self.mask_sha256).then(|| initial_mask.clone());
+        self.id = previous.id;
+        self.validate()
     }
 
     pub(crate) fn scope(&self) -> String {

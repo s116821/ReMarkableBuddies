@@ -1,4 +1,4 @@
-//! Check for competing installed or historical region exports before writing.
+//! Resolve one existing ordinary export for an exact installed footprint.
 use super::{Ledger, Namespace, Record, RegionSource, TargetUse, Uuid};
 use crate::conversation::{
     target::{Action, InstalledRegion},
@@ -8,7 +8,10 @@ use anyhow::{ensure, Context, Result};
 use std::collections::BTreeSet;
 
 impl Ledger {
-    pub(crate) fn installed_region_conflict(&self, current: &InstalledRegion) -> Result<bool> {
+    pub(crate) fn installed_region_association(
+        &self,
+        current: &InstalledRegion,
+    ) -> Result<Option<InstalledRegion>> {
         let stable = format!(
             "normalized-document:{}:installed-region:{}:",
             current.document, current.page,
@@ -36,6 +39,7 @@ impl Ledger {
                 anyhow::bail!("unexpected regional export record");
             };
             if matches!(export.outcome, Outcome::Canceled | Outcome::Failed)
+                && export.native_note.is_none()
                 && export.attempt.is_some_and(|attempt| attempt.no_send)
             {
                 continue;
@@ -46,7 +50,7 @@ impl Ledger {
                     .capacities
                     .map_or(export.id, |attempt| attempt.correlation);
                 // A deliberately separate save does not own the normal correlation.
-                if id != current.id && correlation == InstalledRegion::correlation(id) {
+                if correlation == InstalledRegion::correlation(id) {
                     installed.insert((export.conversation, id));
                 }
             } else if let Some(id) = export.source_scope.strip_prefix(&legacy) {
@@ -55,7 +59,7 @@ impl Ledger {
         }
 
         if installed.is_empty() && historical.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let (unavailable, heads) =
             self.store
@@ -74,6 +78,7 @@ impl Ledger {
         ensure!(unavailable == 0, "regional export provenance unavailable");
         let mut installed_proven = BTreeSet::new();
         let mut historical_proven = BTreeSet::new();
+        let mut matched: Option<(Uuid, InstalledRegion)> = None;
         records.clear();
         for head in heads {
             ensure!(
@@ -87,23 +92,42 @@ impl Ledger {
             if let Some(prior) = &source.installed_region {
                 let key = (source.conversation, prior.id);
                 if installed.contains(&key) {
-                    if prior.dimensions != current.dimensions
-                        || current.geometry.overlaps(&prior.geometry)?
-                    {
-                        return Ok(true);
+                    if current.same_footprint(prior) {
+                        // Content is versioned by the draft. The backend note
+                        // still belongs to the exact same captured footprint.
+                        ensure!(
+                            matched.as_ref().is_none_or(|(owner, same)| {
+                                *owner == source.conversation && same.id == prior.id
+                            }),
+                            "multiple ordinary notes occupy the exact footprint"
+                        );
+                        if matched.is_none() {
+                            matched = Some((source.conversation, prior.clone()));
+                        }
+                    } else {
+                        ensure!(
+                            prior.dimensions == current.dimensions
+                                && !current.geometry.overlaps(&prior.geometry)?,
+                            "a different installed region may overlap this selection"
+                        );
                     }
                     installed_proven.insert(key);
                 }
             }
             let key = (source.conversation, source.target.record);
             if historical.contains(&key) {
-                if self.historical_region_may_overlap(&source, current)? {
-                    return Ok(true);
-                }
+                ensure!(
+                    !self.historical_region_may_overlap(&source, current)?,
+                    "a historical export may overlap this selection"
+                );
                 historical_proven.insert(key);
             }
         }
-        Ok(installed != installed_proven || historical != historical_proven)
+        ensure!(
+            installed == installed_proven && historical == historical_proven,
+            "regional export provenance unavailable"
+        );
+        Ok(matched.map(|(_, region)| region))
     }
 
     fn historical_region_may_overlap(

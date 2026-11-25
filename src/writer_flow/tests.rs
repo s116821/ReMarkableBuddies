@@ -199,6 +199,15 @@ impl Destination {
     pub(crate) fn remote_note_count(&self) -> usize {
         self.0.lock().unwrap().notes.len()
     }
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn remote_note_content(&self, id: &str) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .notes
+            .get(id)
+            .map(|note| note.content.clone())
+    }
     fn write(
         &self,
         id: &str,
