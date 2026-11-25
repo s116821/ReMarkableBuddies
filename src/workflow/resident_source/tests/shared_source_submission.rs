@@ -1863,6 +1863,19 @@ impl crate::LLMEngine for PageFirstModel {
                 let body = format!("ReMarkableBuddies\n\nQ: {QUESTION}\n\nA: \n");
                 let available = 512 - body.len();
                 assert!(instructions.contains(&format!("at most {available} ASCII characters")));
+                let center = crate::analysis::SelectionCenter::from_pixels(385.0, 230.0, 768, 1024)
+                    .expect("fixture center");
+                let output = |answer| ResidentOutputText::Reader {
+                    question: QUESTION,
+                    answer,
+                    center,
+                    about: None,
+                };
+                let fits = super::super::super::resident_output::development::fits_test_keyboard;
+                let exact_fit = "x".repeat(available);
+                let oversized = format!("{exact_fit}x");
+                assert!(fits(output(&exact_fit), true));
+                assert!(!fits(output(&oversized), true));
             } else {
                 assert!(!instructions.contains("The tablet has room for at most"));
             }

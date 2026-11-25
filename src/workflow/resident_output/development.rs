@@ -1283,7 +1283,10 @@ pub(in crate::workflow) fn new_unified_ascii_answer_space(
     if display != DisplayFormat::Unified {
         return None;
     }
-    let body = display.text_for_keyboard(true, empty_answer, str::is_ascii)?;
+    let body = display.text_for_keyboard(true, empty_answer, |text| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\t' | b'\n'))
+    })?;
     let space = KEYBOARD_MAX_CHARACTERS - body.len();
     (space > 0).then_some(space)
 }
