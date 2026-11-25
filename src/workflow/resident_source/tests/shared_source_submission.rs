@@ -55,6 +55,7 @@ enum Submission {
     BoundHistory,
     Circled(Circled),
     WholeNotebook,
+    SaveNotebook(Save),
     Save(Save),
 }
 
@@ -139,6 +140,54 @@ impl crate::LLMEngine for SubmissionModel {
     fn execute(&mut self) -> Result<String> {
         let step = self.steps.get();
         self.steps.set(step + 1);
+        if let Submission::SaveNotebook(save) = self.submission {
+            let request = if save == Save::Separate {
+                "Save a separate note from this entire notebook."
+            } else {
+                "Save a note from this entire notebook."
+            };
+            return match step {
+                0 => {
+                    assert_eq!(self.images.len(), 1);
+                    assert!(self.text[0].contains("writer-export-whole-notebook"));
+                    Ok(serde_json::json!({
+                        "intent": "writer-export-whole-notebook",
+                        "request": request,
+                        "separate_note": save == Save::Separate,
+                    })
+                    .to_string())
+                }
+                1 => {
+                    assert_eq!(self.images.len(), 2);
+                    assert!(self
+                        .text
+                        .iter()
+                        .any(|text| text.contains("writer-notebook-page-evidence-v1")));
+                    Ok(serde_json::json!({
+                        "pages": [
+                            {"page":1,"status":"readable","writing":"First page.","visual_observation":""},
+                            {"page":2,"status":"readable","writing":"Last page.","visual_observation":""}
+                        ]
+                    })
+                    .to_string())
+                }
+                2 => {
+                    assert!(self.images.is_empty());
+                    let prompt = self.text.join("\n");
+                    assert!(prompt.contains("First page."));
+                    assert!(prompt.contains("Last page."));
+                    Ok("The notebook records examples on both original pages.".into())
+                }
+                3 => {
+                    assert!(self.images.is_empty());
+                    Ok(format!(
+                        "# Notebook note\n\nThe first and last pages each give an example. {}",
+                        self.last_visible_text.as_deref().unwrap()
+                    ))
+                }
+                _ => panic!("unexpected whole-notebook Writer stage"),
+            };
+        }
         match (step, self.submission.expects_writer_output()) {
             (0, writer) => {
                 let [image] = self.images.as_slice() else {
@@ -358,6 +407,157 @@ fn seed_history(
         },
     )?;
     Ok(latest)
+}
+
+#[test]
+fn installed_notebook_save_reuses_one_external_note_across_original_pages() -> Result<()> {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+
+    let base = std::env::temp_dir().join(format!("notebook-save-{}", ConversationId::new_v4()));
+    let root = base.join("xochitl");
+    let templates = base.join("templates");
+    let document = ConversationId::new_v4();
+    let pages = [ConversationId::new_v4(), ConversationId::new_v4()];
+    let saved_pages = root.join(document.to_string());
+    for path in [&base, &root, &templates, &saved_pages] {
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    let private_write = |path: PathBuf, bytes: &[u8]| -> Result<()> {
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(bytes)?;
+        Ok(())
+    };
+    let rows: Vec<_> = pages
+        .iter()
+        .zip(["a", "b"])
+        .map(|(page, idx)| {
+            serde_json::json!({
+                "id": page, "idx": {"value": idx}, "template": {"value": "Blank"},
+            })
+        })
+        .collect();
+    private_write(
+        root.join(format!("{document}.content")),
+        &serde_json::to_vec(&serde_json::json!({
+            "fileType":"notebook", "formatVersion":2, "pageCount":2,
+            "orientation":"portrait",
+            "cPages":{"pages":rows,"lastOpened":{"value":pages[0]}},
+        }))?,
+    )?;
+    private_write(
+        templates.join("templates.json"),
+        br#"{"templates":[{"filename":"Blank","name":"Blank"}]}"#,
+    )?;
+    private_write(
+        templates.join("Blank.svg"),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1404 1872"><rect width="100%" height="100%" fill="#fff"/></svg>"##,
+    )?;
+    for page in pages {
+        private_write(
+            saved_pages.join(format!("{page}.rm")),
+            include_bytes!("../../../../tests/fixtures/notebook-ink/pens-small.rm"),
+        )?;
+    }
+
+    let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+        "paths": StorePaths {
+            data: base.join("data"),
+            cache: base.join("cache"),
+            credentials: base.join("credentials"),
+        },
+        "product_settings": {
+            "reader_enabled": true,
+            "writer_enabled": true,
+            "export_destination": "mem"
+        }
+    }))?;
+    drop(Store::open(config.paths.clone())?);
+    let store = Arc::new(Store::prepare_notebook(config.paths.clone())?);
+    let ledger = Ledger::new(store.clone());
+    let mut dispatch =
+        Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
+    let destination = Arc::new(crate::writer_flow::tests::Destination::default());
+    dispatch.test_note_destination = Some(destination.clone());
+
+    for (index, (save, writes, notes)) in [
+        (Save::Explicit, 1, 1),
+        (Save::Update, 2, 1),
+        (Save::Separate, 3, 2),
+        (Save::Explicit, 4, 2),
+        (Save::Update, 4, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mode = "reconnect-source-handoff-text-refusal";
+        let (mut workflow, events, _notify) =
+            workflow_with_store(mode, vec![], Duration::ZERO, &store);
+        let native = Fixture::new();
+        native.declare_source(document, pages[index % 2]);
+        native.declare_source_order(&pages);
+        let position = native.successor_position();
+        let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
+        let owner = workflow.resident_source.as_mut().unwrap();
+        owner.selection = InstalledReaderSelection::fixture_for_installed_output(
+            &base.join(format!("profile-{index}")),
+            runtime.identity(),
+        )?;
+        owner.session = Some(Box::new(OwnedSession {
+            runtime,
+            _fixture: native,
+            events: events.clone(),
+            delivery_fault: false,
+            observe_file_change: None,
+            writer_slot: None,
+            writer_slot_fault: false,
+            refinement_slot: None,
+        }));
+        workflow.device = Box::new(
+            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
+                .with_test_output(Box::new(RecognitionProbe {
+                    refuse_writer_text: true,
+                    ..RecognitionProbe::default()
+                })),
+        );
+        let steps = Rc::new(Cell::new(0));
+        let model = SubmissionModel {
+            submission: Submission::SaveNotebook(save),
+            last_visible_text: Some(format!("Draft revision {}.", index + 1)),
+            steps: steps.clone(),
+            source: Rc::new(RefCell::new(None)),
+            images: vec![],
+            text: vec![],
+        };
+        if index == 3 {
+            destination.lose_next_ack();
+        }
+        assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
+        let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+        let result =
+            super::original_pdf::saved_notebook::with_fixture_paths(&root, &templates, || {
+                service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config))
+            });
+        let refusal = result.unwrap_err();
+        assert!(
+            refusal.to_string().contains("Writer draft cannot be typed"),
+            "{refusal:#}"
+        );
+        assert_eq!(steps.get(), 4);
+        assert!(!position.exists());
+        assert!(!events.borrow().contains(&"insert"));
+        assert_eq!(destination.counts().2, writes);
+        assert_eq!(destination.remote_note_count(), notes);
+    }
+    fs::remove_dir_all(base)?;
+    Ok(())
 }
 
 #[test]

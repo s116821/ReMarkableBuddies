@@ -2,8 +2,8 @@
 use super::{Dispatch, Orchestrator, Workflow};
 use crate::{
     conversation::{
-        ExpectedHeads, HistoricalPageAssociation, Mode, Outcome, PreparedResidentCapture,
-        ResidentSourceCapture, Role, TextScope, Turn,
+        ExpectedHeads, HistoricalPageAssociation, Ledger, Mode, Outcome, PreparedResidentCapture,
+        ResidentSourceCapture, Role, TextScope, Turn, WriterSelection,
     },
     llm::LLMEngine,
     retrieval::notebook::{self, Normalized, TranscriptionPolicy},
@@ -14,13 +14,62 @@ use anyhow::{ensure, Context, Result};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) enum NoteExport {
-    CurrentPage,
+    Update,
     Separate,
+}
+
+impl NoteExport {
+    pub(super) fn from_separate(separate: bool) -> Self {
+        if separate {
+            Self::Separate
+        } else {
+            Self::Update
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NoteScope {
+    Page,
+    Notebook,
+}
+
+impl NoteScope {
+    fn conversation(self, capture: &ResidentSourceCapture) -> Uuid {
+        match self {
+            Self::Page => source_conversation(capture),
+            Self::Notebook => writer::stage(capture.document(), "whole-notebook-conversation"),
+        }
+    }
+
+    fn correlation(self, capture: &ResidentSourceCapture) -> Uuid {
+        match self {
+            Self::Page => source_note(capture),
+            Self::Notebook => writer::stage(capture.document(), "whole-notebook-note"),
+        }
+    }
+
+    fn separate(self, operation: Uuid) -> Uuid {
+        writer::stage(
+            operation,
+            match self {
+                Self::Page => "separate-current-page-note",
+                Self::Notebook => "separate-whole-notebook-note",
+            },
+        )
+    }
+}
+
+pub(super) struct ResidentSave<'a> {
+    pub(super) capture: &'a ResidentSourceCapture,
+    pub(super) operation: Uuid,
+    pub(super) scope: NoteScope,
+    pub(super) export: NoteExport,
 }
 
 pub(super) enum WriterCapture<'a> {
     Draft,
-    Save,
+    Save(NoteScope),
     Clarification(&'a str),
 }
 
@@ -78,7 +127,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             operation,
             writer::stage(operation, "source-capture"),
             if export.is_some() {
-                WriterCapture::Save
+                WriterCapture::Save(NoteScope::Page)
             } else {
                 WriterCapture::Draft
             },
@@ -172,8 +221,17 @@ impl<M: LLMEngine> Orchestrator<M> {
         if let Some(export) = export {
             drop(owner);
             let selected = produced.context("fresh Writer selection unavailable")?;
-            let (selected, result) = self.export_resident_page_draft(
-                dispatch, capture, operation, selected, deadline, export,
+            let (selected, result) = self.export_resident_draft(
+                dispatch,
+                ResidentSave {
+                    capture,
+                    operation,
+                    scope: NoteScope::Page,
+                    export,
+                },
+                selected,
+                deadline,
+                |_, _| Ok(()),
             )?;
             self.present_resident_writer_result(
                 conversation,
@@ -225,15 +283,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         )
     }
 
-    fn export_resident_page_draft(
+    pub(super) fn export_resident_draft(
         &mut self,
         dispatch: &Dispatch<'_>,
-        capture: &ResidentSourceCapture,
-        operation: Uuid,
-        selected: crate::conversation::WriterSelection,
+        save: ResidentSave<'_>,
+        selected: WriterSelection,
         deadline: Instant,
-        export: NoteExport,
-    ) -> Result<(crate::conversation::WriterSelection, &'static str)> {
+        check_saved_source: impl FnMut(&mut Workflow, &Ledger) -> Result<()>,
+    ) -> Result<(WriterSelection, &'static str)> {
         use crate::note_export::dispatch::ConfiguredDestination;
         let config = dispatch.config;
         if !dispatch.admits(Mode::Writer, true) {
@@ -242,15 +299,14 @@ impl<M: LLMEngine> Orchestrator<M> {
         let saved = config.saved_revision();
         #[cfg(test)]
         if let Some(destination) = &dispatch.test_note_destination {
-            return self.export_page_to_destination(
-                capture,
-                operation,
+            return self.export_to_destination(
+                save,
                 selected,
                 deadline,
-                export,
                 config,
                 saved.as_ref(),
                 &crate::note_export::dispatch::LegacyDestination(destination.as_ref()),
+                check_saved_source,
             );
         }
         let destination = match ConfiguredDestination::selected(
@@ -266,94 +322,85 @@ impl<M: LLMEngine> Orchestrator<M> {
                 ))
             }
         };
-        self.export_page_to_destination(
-            capture,
-            operation,
+        self.export_to_destination(
+            save,
             selected,
             deadline,
-            export,
             config,
             saved.as_ref(),
             &destination,
+            check_saved_source,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn export_page_to_destination(
+    fn export_to_destination(
         &mut self,
-        capture: &ResidentSourceCapture,
-        operation: Uuid,
-        selected: crate::conversation::WriterSelection,
+        save: ResidentSave<'_>,
+        selected: WriterSelection,
         deadline: Instant,
-        export: NoteExport,
         config: &crate::config::Config,
         saved: Option<&crate::config::SavedRevision>,
         destination: &impl crate::note_export::dispatch::OwnedDestination,
-    ) -> Result<(crate::conversation::WriterSelection, &'static str)> {
+        mut check_saved_source: impl FnMut(&mut Workflow, &Ledger) -> Result<()>,
+    ) -> Result<(WriterSelection, &'static str)> {
         use crate::writer_flow::{Phase, Request, Status};
 
-        let ledger = crate::conversation::Ledger::new(self.ledger.store().clone());
-        let (draft, source) = selected.values()?;
+        let ledger = Ledger::new(self.ledger.store().clone());
+        let draft = selected.draft_value()?;
         let conversation = draft.conversation;
-        let current_page_save = matches!(export, NoteExport::CurrentPage);
-        let correlation = match export {
-            NoteExport::CurrentPage => {
-                let current = source_note(capture);
-                if ledger
-                    .correlated_export_owner(current)?
-                    .is_some_and(|owner| owner != conversation)
-                {
-                    return Ok((selected, "Draft saved. An earlier save is linked to another conversation. Check that export before retrying."));
+        let current = save.scope.correlation(save.capture);
+        let updating = matches!(save.export, NoteExport::Update);
+        let correlation = if updating {
+            if ledger
+                .correlated_export_owner(current)?
+                .is_some_and(|owner| owner != conversation)
+            {
+                return Ok((selected, "Draft saved. An earlier save is linked to another conversation. Check that export before retrying."));
+            }
+            match save.scope {
+                NoteScope::Page => {
+                    legacy_page_correlation(&ledger, destination, &selected, conversation, current)?
                 }
-                let original = writer::stage(conversation, "current-page-note");
-                let legacy = if original == current {
-                    None
-                } else {
-                    ledger.export_association(
-                        conversation,
-                        destination.association_id(conversation, original),
-                    )?
-                };
-                if let Some(prior) = legacy {
-                    ensure!(
-                        prior.backend == destination.backend()
-                            && prior.source_scope == source.scope()
-                            && ledger
-                                .export_association(
-                                    conversation,
-                                    destination.association_id(conversation, current)
-                                )?
-                                .is_none(),
-                        "Conflicting prior source-page exports"
-                    );
-                    original
-                } else {
+                NoteScope::Notebook => {
+                    let association = destination.association_id(conversation, current);
+                    if ledger
+                        .original_exports(conversation, current)?
+                        .iter()
+                        .any(|old| old.id != association || old.backend != destination.backend())
+                    {
+                        return Ok((selected, "Draft saved. An earlier save used a different destination. Check that export before retrying."));
+                    }
                     current
                 }
             }
-            NoteExport::Separate => writer::stage(operation, "separate-current-page-note"),
+        } else {
+            save.scope.separate(save.operation)
         };
         let request = Request::ExportDraft {
             conversation,
             draft: draft.id,
             correlation,
-            outer_operation: writer::stage(operation, "save-note"),
-            effect_operation: writer::stage(operation, "save-note-effect"),
+            outer_operation: writer::stage(save.operation, "save-note"),
+            effect_operation: writer::stage(save.operation, "save-note-effect"),
         };
         let preference = config.personalization_snapshot()?;
         let check = |phase| -> Result<()> {
             self.require_same_resident_source(deadline)?;
+            if matches!(phase, Phase::BeforeExportAdmission | Phase::BeforeWritePoll) {
+                check_saved_source(&mut self.workflow, &ledger)?;
+            }
             if phase == Phase::BeforeAdmission {
                 ensure!(
                     ledger.expected(Namespace::Conversation, conversation)? == selected.root,
                     "Writer draft changed before export"
                 );
-                if current_page_save {
+                if updating {
                     ensure!(
                         ledger
-                            .correlated_export_owner(source_note(capture))?
+                            .correlated_export_owner(current)?
                             .is_none_or(|owner| owner == conversation),
-                        "Source-page export owner changed"
+                        "Note export owner changed"
                     );
                 }
             }
@@ -414,7 +461,11 @@ impl<M: LLMEngine> Orchestrator<M> {
             );
             match purpose {
                 WriterCapture::Draft => writer::stage(operation, "conversation"),
-                WriterCapture::Save | WriterCapture::Clarification(_) => self
+                WriterCapture::Save(scope) => self
+                    .ledger
+                    .correlated_export_owner(scope.correlation(capture))?
+                    .unwrap_or_else(|| scope.conversation(capture)),
+                WriterCapture::Clarification(_) => self
                     .ledger
                     .correlated_export_owner(source_note(capture))?
                     .unwrap_or_else(|| source_conversation(capture)),
@@ -479,7 +530,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     (request, EXPORT_CLARIFICATION),
                 )?
             }
-            WriterCapture::Draft | WriterCapture::Save => {
+            WriterCapture::Draft | WriterCapture::Save(_) => {
                 self.ledger.prepare_resident_historical_with_receipt(
                     admission, expected, turn, evidence, capture,
                 )?
@@ -504,6 +555,39 @@ impl<M: LLMEngine> Orchestrator<M> {
     pub(super) fn require_same_resident_source(&mut self, deadline: Instant) -> Result<()> {
         require_same_resident_source(&mut self.workflow, deadline)
     }
+}
+
+fn legacy_page_correlation(
+    ledger: &Ledger,
+    destination: &impl crate::note_export::dispatch::OwnedDestination,
+    selected: &WriterSelection,
+    conversation: Uuid,
+    current: Uuid,
+) -> Result<Uuid> {
+    let original = writer::stage(conversation, "current-page-note");
+    if original == current {
+        return Ok(current);
+    }
+    let Some(prior) = ledger.export_association(
+        conversation,
+        destination.association_id(conversation, original),
+    )?
+    else {
+        return Ok(current);
+    };
+    let (_, source) = selected.values()?;
+    ensure!(
+        prior.backend == destination.backend()
+            && prior.source_scope == source.scope()
+            && ledger
+                .export_association(
+                    conversation,
+                    destination.association_id(conversation, current),
+                )?
+                .is_none(),
+        "Conflicting prior source-page exports"
+    );
+    Ok(original)
 }
 
 pub(super) fn require_same_resident_source(

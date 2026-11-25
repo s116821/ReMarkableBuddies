@@ -94,7 +94,10 @@ if declared_source.is_file():
 else:
     source_document, source_page = uuid.uuid4().bytes, uuid.uuid4().bytes
 source_order = [source_page]
-if mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-source-handoff-text-refusal"):
+declared_order = root.parent / "declared-source-order.json"
+if declared_order.is_file():
+    source_order = [uuid.UUID(value).bytes for value in json.loads(declared_order.read_text())]
+elif mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-source-handoff-text-refusal"):
     source_order.append(uuid.uuid4().bytes)
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)

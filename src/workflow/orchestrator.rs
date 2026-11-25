@@ -350,11 +350,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                         separate_note,
                     } => {
                         use current_page_writer::NoteExport;
-                        let export = if separate_note {
-                            NoteExport::Separate
-                        } else {
-                            NoteExport::CurrentPage
-                        };
+                        let export = NoteExport::from_separate(separate_note);
                         return self.run_resident_current_page_writer(
                             request,
                             capture,
@@ -370,7 +366,20 @@ impl<M: LLMEngine> Orchestrator<M> {
                             .run_resident_circled_writer(request, target, capture, dispatch);
                     }
                     SourceIntent::WriterWholeNotebook { request } => {
-                        return self.run_resident_whole_notebook_writer(request, capture, dispatch);
+                        return self
+                            .run_resident_whole_notebook_writer(request, capture, dispatch, None);
+                    }
+                    SourceIntent::WriterExportWholeNotebook {
+                        request,
+                        separate_note,
+                    } => {
+                        use current_page_writer::NoteExport;
+                        return self.run_resident_whole_notebook_writer(
+                            request,
+                            capture,
+                            dispatch,
+                            Some(NoteExport::from_separate(separate_note)),
+                        );
                     }
                     SourceIntent::Unresolved => {
                         self.workflow.report_failure(Failure::Selection)?;
@@ -722,7 +731,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         use anyhow::Context;
 
         let selected = produced.context("fresh Writer selection unavailable")?;
-        let (draft, source) = selected.values()?;
+        let (draft, document) = selected.presentation()?;
         // A refinement reuses the note's original source. Its request belongs to
         // the new draft's exchange, even when several drafts share that source.
         let user = self
@@ -736,7 +745,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             "Writer request does not precede the selected draft in its exchange"
         );
         anyhow::ensure!(
-            source.document.document == capture.document()
+            document == capture.document()
                 && self
                     .ledger
                     .expected(Namespace::Conversation, conversation)?

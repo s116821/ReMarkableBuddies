@@ -28,6 +28,15 @@ impl Fixture {
         .unwrap();
     }
     #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn declare_source_order(&self, pages: &[StoreUuid]) {
+        fs::write(
+            self.0.join("declared-source-order.json"),
+            serde_json::to_vec(pages).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "installed-resident-output")]
     pub(crate) fn ordinary_pdf_order_change(&self) -> PathBuf {
         self.0.join("ordinary-pdf-order-change")
     }

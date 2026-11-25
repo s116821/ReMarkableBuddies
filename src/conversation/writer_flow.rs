@@ -152,7 +152,18 @@ impl WriterSelection {
         )?;
         Ok((draft, *source, *plan))
     }
-    fn draft_value(&self) -> Result<Turn> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn presentation(&self) -> Result<(Turn, Uuid)> {
+        if self.notebook.is_some() {
+            let (draft, source, _) = self.notebook_values()?;
+            Ok((draft, source.document))
+        } else {
+            let (draft, source) = self.values()?;
+            Ok((draft, source.document.document))
+        }
+    }
+
+    pub(crate) fn draft_value(&self) -> Result<Turn> {
         if self.notebook.is_some() {
             Ok(self.notebook_values()?.0)
         } else {
