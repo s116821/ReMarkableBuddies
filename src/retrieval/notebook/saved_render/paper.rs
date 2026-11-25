@@ -23,8 +23,10 @@ pub(super) fn is_patterned(svg: Option<&[u8]>, png: Option<&[u8]>, height: u32) 
                     (None, None) => true,
                     (Some(svg), Some(png)) => svg
                         .rgba
-                        .chunks_exact(4)
-                        .zip(png.rgba.chunks_exact(4))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .zip(png.rgba.as_chunks::<4>().0)
                         .all(|(left, right)| over_white(left) == over_white(right)),
                     _ => false,
                 },
@@ -224,18 +226,19 @@ fn extent(value: Option<&str>, limit: f32) -> Result<f32> {
     }
 }
 
-fn over_white(pixel: &[u8]) -> [u16; 3] {
+fn over_white(pixel: &[u8; 4]) -> [u16; 3] {
     let clear = u16::from(u8::MAX - pixel[3]);
     std::array::from_fn(|i| u16::from(pixel[i]) + clear)
 }
 
 fn patterned(image: BackgroundImage) -> Result<Option<BackgroundImage>> {
-    let is_white = |pixel: &[u8]| over_white(pixel) == [255; 3];
+    let pixels = image.rgba.as_chunks::<4>().0;
+    let is_white = |pixel: &[u8; 4]| over_white(pixel) == [255; 3];
     ensure!(
-        image.rgba.chunks_exact(4).any(is_white),
+        pixels.iter().any(is_white),
         "saved stock paper lacks a white base"
     );
-    Ok(if image.rgba.chunks_exact(4).all(is_white) {
+    Ok(if pixels.iter().all(is_white) {
         None
     } else {
         Some(image)
