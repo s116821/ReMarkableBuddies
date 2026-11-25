@@ -179,5 +179,87 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
     };
     assert!(shown.contains(question));
     assert!(shown.contains(&format!("[S1] Document {document}, book/experiment.xhtml")));
+    drop(scope);
+    check_marked_book_without_search(executable, &fixture.0, document, page)
+}
+
+fn check_marked_book_without_search(
+    executable: &std::path::Path,
+    library: &std::path::Path,
+    document: Uuid,
+    page: Uuid,
+) -> Result<()> {
+    use crate::conversation::{receiving::memory::research::ResearchRefusal, Outcome};
+
+    let question = "Beta velocity? which measure";
+    let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let scope = researched_fixture::Scope::new(None, false);
+    let mut model = Scripted::new(Reading::Clear, true, false, Events::default());
+    model.ordinary_pdf_questions = vec![question];
+    model.mark_ordinary_pdf_question = true;
+    let frames = model.frames.clone();
+    let (mut results, records) = crate::workflow::ordinary_pdf_receiver_fixture(
+        document,
+        page,
+        library.into(),
+        executable.into(),
+        crate::workflow::OrdinaryPdfFixtureRounds {
+            epub: true,
+            rendered: Some(rendered.clone()),
+            source_targets: true,
+            count: 1,
+            before_round: None,
+        },
+        |ledger, _, _| {
+            // Remove only the synthetic fixture credential. The real search
+            // selector must report unavailability before a transport is built.
+            fs::remove_file(ledger.store().paths.credentials.join("fixture_model_key"))
+                .expect("remove the synthetic web credential");
+            model
+        },
+        |ledger, records| {
+            let conversation = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::Turn(turn) if turn.role == Role::User => Some(turn.conversation),
+                    _ => None,
+                })
+                .context("Saved marked EPUB question absent")?;
+            let validated = ledger.inspect(conversation, false)?;
+            ensure!(
+                validated.iter().any(|record| matches!(record,
+                    Record::Receipt(receipt) if receipt.marked_question.is_some()
+                )),
+                "Marked EPUB receipt absent"
+            );
+            Ok(())
+        },
+    )?;
+    let error = results
+        .pop()
+        .context("Marked EPUB result absent")?
+        .expect_err("Required web research unexpectedly answered");
+    assert!(error.is::<ResearchRefusal>(), "{error:#}");
+    assert_eq!(scope.constructions(), 0);
+    assert_eq!(scope.ordinary_pdf_workers().len(), 1);
+    assert_eq!(frames.lock().unwrap().len(), 2);
+    assert_eq!(*rendered.borrow(), [format!("Q: {question}\n")]);
+    assert!(records.iter().any(|record| matches!(record,
+        Record::Turn(turn) if turn.role == Role::User && turn.outcome == Outcome::Failed
+            && turn.text.as_deref() == Some(question)
+    )));
+    assert!(!records.iter().any(|record| matches!(record,
+        Record::Turn(turn) if turn.role == Role::Assistant
+    )));
+    let evidence = records
+        .iter()
+        .find_map(|record| match record {
+            Record::RequestEvidence(evidence) => Some(evidence),
+            _ => None,
+        })
+        .context("Marked EPUB retrieval evidence absent")?;
+    let frame: Value = serde_json::from_str(&evidence.frame_json)?;
+    assert_eq!(frame["retrieval"]["source"]["format"], "epub");
+    assert_eq!(frame["retrieval"]["source"]["document"], json!(document));
     Ok(())
 }

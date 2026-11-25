@@ -209,8 +209,6 @@ fn installed_reader_uses_only_its_notebook_and_global_memory_after_transcription
         Case::Disabled,
         Case::Unavailable,
         Case::StaleRequest,
-        Case::MarkedOnly,
-        Case::MarkedUnavailable,
     ] {
         check_captured_page(case)
             .with_context(|| format!("Captured notebook Reader case {case:?}"))?;
@@ -219,6 +217,15 @@ fn installed_reader_uses_only_its_notebook_and_global_memory_after_transcription
         .context("Reader on an adjacent and current bound page")?;
     check_bound_reader_page(BoundStart::Legacy).context("Reader with a legacy original capture")?;
     check_bound_reader_page(BoundStart::Blank).context("Reader after blank start")
+}
+
+#[test]
+fn installed_marked_notebook_question_is_saved_and_shown_without_an_answer() -> Result<()> {
+    for case in [Case::MarkedOnly, Case::MarkedUnavailable] {
+        check_captured_page(case)
+            .with_context(|| format!("Installed marked notebook Reader case {case:?}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

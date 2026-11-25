@@ -654,7 +654,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             Ok(answer) => answer,
             Err(error)
                 if error.is::<crate::llm::ProviderRefused>()
-                    || (source.book.is_none()
+                    || ((source.book.is_none() || marked)
                         && matches!(
                             error.downcast_ref::<ResearchRefusal>(),
                             Some(ResearchRefusal::Unavailable)
