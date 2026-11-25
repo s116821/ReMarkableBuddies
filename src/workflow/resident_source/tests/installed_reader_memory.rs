@@ -657,7 +657,7 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         writer_slot_fault: false,
         refinement_slot: None,
     }));
-    let sdk_id = |id: ConversationId| Uuid::from_bytes(*id.as_bytes());
+    let sdk_id = |id: ConversationId| Uuid::parse(&id.to_string()).unwrap();
     let facts = ReaderFacts::new(
         remarkable_open_sdk::PageKey {
             document: sdk_id(document),
