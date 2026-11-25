@@ -1,6 +1,8 @@
 //! Ordinary Writer generation for the circled target on a newly captured source page.
 use super::{
-    current_page_writer::{PreparedWriterCapture, WriterCapture},
+    current_page_writer::{
+        NoteExport, NoteScope, PreparedWriterCapture, ResidentSave, WriterCapture,
+    },
     Dispatch, Orchestrator,
 };
 use crate::{
@@ -19,6 +21,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         candidate: target::Candidate,
         capture: &ResidentSourceCapture,
         dispatch: &Dispatch<'_>,
+        export: Option<NoteExport>,
     ) -> Result<()> {
         dispatch.require_ledger(&self.ledger)?;
         writer::validate_request(&request)?;
@@ -30,6 +33,16 @@ impl<M: LLMEngine> Orchestrator<M> {
         let (capture_operation, _) = capture.writer_page_input()?;
         let operation = writer::stage(capture_operation, "circled");
         let user_id = writer::stage(operation, "user");
+        let region = export
+            .as_ref()
+            .map(|_| {
+                let geometry = candidate
+                    .geometry
+                    .clone()
+                    .context("circled geometry absent")?;
+                capture.installed_region(geometry, &mut || self.workflow.check_request_progress())
+            })
+            .transpose()?;
         let store = self.ledger.store().clone();
         let owner = writer::Owner::acquire(&store).context("Writer is already active")?;
 
@@ -43,7 +56,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             capture,
             operation,
             user_id,
-            WriterCapture::Draft,
+            region.as_ref().map_or(WriterCapture::Draft, |region| {
+                WriterCapture::Save(NoteScope::Region(region.region.id))
+            }),
         )?;
         let capture_id = retained.evidence.id;
         drop(retained);
@@ -95,6 +110,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 owner: &owner,
                 deadline,
                 accepted: Some(&user),
+                installed_region: region.as_ref(),
             },
             &mut produced,
         );
@@ -103,6 +119,50 @@ impl<M: LLMEngine> Orchestrator<M> {
             "circled Writer did not generate a fresh draft"
         );
         self.require_same_resident_source(deadline)?;
+        if let Some((export, prepared)) = export.zip(region) {
+            let region = prepared.region;
+            drop(owner);
+            let selected = produced.context("fresh regional Writer selection unavailable")?;
+            let updating = matches!(export, NoteExport::Update);
+            let (selected, result) = if updating
+                && self
+                    .ledger
+                    .installed_region_conflict(&region)
+                    .unwrap_or(true)
+            {
+                (
+                    selected,
+                    "Draft saved. I couldn't match this selection to an earlier save. Check the earlier note or ask for a separate one.",
+                )
+            } else {
+                self.export_resident_draft(
+                    dispatch,
+                    ResidentSave {
+                        capture,
+                        operation,
+                        scope: NoteScope::Region(region.id),
+                        export,
+                    },
+                    selected,
+                    deadline,
+                    |_, ledger| {
+                        ensure!(
+                            !updating || !ledger.installed_region_conflict(&region)?,
+                            "regional export overlap changed before writing"
+                        );
+                        Ok(())
+                    },
+                )?
+            };
+            return self.present_resident_writer_result(
+                conversation,
+                capture,
+                association.as_ref(),
+                Some(selected),
+                true,
+                Some(result),
+            );
+        }
         self.present_resident_writer_draft(
             conversation,
             capture,

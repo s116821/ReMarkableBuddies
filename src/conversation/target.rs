@@ -270,6 +270,91 @@ impl TargetState {
         reference(&self.use_reference, Namespace::Conversation)
     }
 }
+/// Exact identity for an ordinary installed save. Historical target records
+/// remain the provenance of the draft and retain their existing export scope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledRegion {
+    pub(crate) id: Uuid,
+    pub(crate) document: Uuid,
+    pub(crate) page: Uuid,
+    pub(crate) dimensions: [u32; 2],
+    pub(crate) geometry: geometry::Geometry,
+    pub(crate) mask_sha256: String,
+    pub(crate) coverage_sha256: String,
+}
+
+pub(crate) struct InstalledRegionCapture {
+    pub(crate) region: InstalledRegion,
+    pub(crate) original_sha256: String,
+    pub(crate) masked: Vec<u8>,
+}
+
+impl InstalledRegion {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn new(
+        document: Uuid,
+        page: Uuid,
+        dimensions: [u32; 2],
+        geometry: geometry::Geometry,
+        mask_sha256: String,
+        coverage_sha256: String,
+    ) -> Result<Self> {
+        let mut region = Self {
+            id: Uuid::nil(),
+            document,
+            page,
+            dimensions,
+            geometry,
+            mask_sha256,
+            coverage_sha256,
+        };
+        region.id = region.identity()?;
+        region.validate()?;
+        Ok(region)
+    }
+
+    fn identity(&self) -> Result<Uuid> {
+        Ok(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            &serde_json::to_vec(&(
+                "rmb-installed-region-v1",
+                self.document,
+                self.page,
+                self.dimensions,
+                &self.coverage_sha256,
+                &self.mask_sha256,
+            ))?,
+        ))
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.geometry.validate()?;
+        ensure!(
+            !self.document.is_nil()
+                && !self.page.is_nil()
+                && self.geometry.components.len() == 1
+                && valid_digest(&self.mask_sha256)
+                && valid_digest(&self.coverage_sha256)
+                && self.id == self.identity()?,
+            "invalid installed region identity"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn scope(&self) -> String {
+        format!(
+            "normalized-document:{}:installed-region:{}:{}",
+            self.document, self.page, self.id
+        )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn correlation(id: Uuid) -> Uuid {
+        crate::writer::stage(id, "installed-region-note")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RegionSource {
@@ -286,6 +371,8 @@ pub struct RegionSource {
     pub about: String,
     pub normalized: super::NormalizedTextSource,
     pub normalization_proof: NormalizationProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_region: Option<InstalledRegion>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -304,6 +391,15 @@ impl RegionSource {
         );
         reference(&self.target, Namespace::Source)?;
         self.normalized.validate()?;
+        if let Some(region) = &self.installed_region {
+            region.validate()?;
+            ensure!(
+                region.document == self.normalized.document.document
+                    && region.dimensions == self.dimensions
+                    && region.mask_sha256 == self.derived.sha256,
+                "installed region does not match its retained source"
+            );
+        }
         ensure!(
             self.id == self.normalized.id
                 && self.turn == self.normalized.turn

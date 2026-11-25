@@ -363,7 +363,21 @@ impl<M: LLMEngine> Orchestrator<M> {
                     }
                     SourceIntent::WriterCircled { request, target } => {
                         return self
-                            .run_resident_circled_writer(request, target, capture, dispatch);
+                            .run_resident_circled_writer(request, target, capture, dispatch, None);
+                    }
+                    SourceIntent::WriterExportCircled {
+                        request,
+                        target,
+                        separate_note,
+                    } => {
+                        use current_page_writer::NoteExport;
+                        return self.run_resident_circled_writer(
+                            request,
+                            target,
+                            capture,
+                            dispatch,
+                            Some(NoteExport::from_separate(separate_note)),
+                        );
                     }
                     SourceIntent::WriterWholeNotebook { request } => {
                         return self
@@ -680,6 +694,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 owner: &owner,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
                 accepted: None,
+                installed_region: None,
             },
             &mut produced,
         );

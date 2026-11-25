@@ -143,6 +143,7 @@ pub fn run<E: LLMEngine>(
             owner: &owner,
             deadline,
             accepted: None,
+            installed_region: None,
         },
         &mut produced,
     )
@@ -153,6 +154,7 @@ pub(crate) struct TargetRun<'a, 'store> {
     pub(crate) owner: &'a Owner<'store>,
     pub(crate) deadline: Instant,
     pub(crate) accepted: Option<&'a Turn>,
+    pub(crate) installed_region: Option<&'a target::InstalledRegionCapture>,
 }
 pub(crate) fn run_owned<E: LLMEngine>(
     ledger: &Ledger,
@@ -168,6 +170,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
         owner,
         deadline,
         accepted,
+        installed_region,
     } = context;
     if input.validate().is_err()
         || !config.admits_writer(false)
@@ -233,8 +236,18 @@ pub(crate) fn run_owned<E: LLMEngine>(
             );
             frame.check(ledger)
         };
-        let masked =
-            geometry.mask_png(frame.original(), frame.source().dimensions, &mut progress)?;
+        let masked = if let Some(prepared) = installed_region {
+            ensure!(
+                accepted.is_some()
+                    && &prepared.region.geometry == geometry
+                    && prepared.region.dimensions == frame.source().dimensions
+                    && prepared.original_sha256 == frame.source().original.sha256,
+                "installed save lacks its accepted regional source"
+            );
+            prepared.masked.clone()
+        } else {
+            geometry.mask_png(frame.original(), frame.source().dimensions, &mut progress)?
+        };
         let derived = crate::storage::Media {
             sha256: digest(&masked),
             bytes: masked.len() as u64,
@@ -330,6 +343,7 @@ pub(crate) fn run_owned<E: LLMEngine>(
             normalized_sha256: digest(&serde_json::to_vec(&document.units)?),
             about: target.candidate.about()?,
             normalized,
+            installed_region: installed_region.map(|prepared| prepared.region.clone()),
             normalization_proof: target::NormalizationProof {
                 profile: serde_json::to_value(&page.profile)?,
                 prompt_sha256: page.prompt_sha256.clone(),
@@ -928,6 +942,7 @@ mod proof_tests {
             normalization_profile: "fixture".into(),
             normalized_sha256: digest(&serde_json::to_vec(&normalized.document.units).unwrap()),
             about: "About: Original region".into(),
+            installed_region: None,
             normalization_proof: target::NormalizationProof {
                 profile,
                 prompt_sha256: digest(b"fixture prompt"),
