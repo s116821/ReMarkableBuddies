@@ -182,6 +182,10 @@ fn parse_header(header: &str, ordinary_pdf: bool) -> Result<AnalysisReading, Ref
             }
             "QUESTION_BOX" | "SELECTION_CENTER" | "TARGET_JSON" if auxiliary.insert(name) => {}
             "SELECTION_SUBJECT" if ordinary_pdf && auxiliary.insert(name) => {}
+            "HANDWRITTEN_QUESTION_MARK"
+                if ordinary_pdf
+                    && auxiliary.insert(name)
+                    && matches!(value.trim(), "present" | "absent" | "unclear") => {}
             _ => return Err(Refusal::Malformed),
         }
     }

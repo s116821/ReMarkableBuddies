@@ -161,6 +161,25 @@ impl FollowupRequestHead {
     pub(crate) fn generation(&self) -> Uuid {
         self.generation
     }
+
+    pub(crate) fn capture_interpreted(&self, ledger: &Ledger, user: &Turn) -> Result<Captured> {
+        let captured = ledger.capture_marked_question(user.conversation)?;
+        ensure!(
+            captured.generation == self.generation
+                && captured.records.iter().any(|(record, _)| {
+                    record.namespace == Namespace::Conversation
+                        && record.record_id == user.conversation
+                        && record.revision_id == self.root
+                })
+                && captured.records.iter().any(|(record, _)| {
+                    record.namespace == Namespace::Conversation
+                        && record.record_id == user.id
+                        && record.revision_id == self.user
+                }),
+            "marked Reader interpretation changed before presentation"
+        );
+        Ok(captured)
+    }
 }
 
 impl FollowupEvidence {
@@ -217,7 +236,7 @@ impl FollowupEvidence {
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn record_provider_failure(
-        &self,
+        &mut self,
         ledger: &Ledger,
         operation: Uuid,
         mut user: Turn,
@@ -238,7 +257,8 @@ impl FollowupEvidence {
         );
         user.outcome = Outcome::Failed;
         user.updated_ms = timestamp;
-        ledger.advance_with_capture(
+        let mut published = Vec::new();
+        let (write, _) = ledger.advance_with_capture(
             operation,
             self.root(),
             ExpectedHeads(BTreeSet::from([reference.revision])),
@@ -250,8 +270,10 @@ impl FollowupEvidence {
             None,
             Some(&self.capture),
             None,
-            None,
+            Some(&mut published),
         )?;
+        self.capture.advance(published)?;
+        self.root = write.historical.applied_root_revision;
         Ok(user)
     }
 

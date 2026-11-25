@@ -68,6 +68,19 @@ pub struct ResidentCorrespondence {
     pub expected: ResidentFacts,
 }
 impl ResidentCorrespondence {
+    pub(super) fn source_observation(&self, procedure: &str) -> SourceObservation {
+        SourceObservation {
+            document: self.expected.document,
+            page: self.expected.page,
+            session: self.activation.to_string(),
+            visit: self.capture_operation.to_string(),
+            content_revision: None,
+            order_revision: None,
+            capability_revision: self.adapter_sha256.clone(),
+            evidence_procedure: procedure.into(),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             !self.boot.is_nil()
@@ -129,19 +142,10 @@ impl ResidentSourceCapture {
 
     #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
     pub(crate) fn notebook_source(&self) -> (&ReaderFacts, super::SourceObservation) {
-        let proof = &self.correspondence;
         (
             self.capture.before(),
-            super::SourceObservation {
-                document: self.document(),
-                page: self.page(),
-                session: proof.activation.to_string(),
-                visit: proof.capture_operation.to_string(),
-                content_revision: None,
-                order_revision: None,
-                capability_revision: proof.adapter_sha256.clone(),
-                evidence_procedure: self.capture.procedure().into(),
-            },
+            self.correspondence
+                .source_observation(self.capture.procedure()),
         )
     }
 

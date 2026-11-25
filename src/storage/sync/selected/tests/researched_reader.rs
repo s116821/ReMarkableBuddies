@@ -573,6 +573,7 @@ struct Scripted<'a> {
     currentness_refusal: Option<Arc<AtomicBool>>,
     answer_refused: bool,
     ordinary_pdf_questions: Vec<&'static str>,
+    mark_ordinary_pdf_question: bool,
 }
 impl<'a> Scripted<'a> {
     fn new(reading: Reading, required: bool, has_fact: bool, events: Events) -> Self {
@@ -591,6 +592,7 @@ impl<'a> Scripted<'a> {
             currentness_refusal: None,
             answer_refused: false,
             ordinary_pdf_questions: Vec::new(),
+            mark_ordinary_pdf_question: false,
         }
     }
     fn question(&self) -> &'static str {
@@ -706,7 +708,13 @@ impl LLMEngine for Scripted<'_> {
                     }
                     _ => format!("REQUEST_WEB_JSON: {intent}\n"),
                 };
-                format!("QUESTION: {question}\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n{metadata}---\nANSWER: ANALYSIS_PROPOSAL_MUST_NOT_PUBLISH")
+                let mark = if self.mark_ordinary_pdf_question {
+                    assert!(self.content.texts[0].contains("HANDWRITTEN_QUESTION_MARK:"));
+                    "HANDWRITTEN_QUESTION_MARK: present\n"
+                } else {
+                    ""
+                };
+                format!("QUESTION: {question}\nQUESTION_BOX: 10,10,100,100\nSELECTION_CENTER: 100,100\n{metadata}{mark}---\nANSWER: ANALYSIS_PROPOSAL_MUST_NOT_PUBLISH")
             }
             1 => {
                 if matches!(self.reading, Reading::Malformed) {

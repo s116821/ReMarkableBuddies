@@ -2,8 +2,8 @@
 use super::{
     encode_model_images,
     researched::{INTENT_INSTRUCTIONS, VERIFY_PROMPT},
-    AnalysisResult, Attempt, ModelContent, Orchestrator, Workflow, ANALYSIS_PROMPT,
-    SOURCE_SUBJECT_PROMPT,
+    AnalysisResult, Attempt, MarkedFragment, ModelContent, Orchestrator, Workflow, ANALYSIS_PROMPT,
+    MARKED_QUESTION_PROMPT, SOURCE_SUBJECT_PROMPT,
 };
 use crate::{
     config::researched_reader::OrdinarySearch,
@@ -283,6 +283,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                 "QUESTION: [question]\nREQUEST_WEB_JSON: [one intent metadata JSON object]\n",
             )
         );
+        let source_page = attempt.current_reader_answer_page().is_none();
+        let prompt = if source_page {
+            format!("{prompt}\n{MARKED_QUESTION_PROMPT}\nIf a readable marked fragment has no usable selection, retain it with ANSWER: NONE. Otherwise use ANSWER: Deferred.")
+        } else {
+            prompt
+        };
         let prompt = if attempt.source_target_enabled() {
             prompt
         } else {
@@ -301,11 +307,24 @@ impl<M: LLMEngine> Orchestrator<M> {
                 crate::conversation::AttemptReason::NoSelection,
             );
         }
-        let separator =
-            Self::analysis_separator(&proposed).context("Reader question header absent")?;
-        let analysis = reader_intent::parse_ordinary_pdf_header(&proposed[..separator])?;
-        let mut result = Self::parse_analysis_response(&proposed)
-            .context("Reader question or selection unavailable")?;
+        let marked = source_page
+            .then(|| Self::parse_marked_fragment(&proposed))
+            .flatten();
+        let proposed_answer = (|| -> Result<_> {
+            let separator =
+                Self::analysis_separator(&proposed).context("Reader question header absent")?;
+            let analysis = reader_intent::parse_ordinary_pdf_header(&proposed[..separator])?;
+            let result = Self::parse_analysis_response(&proposed)
+                .context("Reader question or selection unavailable")?;
+            Ok((analysis, result))
+        })();
+        let (analysis, mut result) = match (proposed_answer, &marked) {
+            (Ok(value), _) => value,
+            (Err(_), Some(marked)) => {
+                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+            }
+            (Err(error), None) => return Err(error),
+        };
         let bounds = result
             ._question_box
             .as_ref()
@@ -318,18 +337,29 @@ impl<M: LLMEngine> Orchestrator<M> {
         // The independent reader receives the acknowledged images again and
         // none of the first reply, geometry or web-intent claims.
         let verification = encode_model_images(attempt.images(&self.ledger)?);
-        let verified = self.read_ordinary_source(
+        let verification = self.read_ordinary_source(
             attempt,
             prepared,
             source,
             &format!("{VERIFY_PROMPT}\n{INTENT_INSTRUCTIONS}"),
             verification,
             true,
-        )?;
-        let agreement = reader_intent::agree(
-            analysis,
-            reader_intent::parse_verification_response(&verified)?,
-        )?;
+        );
+        let agreement = match (verification, &marked) {
+            (Ok(verified), _) => reader_intent::parse_verification_response(&verified)
+                .and_then(|reading| reader_intent::agree(analysis, reading)),
+            (Err(error), Some(marked)) if error.is::<crate::llm::ProviderRefused>() => {
+                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+            }
+            (Err(error), _) => return Err(error),
+        };
+        let agreement = match (agreement, &marked) {
+            (Ok(value), _) => value,
+            (Err(_), Some(marked)) => {
+                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+            }
+            (Err(error), None) => return Err(error.into()),
+        };
         ensure!(
             agreement.question() == result.question,
             "Verified Reader question changed"
@@ -348,8 +378,9 @@ impl<M: LLMEngine> Orchestrator<M> {
             &self.ledger,
             &result.question,
             result.target.as_ref(),
-            &result.selection,
+            Some(&result.selection),
             prepared,
+            marked.as_ref().map(|marked| marked.region),
         )?;
         #[cfg(test)]
         super::researched_fixture::after_ordinary_pdf_interpret(&self.ledger, &attempt.user)?;
@@ -373,7 +404,65 @@ impl<M: LLMEngine> Orchestrator<M> {
             research,
             &mut result,
             head,
+            marked.is_some(),
         )
+    }
+
+    fn preserve_ordinary_marked_question(
+        &mut self,
+        attempt: &mut Attempt,
+        prepared: &Captured,
+        source: &OrdinarySource<'_>,
+        marked: &MarkedFragment,
+    ) -> Result<()> {
+        source.require_current(&mut self.workflow)?;
+        let head = attempt.interpret_ordinary_pdf(
+            &self.ledger,
+            &marked.text,
+            marked.target.as_ref(),
+            None,
+            prepared,
+            Some(marked.region),
+        )?;
+        let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
+        self.present_ordinary_marked_question(attempt, source, &mut |ledger| {
+            current.with_current(ledger.store(), || Ok(()))
+        })
+    }
+
+    fn present_ordinary_marked_question(
+        &mut self,
+        attempt: &Attempt,
+        source: &OrdinarySource<'_>,
+        current: &mut dyn FnMut(&crate::conversation::Ledger) -> Result<()>,
+    ) -> Result<()> {
+        source.require_current(&mut self.workflow)?;
+        let ledger = &self.ledger;
+        current(ledger)?;
+        let question = attempt
+            .user
+            .text
+            .as_deref()
+            .context("Saved marked question absent")?;
+        let mut source_checked_at_output = false;
+        let outcome = self.workflow.render_resident_answer(
+            ledger,
+            attempt.user.conversation,
+            crate::workflow::resident_output::ResidentOutputText::ReaderQuestion(question),
+            attempt.resident_answer.as_ref(),
+            &mut || {
+                current(ledger)?;
+                // As for an ordinary answer, the document table can change
+                // once Buddy's own insertion is admitted.
+                if !source_checked_at_output {
+                    source.check_file()?;
+                    source_checked_at_output = true;
+                }
+                Ok(())
+            },
+        )?;
+        log::info!("Saved marked question Buddy placement: {outcome:?}");
+        Ok(())
     }
 
     fn read_ordinary_source(
@@ -451,6 +540,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         research: followup_research::ResearchRequest<'_>,
         result: &mut AnalysisResult,
         head: FollowupRequestHead,
+        marked: bool,
     ) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)?
@@ -564,7 +654,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             Ok(answer) => answer,
             Err(error)
                 if error.is::<crate::llm::ProviderRefused>()
-                    || (source.book.is_none()
+                    || ((source.book.is_none() || marked)
                         && matches!(
                             error.downcast_ref::<ResearchRefusal>(),
                             Some(ResearchRefusal::Unavailable)
@@ -582,6 +672,12 @@ impl<M: LLMEngine> Orchestrator<M> {
                     attempt.user.clone(),
                     timestamp,
                 )?;
+                if marked {
+                    self.present_ordinary_marked_question(attempt, source, &mut |ledger| {
+                        evidence.with_current(ledger, || Ok(()))
+                    })
+                    .with_context(|| format!("Reader provider refused: {error:#}"))?;
+                }
                 return Err(error);
             }
             Err(error) => return Err(error),
