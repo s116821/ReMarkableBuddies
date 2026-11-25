@@ -118,6 +118,7 @@ pub enum AttemptReason {
     ReaderDisabled,
     NativeOutputUnavailable,
     NoSelection,
+    UnclearRequest,
     TranscriptionDisagreement,
     ProviderFailure,
     Canceled,
