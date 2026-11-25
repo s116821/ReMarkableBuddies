@@ -201,13 +201,14 @@ impl<M: LLMEngine> Orchestrator<M> {
             );
         }
         let draft = pending.notebook_draft(&self.ledger)?;
-        let (title, body) = writer::parse_draft(
+        let draft_text = crate::conversation_layout::writer_draft_text(
             draft
                 .text
                 .as_deref()
                 .context("notebook Writer draft text absent")?,
+            None,
         )?;
-        let text = format_exchange(&request, format_args!("{title}\n\n{body}"));
+        let text = format_exchange(&request, draft_text);
         self.require_same_resident_source(deadline)?;
         ensure!(
             read_saved_source(&mut self.workflow, &self.ledger, facts, deadline)? == saved,

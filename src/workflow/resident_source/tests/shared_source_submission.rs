@@ -176,8 +176,19 @@ const DRAWING_DRAFT: &str =
     "# Page note\n\nDepicted: A triangle is drawn above a short horizontal line.";
 const MIXED_REQUEST: &str = "Make a note from this page about the Pump diagram.";
 const MIXED_LABELS: &str = "Pump\nTank";
-const MIXED_VISUAL: &str = "A right-pointing arrow connects Pump on the left to Tank on the right.";
-const MIXED_DRAFT: &str = "# Page note\n\nThe arrow points from Pump to Tank.";
+const MIXED_VISUAL: &str = "Two rectangles are arranged horizontally, with a right-pointing arrow from the rectangle labeled Pump to the rectangle labeled Tank.";
+// Recorded model output from the installed Pump-to-Tank trial.
+const MIXED_MARKDOWN: &str = "**Page 1**\n\nThe diagram labels two components: **Pump** and **Tank**.\n\nThe depicted layout shows them as two rectangles arranged horizontally, with a right-pointing arrow from Pump to Tank.";
+const MIXED_DRAFT: &str = concat!(
+    "# Pump Diagram\n\n",
+    "**Page 1**\n\nThe diagram labels two components: **Pump** and **Tank**.\n\n",
+    "The depicted layout shows them as two rectangles arranged horizontally, with a right-pointing arrow from Pump to Tank."
+);
+const MIXED_DISPLAY: &str = concat!(
+    "Pump Diagram\n\n",
+    "Page 1\n\nThe diagram labels two components: Pump and Tank.\n\n",
+    "The depicted layout shows them as two rectangles arranged horizontally, with a right-pointing arrow from Pump to Tank."
+);
 const PREFIX_LABEL: &str = "Draft a notebook";
 const PREFIX_DRAFT: &str = "# Page note\n\nThe page label is Draft a notebook.";
 
@@ -1624,7 +1635,11 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                     },
                 )
             };
-            let draft_body = saved_draft.strip_prefix("# ").unwrap();
+            let draft_body = if submission == Submission::PageVisual(PageVisual::Mixed) {
+                MIXED_DISPLAY
+            } else {
+                saved_draft.strip_prefix("# ").unwrap()
+            };
             let response = if save == Some(Save::Explicit) {
                 format!("Draft saved. Note export is disabled.\n\n{draft_body}")
             } else {
@@ -1655,12 +1670,28 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 assert_eq!(writing.section, None);
                 assert_eq!(visual.text, MIXED_VISUAL);
                 assert_eq!(visual.section.as_deref(), Some("model-visual-observation"));
-                assert!(records
+                let draft = records
                     .iter()
-                    .any(|record| matches!(record, Record::Turn(turn)
-                    if turn.outcome == Outcome::Generated
-                        && turn.sources.contains(&source.id)
-                        && turn.text.as_deref() == Some(MIXED_DRAFT))));
+                    .find_map(|record| match record {
+                        Record::Turn(turn)
+                            if turn.outcome == Outcome::Generated
+                                && turn.sources.contains(&source.id)
+                                && turn.text.as_deref() == Some(MIXED_DRAFT) =>
+                        {
+                            Some(turn)
+                        }
+                        _ => None,
+                    })
+                    .context("canonical Markdown draft absent")?;
+                let export = crate::writer::note_from_draft(
+                    draft,
+                    &crate::conversation::WriterSource::ordinary(source.as_ref().clone()),
+                    ConversationId::new_v4(),
+                    ConversationId::new_v4(),
+                )?;
+                assert_eq!(export.title, "Pump Diagram");
+                assert_eq!(export.markdown, MIXED_MARKDOWN);
+                assert_eq!(destination.counts(), (0, 0, 0));
             }
             let evidence = records
                 .iter()

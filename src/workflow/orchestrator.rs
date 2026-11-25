@@ -842,7 +842,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         use anyhow::Context;
 
         let selected = produced.context("fresh Writer selection unavailable")?;
-        let (draft, document) = selected.presentation()?;
+        let (draft, document, about) = selected.presentation()?;
         // A refinement reuses the note's original source. Its request belongs to
         // the new draft's exchange, even when several drafts share that source.
         let user = self
@@ -878,14 +878,15 @@ impl<M: LLMEngine> Orchestrator<M> {
             .text
             .as_deref()
             .context("Writer request text unavailable")?;
-        let (title, body) = writer::parse_draft(
+        let draft_text = crate::conversation_layout::writer_draft_text(
             draft
                 .text
                 .as_deref()
                 .context("Writer draft text unavailable")?,
+            about.as_deref(),
         )?;
         if let Some(result) = result {
-            let full = format_exchange(request, format_args!("{result}\n\n{title}\n\n{body}"));
+            let full = format_exchange(request, format_args!("{result}\n\n{draft_text}"));
             let receipt = format!("{result}\n\nFull draft saved in Buddy history.\n");
             return self.workflow.place_resident_writer_export(
                 &self.ledger,
@@ -895,7 +896,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                 association.as_ref(),
             );
         }
-        let text = format_exchange(request, format_args!("{title}\n\n{body}"));
+        let text = format_exchange(request, draft_text);
         let output = if protect_source {
             ResidentOutputText::WriterSourceDraft(&text)
         } else {
