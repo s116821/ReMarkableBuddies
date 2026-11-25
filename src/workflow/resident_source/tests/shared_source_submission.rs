@@ -164,6 +164,7 @@ impl Submission {
 enum PageVisual {
     DrawingOnly,
     Mixed,
+    LabelPrefix,
     Blank,
     Unreadable,
     InlineRequestEcho,
@@ -177,11 +178,14 @@ const MIXED_REQUEST: &str = "Make a note from this page about the Pump diagram."
 const MIXED_LABELS: &str = "Pump\nTank";
 const MIXED_VISUAL: &str = "A right-pointing arrow connects Pump on the left to Tank on the right.";
 const MIXED_DRAFT: &str = "# Page note\n\nThe arrow points from Pump to Tank.";
+const PREFIX_LABEL: &str = "Draft a notebook";
+const PREFIX_DRAFT: &str = "# Page note\n\nThe page label is Draft a notebook.";
 
 impl PageVisual {
     fn request(self) -> &'static str {
         match self {
             Self::Mixed => MIXED_REQUEST,
+            Self::LabelPrefix | Self::InlineRequestEcho => "Draft a note",
             Self::MultilineRequestEcho => "Make a note from this page.\nKeep the two labels.",
             _ => NOTE,
         }
@@ -191,9 +195,10 @@ impl PageVisual {
         match self {
             Self::DrawingOnly => ("readable", "", TRIANGLE),
             Self::Mixed => ("readable", MIXED_LABELS, MIXED_VISUAL),
+            Self::LabelPrefix => ("readable", PREFIX_LABEL, ""),
             Self::Blank => ("blank", "", ""),
             Self::Unreadable => ("unreadable", "", ""),
-            Self::InlineRequestEcho => ("readable", "Pump Make a note from this page.", TRIANGLE),
+            Self::InlineRequestEcho => ("readable", "Pump: Draft a note; Tank", TRIANGLE),
             Self::MultilineRequestEcho => (
                 "readable",
                 "",
@@ -206,6 +211,7 @@ impl PageVisual {
         match self {
             Self::DrawingOnly => Some(DRAWING_DRAFT),
             Self::Mixed => Some(MIXED_DRAFT),
+            Self::LabelPrefix => Some(PREFIX_DRAFT),
             _ => None,
         }
     }
@@ -218,6 +224,12 @@ impl PageVisual {
         if self == Self::Mixed {
             return Ok(include_bytes!(
                 "../../../../tests/fixtures/writer-current-page-labeled-diagram.png"
+            )
+            .to_vec());
+        }
+        if self == Self::LabelPrefix {
+            return Ok(include_bytes!(
+                "../../../../tests/fixtures/writer-current-page-label-prefix.png"
             )
             .to_vec());
         }
@@ -545,10 +557,6 @@ impl crate::LLMEngine for SubmissionModel {
                 } else {
                     assert_eq!(input["request"], self.submission.page_request());
                     if let Submission::PageVisual(case) = self.submission {
-                        assert!(self.text.iter().any(|part| {
-                            part.contains("model-visual-observation")
-                                && part.contains("separately from transcribed writing")
-                        }));
                         assert_eq!(
                             input["source_provenance"]["selection"],
                             serde_json::json!({"scope":"page","page":1})
@@ -558,6 +566,17 @@ impl crate::LLMEngine for SubmissionModel {
                             .unwrap()
                             .contains("one displayed source page"));
                         let units = input["source_units"].as_array().unwrap();
+                        if case == PageVisual::LabelPrefix {
+                            assert_eq!(
+                                units,
+                                &[serde_json::json!({"page":1,"section":null,"text":PREFIX_LABEL})]
+                            );
+                            return Ok(PREFIX_DRAFT.into());
+                        }
+                        assert!(self.text.iter().any(|part| {
+                            part.contains("model-visual-observation")
+                                && part.contains("separately from transcribed writing")
+                        }));
                         assert_eq!(units.len(), if case == PageVisual::Mixed { 2 } else { 1 });
                         if case == PageVisual::Mixed {
                             assert_eq!(
@@ -1326,6 +1345,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         (false, Submission::CurrentPage),
         (true, Submission::PageVisual(PageVisual::DrawingOnly)),
         (false, Submission::PageVisual(PageVisual::Mixed)),
+        (true, Submission::PageVisual(PageVisual::LabelPrefix)),
         (true, Submission::PageVisual(PageVisual::Blank)),
         (true, Submission::PageVisual(PageVisual::Unreadable)),
         (true, Submission::PageVisual(PageVisual::InlineRequestEcho)),

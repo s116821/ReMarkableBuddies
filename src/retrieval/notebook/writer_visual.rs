@@ -192,13 +192,7 @@ pub(super) fn extract(
                 instruction.is_empty()
                     || [&reply.writing, &reply.visual_observation]
                         .iter()
-                        .all(|text| {
-                            !text
-                                .split_whitespace()
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                                .contains(&instruction)
-                        }),
+                        .all(|text| !echoes_instruction(text, &instruction)),
                 "submitting instruction returned as Writer source"
             );
         }
@@ -219,4 +213,16 @@ pub(super) fn extract(
     }
     progress(Progress::BeforeReturn)?;
     Ok(units)
+}
+
+fn echoes_instruction(text: &str, instruction: &str) -> bool {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let word_character = |character: char| character.is_alphanumeric() || character == '_';
+    let starts_with_word = instruction.chars().next().is_some_and(word_character);
+    let ends_with_word = instruction.chars().next_back().is_some_and(word_character);
+    text.char_indices().any(|(start, _)| {
+        text[start..].starts_with(instruction)
+            && (!starts_with_word || !text[..start].ends_with(word_character))
+            && (!ends_with_word || !text[start + instruction.len()..].starts_with(word_character))
+    })
 }
