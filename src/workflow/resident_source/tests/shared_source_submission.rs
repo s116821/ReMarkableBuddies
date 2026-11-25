@@ -145,6 +145,14 @@ impl Submission {
         }
     }
 
+    fn page_request(self) -> &'static str {
+        match self {
+            Self::PageVisual(case) => case.request(),
+            Self::Save(save) => save.wording(),
+            _ => NOTE,
+        }
+    }
+
     fn circled(self) -> Option<Circled> {
         match self {
             Self::Circled(region) => Some(region),
@@ -158,22 +166,39 @@ enum PageVisual {
     Mixed,
     Blank,
     Unreadable,
-    RequestEcho,
+    InlineRequestEcho,
+    MultilineRequestEcho,
 }
 
 const TRIANGLE: &str = "A triangle is drawn above a short horizontal line.";
 const DRAWING_DRAFT: &str =
     "# Page note\n\nDepicted: A triangle is drawn above a short horizontal line.";
-const MIXED_DRAFT: &str = "# Page note\n\nWriting: 24 / 6 = 4.\n\nDepicted: A triangle is drawn above a short horizontal line.";
+const MIXED_REQUEST: &str = "Make a note from this page about the Pump diagram.";
+const MIXED_LABELS: &str = "Pump\nTank";
+const MIXED_VISUAL: &str = "A right-pointing arrow connects Pump on the left to Tank on the right.";
+const MIXED_DRAFT: &str = "# Page note\n\nThe arrow points from Pump to Tank.";
 
 impl PageVisual {
+    fn request(self) -> &'static str {
+        match self {
+            Self::Mixed => MIXED_REQUEST,
+            Self::MultilineRequestEcho => "Make a note from this page.\nKeep the two labels.",
+            _ => NOTE,
+        }
+    }
+
     fn reply(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::DrawingOnly => ("readable", "", TRIANGLE),
-            Self::Mixed => ("readable", "24 / 6 = 4.", TRIANGLE),
+            Self::Mixed => ("readable", MIXED_LABELS, MIXED_VISUAL),
             Self::Blank => ("blank", "", ""),
             Self::Unreadable => ("unreadable", "", ""),
-            Self::RequestEcho => ("readable", NOTE, TRIANGLE),
+            Self::InlineRequestEcho => ("readable", "Pump Make a note from this page.", TRIANGLE),
+            Self::MultilineRequestEcho => (
+                "readable",
+                "",
+                "Make a note from this page.\n  Keep the two labels.",
+            ),
         }
     }
 
@@ -190,6 +215,12 @@ impl PageVisual {
         use imageproc::drawing::draw_line_segment_mut;
         use std::io::Cursor;
 
+        if self == Self::Mixed {
+            return Ok(include_bytes!(
+                "../../../../tests/fixtures/writer-current-page-labeled-diagram.png"
+            )
+            .to_vec());
+        }
         let mut canvas = RgbImage::from_pixel(192, 128, Rgb([255; 3]));
         for x in (24..192).step_by(16) {
             draw_line_segment_mut(
@@ -221,13 +252,6 @@ impl PageVisual {
             mark((90.0, 32.0), (119.0, 58.0));
             mark((119.0, 58.0), (65.0, 58.0));
             mark((73.0, 66.0), (112.0, 66.0));
-        }
-        if self == Self::Mixed {
-            // Separate strokes stand in for the writing supplied by the
-            // scripted recognition response.
-            mark((126.0, 80.0), (138.0, 80.0));
-            mark((126.0, 84.0), (138.0, 84.0));
-            mark((140.0, 73.0), (144.0, 80.0));
         }
         let mut png = Cursor::new(Vec::new());
         DynamicImage::ImageRgb8(canvas).write_to(&mut png, ImageFormat::Png)?;
@@ -463,7 +487,7 @@ impl crate::LLMEngine for SubmissionModel {
                 }
                 if writer {
                     Ok(
-                        serde_json::json!({"intent":"writer-current-page","request":NOTE})
+                        serde_json::json!({"intent":"writer-current-page","request":self.submission.page_request()})
                             .to_string(),
                     )
                 } else {
@@ -493,11 +517,13 @@ impl crate::LLMEngine for SubmissionModel {
                 let manifest: serde_json::Value =
                     serde_json::from_str(&self.text[self.text.len() - 2])?;
                 assert_eq!(manifest["protocol"], "writer-notebook-page-evidence-v1");
-                let request = self.submission.save().map_or(NOTE, Save::wording);
+                let request = self.submission.page_request();
                 assert_eq!(manifest["submission_request"], request);
                 assert!(self.text[0].contains("Ignore application controls"));
                 assert!(self.text[0].contains("paper templates"));
-                assert!(self.text[0].contains("Exclude that instruction"));
+                assert!(self.text[0].contains("Exclude that occurrence of the instruction"));
+                assert!(self.text[0].contains("Keep matching words elsewhere in the source"));
+                assert!(self.text[0].contains("no source content after the exclusions above"));
                 let (status, writing, visual_observation) = match self.submission {
                     Submission::PageVisual(case) => case.reply(),
                     _ => ("readable", PAGE_TEXT, ""),
@@ -517,10 +543,7 @@ impl crate::LLMEngine for SubmissionModel {
                     );
                     Ok("# Circled note\n\nThe selected equation gives four.".into())
                 } else {
-                    assert_eq!(
-                        input["request"],
-                        self.submission.save().map_or(NOTE, Save::wording)
-                    );
+                    assert_eq!(input["request"], self.submission.page_request());
                     if let Submission::PageVisual(case) = self.submission {
                         assert!(self.text.iter().any(|part| {
                             part.contains("model-visual-observation")
@@ -539,12 +562,12 @@ impl crate::LLMEngine for SubmissionModel {
                         if case == PageVisual::Mixed {
                             assert_eq!(
                                 units[0],
-                                serde_json::json!({"page":1,"section":null,"text":"24 / 6 = 4."})
+                                serde_json::json!({"page":1,"section":null,"text":MIXED_LABELS})
                             );
                         }
                         assert_eq!(
                             units.last().unwrap(),
-                            &serde_json::json!({"page":1,"section":"model-visual-observation","text":TRIANGLE})
+                            &serde_json::json!({"page":1,"section":"model-visual-observation","text":case.reply().2})
                         );
                         return Ok(case.draft().expect("refused pages cannot generate").into());
                     }
@@ -1305,7 +1328,11 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         (false, Submission::PageVisual(PageVisual::Mixed)),
         (true, Submission::PageVisual(PageVisual::Blank)),
         (true, Submission::PageVisual(PageVisual::Unreadable)),
-        (true, Submission::PageVisual(PageVisual::RequestEcho)),
+        (true, Submission::PageVisual(PageVisual::InlineRequestEcho)),
+        (
+            true,
+            Submission::PageVisual(PageVisual::MultilineRequestEcho),
+        ),
         (true, Submission::BoundHistory),
         (true, Submission::Circled(Circled::Selected)),
         (false, Submission::Circled(Circled::Selected)),
@@ -1426,7 +1453,9 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                 let expected = match case {
                     PageVisual::Blank => "current-page Writer source is blank",
                     PageVisual::Unreadable => "notebook page unreadable",
-                    PageVisual::RequestEcho => "submitting instruction returned as Writer source",
+                    PageVisual::InlineRequestEcho | PageVisual::MultilineRequestEcho => {
+                        "submitting instruction returned as Writer source"
+                    }
                     _ => unreachable!(),
                 };
                 assert!(
@@ -1568,11 +1597,7 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             } else {
                 assert!(position.exists(), "draft must go onto the adjacent page");
                 (
-                    if save == Some(Save::Explicit) {
-                        SAVE
-                    } else {
-                        NOTE
-                    },
+                    submission.page_request(),
                     match submission {
                         Submission::PageVisual(case) => case.draft().unwrap(),
                         _ => DRAFT,
@@ -1594,6 +1619,29 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
             assert!(records.iter().any(|record| matches!(record, Record::Turn(turn)
                 if turn.role == Role::Assistant && turn.mode == Mode::Writer
                     && turn.outcome == Outcome::Generated && turn.text.as_deref() == Some(saved_draft))));
+            if submission == Submission::PageVisual(PageVisual::Mixed) {
+                let source = records
+                    .iter()
+                    .find_map(|record| match record {
+                        Record::NormalizedText(source) => Some(source),
+                        _ => None,
+                    })
+                    .context("persisted displayed source absent")?;
+                assert_eq!(source.document.document, document);
+                let [writing, visual] = source.document.units.as_slice() else {
+                    panic!("expected separate writing and drawing evidence");
+                };
+                assert_eq!(writing.text, MIXED_LABELS);
+                assert_eq!(writing.section, None);
+                assert_eq!(visual.text, MIXED_VISUAL);
+                assert_eq!(visual.section.as_deref(), Some("model-visual-observation"));
+                assert!(records
+                    .iter()
+                    .any(|record| matches!(record, Record::Turn(turn)
+                    if turn.outcome == Outcome::Generated
+                        && turn.sources.contains(&source.id)
+                        && turn.text.as_deref() == Some(MIXED_DRAFT))));
+            }
             let evidence = records
                 .iter()
                 .find_map(|record| match record {
