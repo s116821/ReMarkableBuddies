@@ -74,7 +74,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
             epub: true,
             rendered: None,
             source_targets: false,
-            edit_book_during_navigation: false,
+            bound_successor_for_book_edit: None,
             count: questions.len(),
             before_round: Some(&mut change_book),
         },
@@ -165,7 +165,7 @@ pub(super) fn check_open_book(executable: &std::path::Path) -> Result<()> {
             epub: true,
             rendered: Some(rendered.clone()),
             source_targets: false,
-            edit_book_during_navigation: false,
+            bound_successor_for_book_edit: None,
             count: 1,
             before_round: None,
         },
@@ -194,6 +194,17 @@ fn check_bound_failure_after_book_edit(
 ) -> Result<()> {
     use crate::conversation::AttemptReason;
 
+    // The already-bound successor must belong to the same page table that
+    // the SDK observes. It is a Buddy note with no redirect into the book.
+    let buddy = Uuid::new_v4();
+    let table_path = library.join(format!("{document}.content"));
+    let mut table: Value = serde_json::from_slice(&fs::read(&table_path)?)?;
+    table["cPages"]["pages"]
+        .as_array_mut()
+        .context("Composed EPUB fixture page table absent")?
+        .push(json!({"id":buddy,"idx":{"value":"b"},"redir":null}));
+    files::atomic_json(&table_path, &table)?;
+
     let question = "What measures beta velocity? Don't use the internet.";
     let rendered = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let scope = researched_fixture::Scope::new(None, false);
@@ -210,7 +221,7 @@ fn check_bound_failure_after_book_edit(
             epub: true,
             rendered: Some(rendered.clone()),
             source_targets: false,
-            edit_book_during_navigation: true,
+            bound_successor_for_book_edit: Some(buddy),
             count: 1,
             before_round: None,
         },
@@ -271,7 +282,7 @@ fn check_marked_book_without_search(
             epub: true,
             rendered: Some(rendered.clone()),
             source_targets: true,
-            edit_book_during_navigation: false,
+            bound_successor_for_book_edit: None,
             count: 1,
             before_round: None,
         },
