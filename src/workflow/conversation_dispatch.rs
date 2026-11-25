@@ -29,10 +29,21 @@ impl RuntimeRoute {
     pub fn admits_startup(self, config: &Config) -> bool {
         config.reader_enabled() || (self == Self::OrdinaryLocal && config.admits_writer(false))
     }
+
+    pub(super) fn reader_trigger(self, config: &Config, events: &[Interaction]) -> bool {
+        config.reader_enabled()
+            && match self {
+                Self::OrdinaryLocal => matches!(
+                    events,
+                    [Interaction::Reader] | [Interaction::Invalidated, Interaction::Reader]
+                ),
+                Self::ExistingReader => events.contains(&Interaction::Reader),
+            }
+    }
 }
 
 pub struct Dispatch<'a> {
-    config: &'a Config,
+    pub(super) config: &'a Config,
     store: Arc<crate::storage::Store>,
     _local: Arc<crate::mode_maintenance::LocalDispatchLifetime>,
     memory: Option<Arc<crate::memory::LocalMemory>>,
@@ -86,11 +97,7 @@ impl<'a> Dispatch<'a> {
     /// This admits the existing capture trigger only. It does not supply page
     /// facts to typed follow-up or Writer operations.
     pub(crate) fn reader_trigger(&self, events: &[Interaction]) -> bool {
-        self.admits(Mode::Reader, false)
-            && matches!(
-                events,
-                [Interaction::Reader] | [Interaction::Invalidated, Interaction::Reader]
-            )
+        RuntimeRoute::OrdinaryLocal.reader_trigger(self.config, events)
     }
 
     pub(crate) fn admits(&self, receiver: Mode, external_export: bool) -> bool {
