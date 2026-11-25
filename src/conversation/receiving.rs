@@ -140,9 +140,6 @@ impl fmt::Display for ReceivingRefusal {
 }
 impl std::error::Error for ReceivingRefusal {}
 
-const ORDINARY_SCOPE: &str = "ordinary-historical";
-const BOUND_PAGE_SCOPE: &str = "ordinary-historical-bound-page";
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FollowupMedia {
     All,
@@ -266,11 +263,10 @@ pub(super) fn validate_historical(
 ) -> Result<Vec<Media>> {
     validate_budget(budget)?;
     let mut frame: Frame = serde_json::from_str(json)?;
-    let bound_page = frame.scope == BOUND_PAGE_SCOPE;
     ensure!(
         encoded(&frame, budget.max_encoded_bytes)? == json
             && frame.schema == 1
-            && matches!(frame.scope.as_str(), ORDINARY_SCOPE | BOUND_PAGE_SCOPE)
+            && frame.scope == "ordinary-historical"
             && frame.conversation == conversation,
         "invalid historical frame encoding"
     );
@@ -306,25 +302,6 @@ pub(super) fn validate_historical(
             if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_))
     );
     let choice = frame.source.request_source()?;
-    let bound_media = if bound_page {
-        ensure!(
-            !matches!(choice, RequestSource::Original { .. }),
-            "bound-page evidence cannot carry an original-file index"
-        );
-        let media = frame
-            .source
-            .source_record()
-            .map(source_media)
-            .transpose()?
-            .unwrap_or_default();
-        ensure!(
-            frame.missing_media.iter().all(|item| media.contains(item)),
-            "bound-page evidence checked unrelated media"
-        );
-        Some(media)
-    } else {
-        None
-    };
     ensure!(
         original(
             records,
@@ -431,7 +408,7 @@ pub(super) fn validate_historical(
         }
         _ => return Err(ReceivingRefusal::InvalidRetrieval.into()),
     }
-    Ok(bound_media.unwrap_or(media))
+    Ok(media)
 }
 pub(super) fn validate_budget(budget: &ReceivingBudget) -> Result<usize> {
     let tokens = budget
@@ -794,14 +771,13 @@ impl Ledger {
             retrieval,
             token_count,
             records,
-            if bound_page {
-                BOUND_PAGE_SCOPE
-            } else {
-                ORDINARY_SCOPE
-            },
+            "ordinary-historical",
             followup_media == Some(FollowupMedia::All),
             verified_notebook.is_some(),
             |media| {
+                // Keep the existing historical frame for replay. Its
+                // missing-media list records failures only within the
+                // media this answer actually needs to open.
                 (bound_page && !bound_media.contains(media))
                     || verified_notebook == Some(media)
                     || self

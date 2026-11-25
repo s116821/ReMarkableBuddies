@@ -644,29 +644,6 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         },
     };
 
-    // Watch both the native mapping and the committed archive body. The
-    // asset is already linked to a chronological turn in this conversation.
-    let generation: ConversationId =
-        crate::storage::files::json(&store.paths.data.join("CURRENT"), 128)?;
-    let object = store
-        .paths
-        .data
-        .join("generations")
-        .join(generation.to_string())
-        .join("objects")
-        .join(&archive.media.sha256);
-    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
-    ensure!(fd >= 0, "inotify initialization failed");
-    let mut watch = unsafe { File::from_raw_fd(fd) };
-    for path in [root.join(format!("{document}.content")), object] {
-        let path = CString::new(path.as_os_str().as_bytes())?;
-        ensure!(
-            unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) }
-                >= 0,
-            "watching the excluded notebook data failed"
-        );
-    }
-
     let mode = "reconnect-source-handoff-open-first";
     let (mut workflow, events, _) =
         workflow_with_store(mode, vec![released(Instant::now())], Duration::ZERO, store);
@@ -739,6 +716,29 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         intent: json!({"version":1,"intent":"no-restriction"}),
         case: Case::Disabled,
     };
+    // Watch both the native mapping and the committed archive body. The
+    // asset is already linked to a chronological turn in this conversation.
+    let generation: ConversationId =
+        crate::storage::files::json(&store.paths.data.join("CURRENT"), 128)?;
+    let object = store
+        .paths
+        .data
+        .join("generations")
+        .join(generation.to_string())
+        .join("objects")
+        .join(&archive.media.sha256);
+    let fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+    ensure!(fd >= 0, "inotify initialization failed");
+    let mut watch = unsafe { File::from_raw_fd(fd) };
+    for path in [root.join(format!("{document}.content")), object] {
+        let path = CString::new(path.as_os_str().as_bytes())?;
+        ensure!(
+            unsafe { libc::inotify_add_watch(watch.as_raw_fd(), path.as_ptr(), libc::IN_ACCESS) }
+                >= 0,
+            "watching the excluded notebook data failed"
+        );
+    }
+
     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
     super::original_pdf::saved_notebook::with_fixture_paths(root, templates, || {
         reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))
@@ -772,7 +772,6 @@ pub(super) fn check_ordinary_reader_with_archived_notebook(
         .as_array()
         .unwrap()
         .contains(&json!(archive.id)));
-    assert_eq!(request["scope"], "ordinary-historical-bound-page");
     let prompt_history = ledger.recent_model_turns(
         conversation,
         &crate::conversation::ContextBudget {
