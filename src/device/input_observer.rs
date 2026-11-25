@@ -7,7 +7,7 @@ use super::{
     DeviceModel,
 };
 use anyhow::{ensure, Context, Result};
-use evdev::{raw_stream::RawDevice, AbsoluteAxisCode};
+use evdev::{raw_stream::RawDevice, AbsoluteAxisCode, EventType, MiscCode, SynchronizationCode};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
@@ -341,6 +341,14 @@ impl InputObserver {
     /// Process every Invalidated event before considering any action returned
     /// in the same batch: separate input devices have no shared event order.
     pub fn poll(&mut self) -> Result<Vec<Interaction>> {
+        self.poll_observer(false)
+    }
+
+    pub(super) fn poll_request(&mut self) -> Result<Vec<Interaction>> {
+        self.poll_observer(true)
+    }
+
+    fn poll_observer(&mut self, resident_request: bool) -> Result<Vec<Interaction>> {
         self.reader_release_second = None;
         if self.lost {
             anyhow::bail!("Native input observer permanently lost; recreate before waiting");
@@ -348,7 +356,7 @@ impl InputObserver {
         let result = if self.owned_pen.is_some() || self.owned_touch.is_some() {
             Err(anyhow::anyhow!("Input observer is inside owned pen window"))
         } else {
-            self.poll_inner()
+            self.poll_inner(resident_request)
         };
         if result.is_err() {
             self.lost = true;
@@ -502,7 +510,7 @@ impl InputObserver {
         result
     }
 
-    fn poll_inner(&mut self) -> Result<Vec<Interaction>> {
+    fn poll_inner(&mut self, resident_request: bool) -> Result<Vec<Interaction>> {
         #[cfg(test)]
         if let Some(polls) = self.scripted_polls.as_mut() {
             return polls.pop_front().expect("unexpected diagnostic poll");
@@ -514,6 +522,7 @@ impl InputObserver {
             for (touch, events) in batches {
                 self.feed_events(
                     touch,
+                    resident_request,
                     events.into_iter().map(|event| (event, None)),
                     &mut output,
                 )?;
@@ -553,6 +562,7 @@ impl InputObserver {
                 );
             self.feed_events(
                 touch,
+                resident_request,
                 events.into_iter().map(|event| {
                     let kind = event.event_type().0;
                     let code = event.code();
@@ -579,10 +589,27 @@ impl InputObserver {
     fn feed_events(
         &mut self,
         touch: bool,
+        resident_request: bool,
         events: impl IntoIterator<Item = (super::owned_pen_window::Event, Option<u64>)>,
         output: &mut Vec<Interaction>,
     ) -> Result<()> {
         for ((kind, code, value), second) in events {
+            if resident_request {
+                let kind = EventType(kind);
+                // These packets carry device output, repeat settings or timing.
+                // The corresponding actual key, pen or touch event is separate.
+                if matches!(kind, EventType::LED | EventType::SOUND | EventType::REPEAT)
+                    || (kind == EventType::MISC && MiscCode(code) == MiscCode::MSC_TIMESTAMP)
+                {
+                    continue;
+                }
+                if !touch
+                    && kind == EventType::SYNCHRONIZATION
+                    && SynchronizationCode(code) == SynchronizationCode::SYN_DROPPED
+                {
+                    anyhow::bail!("Lost native input frame");
+                }
+            }
             if !touch {
                 if kind != 0 || code == 3 {
                     output.push(self.reducer.cancel());
@@ -838,7 +865,7 @@ impl super::owned_pen_window::WindowIo for WindowAdapter<'_> {
     }
     fn check_other_input(&mut self) -> Result<()> {
         ensure!(
-            self.observer.poll_inner()?.is_empty() && self.observer.quiescent_state(),
+            self.observer.poll_inner(false)?.is_empty() && self.observer.quiescent_state(),
             "External or delayed input during owned pen window"
         );
         Ok(())
