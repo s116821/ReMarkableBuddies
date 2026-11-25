@@ -639,16 +639,6 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
 }
 
 #[test]
-fn maintained_combined_fixture_runs() {
-    let scenario = serde_json::from_str(include_str!(
-        "../../docs/simulator/scenarios/combined-reader-writer-reader.json"
-    ))
-    .unwrap();
-    run_notebook(&scenario, false).unwrap();
-    run(scenario).unwrap();
-}
-
-#[test]
 fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     use crate::{
         conversation::notebook::{NotebookStage, NotebookStageKind, NotebookStageOutcome},
@@ -1377,6 +1367,16 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
         assert!(texts.iter().all(|text| !text.contains(correction)));
     }
     Ok(())
+}
+
+#[test]
+fn maintained_combined_fixture_runs() {
+    let scenario = serde_json::from_str(include_str!(
+        "../../docs/simulator/scenarios/combined-reader-writer-reader.json"
+    ))
+    .unwrap();
+    run_notebook(&scenario, false).unwrap();
+    run(scenario).unwrap();
 }
 
 fn run_notebook(scenario: &Scenario, preference_enabled: bool) -> Result<usize> {
