@@ -70,7 +70,19 @@ impl crate::LLMEngine for ReaderModel {
     fn execute(&mut self) -> Result<String> {
         let mut calls = self.calls.borrow_mut();
         calls.push((self.parts.clone(), self.images.clone()));
+        let legacy_analysis = self.parts.first().is_some_and(|part| {
+            part.contains("QUESTION_BOX:") && !part.contains("REQUEST_WEB_JSON")
+        });
+        let legacy_verification = self
+            .parts
+            .first()
+            .is_some_and(|part| part.contains("return one line: TRANSCRIPTION:"));
         Ok(match calls.len() {
+            1 if legacy_analysis => format!(
+                "QUESTION: {}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: compass\n---\nANSWER: {NOTEBOOK}",
+                self.question
+            ),
+            2 if legacy_verification => format!("TRANSCRIPTION: {}", self.question),
             1 => format!(
                 "QUESTION: {}\nQUESTION_BOX: 130,35,200,50\nSELECTION_CENTER: 385,230\nSELECTION_SUBJECT: compass\nREQUEST_WEB_JSON: {}\n---\nANSWER: Deferred",
                 self.question, self.intent
@@ -168,16 +180,26 @@ fn installed_reader_uses_only_its_notebook_and_global_memory_after_transcription
         check_captured_page(case)
             .with_context(|| format!("Captured notebook Reader case {case:?}"))?;
     }
-    check_bound_reader_page(false).context("Reader on an adjacent and current bound page")?;
-    check_bound_reader_page(true).context("Reader after blank start")
+    check_bound_reader_page(BoundStart::Original)
+        .context("Reader on an adjacent and current bound page")?;
+    check_bound_reader_page(BoundStart::Legacy).context("Reader with a legacy original capture")?;
+    check_bound_reader_page(BoundStart::Blank).context("Reader after blank start")
 }
 
-fn check_bound_reader_page(blank_start: bool) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BoundStart {
+    Original,
+    Legacy,
+    Blank,
+}
+
+fn check_bound_reader_page(start: BoundStart) -> Result<()> {
     use crate::conversation::{
         BindingAcquisition, BindingReceipt, ExpectedHeads, SourceObservation,
     };
 
     let mode = "reconnect-source-handoff-research-pages";
+    let blank_start = start == BoundStart::Blank;
     let rounds = if blank_start { 2 } else { 3 };
     let releases = (0..rounds).map(|_| released(Instant::now())).collect();
     let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
@@ -268,6 +290,31 @@ fn check_bound_reader_page(blank_start: bool) -> Result<()> {
     let mut original_images = Vec::new();
     let mut origin_turn = None;
     for round in 0..rounds {
+        if round == 0 && start == BoundStart::Legacy {
+            reader.run_iteration_with_trigger(true, None, None)?;
+            let frames = std::mem::take(&mut *calls.borrow_mut());
+            let [analysis, verification] = frames.as_slice() else {
+                anyhow::bail!("Expected two legacy Reader readings");
+            };
+            assert_eq!(analysis.1, verification.1);
+            original_images = verification.1.clone();
+            let records = ledger.inspect(conversation, false)?;
+            assert!(!records
+                .iter()
+                .any(|record| matches!(record, Record::RequestEvidence(_))));
+            let capture = records
+                .iter()
+                .find_map(|record| match record {
+                    Record::ResidentCapture(capture) if capture.before.page == original => {
+                        Some(capture)
+                    }
+                    _ => None,
+                })
+                .context("Legacy Reader original capture not saved")?;
+            origin_turn = Some(json!(capture.turn));
+            std::fs::write(&position, b"buddy")?;
+            continue;
+        }
         reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))?;
         let frames = std::mem::take(&mut *calls.borrow_mut());
         let [analysis, verification, answer] = frames.as_slice() else {

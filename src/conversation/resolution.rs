@@ -107,14 +107,13 @@ impl Ledger {
 
         if let Some((_, _, _, evidence)) = latest {
             return match recorded_source(&evidence.frame_json)? {
-                SourceAssociation::NoDocument => {
-                    Ok(SourceDirective::Explicit(RequestSource::NoDocument))
+                SourceAssociation::NoDocument | SourceAssociation::CapturedPage { .. } => {
+                    Ok(SourceDirective::Inherit {
+                        request_turn: evidence.request_turn,
+                        operation: Some(evidence.operation),
+                        expected: None,
+                    })
                 }
-                SourceAssociation::CapturedPage { .. } => Ok(SourceDirective::Inherit {
-                    request_turn: evidence.request_turn,
-                    operation: Some(evidence.operation),
-                    expected: None,
-                }),
                 SourceAssociation::Original {
                     origin_turn,
                     source_record,
@@ -148,6 +147,10 @@ impl Ledger {
                 {
                     prior
                         .get(&capture.turn)
+                        .filter(|turn| {
+                            turn.outcome == Outcome::Interpreted
+                                && turn.sources.contains(&capture.id)
+                        })
                         .map(|turn| (turn.sequence, capture))
                 }
                 _ => None,
