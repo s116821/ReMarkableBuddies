@@ -1508,15 +1508,18 @@ impl crate::LLMEngine for PageFirstModel {
 
 #[test]
 fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_page() -> Result<()> {
-    for (writer_enabled, submission, reuse, switch_page, refuse_at) in [
-        (false, Submission::Reader, false, false, None),
-        (true, Submission::Reader, true, false, None),
-        (true, Submission::CurrentPage, false, false, None),
-        (true, Submission::Reader, false, true, None),
-        (true, Submission::Reader, false, false, Some(0)),
-        (true, Submission::Reader, false, false, Some(3)),
-        (true, Submission::CurrentPage, false, false, Some(1)),
+    for (only_mode, submission, reuse, switch_page, refuse_at) in [
+        (Some(Mode::Reader), Submission::Reader, false, false, None),
+        (Some(Mode::Writer), Submission::Reader, false, false, None),
+        (None, Submission::Reader, true, false, None),
+        (None, Submission::CurrentPage, false, false, None),
+        (None, Submission::Reader, false, true, None),
+        (None, Submission::Reader, false, false, Some(0)),
+        (None, Submission::Reader, false, false, Some(3)),
+        (None, Submission::CurrentPage, false, false, Some(1)),
     ] {
+        let reader_enabled = only_mode != Some(Mode::Writer);
+        let writer_enabled = only_mode != Some(Mode::Reader);
         let mode = "reconnect-source-handoff-open-first";
         let base =
             std::env::temp_dir().join(format!("open-before-model-{}", ConversationId::new_v4()));
@@ -1527,7 +1530,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                 credentials: base.join("credentials"),
             },
             "research_policy": "disabled",
-            "product_settings": { "reader_enabled": true, "writer_enabled": writer_enabled }
+            "product_settings": { "reader_enabled": reader_enabled, "writer_enabled": writer_enabled }
         }))?;
         let store = Arc::new(Store::open(config.paths.clone())?);
         let ledger = Ledger::new(store.clone());
@@ -1562,7 +1565,9 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         if reuse {
             native.declare_source_order(&[page, buddy]);
         }
-        let case = format!("Writer enabled={writer_enabled}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}");
+        let case = format!(
+            "only mode={only_mode:?}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}"
+        );
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(10))
             .with_context(|| case.clone())?;
@@ -1638,10 +1643,18 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             .context("source classification absent")?;
         let records = ledger.inspect(conversation, false)?;
         let write_count = written.borrow().len();
-        let refuse = refuse_at.is_some();
+        let disabled_reader = submission == Submission::Reader && !reader_enabled;
+        let refuse = refuse_at.is_some() || disabled_reader;
         if switch_page || refuse {
             assert!(result.is_err(), "{result:?}");
             let (request, message) = match (switch_page, refuse_at) {
+                (false, None) if disabled_reader => {
+                    assert_eq!(steps.get(), 1, "only the shared router may call the model");
+                    (
+                        None,
+                        "Reader is turned off. Enable it in Manager to ask a reading question.",
+                    )
+                }
                 (true, None) => (Some(QUESTION), "This request was canceled."),
                 (_, Some(0)) => (
                     None,

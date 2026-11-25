@@ -25,6 +25,7 @@ pub(crate) fn is_opened_reply(turn: &Turn) -> bool {
     turn.outcome == Outcome::Failed
         && [
             AttemptReason::NoSelection,
+            AttemptReason::ReaderDisabled,
             AttemptReason::TranscriptionDisagreement,
             AttemptReason::ProviderFailure,
             AttemptReason::NativeOutputUnavailable,
@@ -119,6 +120,10 @@ pub(crate) fn describe_reason(
         );
     }
     let (code, text) = match reason {
+        AttemptReason::ReaderDisabled => (
+            "RMB-READER-DISABLED",
+            "Reader is turned off. Enable it in Manager to ask a reading question.",
+        ),
         AttemptReason::NoSelection => ("RMB-NO-SELECTION", "No usable source selection was found."),
         AttemptReason::TranscriptionDisagreement => (
             "RMB-READ-UNCERTAIN",
