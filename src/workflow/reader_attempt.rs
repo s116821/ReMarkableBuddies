@@ -21,7 +21,7 @@ enum EvidenceKind {
     Legacy,
     SdkFixture,
     Development,
-    ResidentHistorical,
+    ResidentHistorical { document: Uuid },
 }
 
 pub(super) struct Attempt {
@@ -430,10 +430,14 @@ impl Attempt {
     pub(super) fn is_selected(&self) -> bool {
         self.selected.is_some()
     }
-    pub(super) fn memory_document(&self) -> Result<Option<Uuid>> {
-        self.selected
-            .as_ref()
-            .map_or(Ok(None), |selected| selected.document())
+    pub(super) fn memory_document(&self, installed_reader: bool) -> Result<Option<Uuid>> {
+        match (&self.selected, self.kind) {
+            (Some(selected), _) => selected.document(),
+            (None, EvidenceKind::ResidentHistorical { document }) if installed_reader => {
+                Ok(Some(document))
+            }
+            _ => Ok(None),
+        }
     }
     pub fn prepare(ledger: &Ledger, acquired: AcquiredEvidence) -> Result<Self> {
         let timestamp = now()?;
@@ -552,7 +556,12 @@ impl Attempt {
                 {
                     prepared_pdf_root = Some(_receipt.historical.applied_root_revision);
                 }
-                (prepared.evidence.id, EvidenceKind::ResidentHistorical)
+                (
+                    prepared.evidence.id,
+                    EvidenceKind::ResidentHistorical {
+                        document: capture.document(),
+                    },
+                )
             }
             AcquiredEvidence::Sdk {
                 batch,
@@ -672,7 +681,7 @@ impl Attempt {
             EvidenceKind::Development => {
                 Ok(ledger.stored_development_images(self.evidence)?.images)
             }
-            EvidenceKind::ResidentHistorical => {
+            EvidenceKind::ResidentHistorical { .. } => {
                 Ok(ledger.stored_resident_images(self.evidence)?.images)
             }
             EvidenceKind::Legacy => Ok(ledger.stored_legacy_images(self.evidence)?.images),
@@ -685,7 +694,7 @@ impl Attempt {
         }
     }
     pub(super) fn resident_output(&self) -> bool {
-        self.kind == EvidenceKind::ResidentHistorical
+        matches!(self.kind, EvidenceKind::ResidentHistorical { .. })
     }
 
     pub(super) fn legacy_output(&self) -> bool {

@@ -2858,6 +2858,8 @@ pub(crate) mod tests {
         }
     }
     #[cfg(feature = "installed-resident-output")]
+    mod installed_reader_memory;
+    #[cfg(feature = "installed-resident-output")]
     mod installed_writer_memory;
     #[cfg(feature = "installed-resident-output")]
     mod shared_source_submission;

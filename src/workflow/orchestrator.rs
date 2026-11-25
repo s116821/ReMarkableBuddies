@@ -1663,10 +1663,9 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_millis()
                     .try_into()?;
-                // Selected ownership supplies historical data scope only, never
-                // native authority. Ordinary capture supplies no association.
                 let mut query = crate::memory::Query::new(result.question.clone(), now);
-                query.document = attempt.memory_document()?;
+                query.document =
+                    attempt.memory_document(self.workflow.uses_installed_reader_history())?;
                 attempt
                     .query_memory(memory.as_ref(), &query)
                     .map_err(|_| anyhow::anyhow!("subject memory retrieval failed"))
