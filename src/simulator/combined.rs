@@ -238,7 +238,7 @@ pub(super) fn run(scenario: Scenario) -> Result<Value> {
     );
     let notebook_model_calls = scenario
         .notebook
-        .then(|| run_notebook(&scenario))
+        .then(|| run_notebook(&scenario, true))
         .transpose()?;
     let fixture = SimulatorLedger::new();
     let ledger = fixture.open()?;
@@ -578,10 +578,11 @@ fn maintained_combined_fixture_runs() {
         "../../docs/simulator/scenarios/combined-reader-writer-reader.json"
     ))
     .unwrap();
+    run_notebook(&scenario, false).unwrap();
     run(scenario).unwrap();
 }
 
-fn run_notebook(scenario: &Scenario) -> Result<usize> {
+fn run_notebook(scenario: &Scenario, preference_enabled: bool) -> Result<usize> {
     use writer::notebook::{
         command::{Generate, Refine, Request},
         runner::Status,
@@ -599,12 +600,15 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
     let source = fixture_source(scenario.document.document);
     let mut observe = || Ok(source.clone());
     let (attachments, associations) = seed_shared_images(&ledger, conversation, &source)?;
-    let config = Config::default();
+    let config: Config = serde_json::from_value(
+        json!({"personalization":{"enabled":preference_enabled,"text":scenario.preference}}),
+    )?;
     let mut dispatch = Dispatch::local(&config, &ledger)?;
     let admitted = scope(&ledger, conversation, &source)?;
     let raw = serde_json::to_vec(&scenario.document)?;
     let sha256 = digest(&raw);
     let frozen = ValidatedNotebook::from_bytes(&raw, &sha256)?;
+    let guidance = "Keep each equation exactly as written.";
     let request = Request::GenerateNotebook(Box::new(Generate {
         conversation,
         operation: admitted.operation,
@@ -612,7 +616,7 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
         document_file: fixture.0.join("unused-owner-frozen-input.json"),
         document_sha256: sha256,
         selection: crate::conversation::TextScope::SuppliedNotebook,
-        guidance: None,
+        guidance: Some(guidance.into()),
         max_model_calls: 2,
         history_range: None,
     }));
@@ -638,6 +642,24 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
         model.seen[0].1.is_empty() && model.seen[1].1 == attachments,
         "notebook stage attachments changed"
     );
+    let preference_part =
+        crate::config::personalization::receiving_prompt_part(&scenario.preference);
+    for (parts, _) in &model.seen {
+        if preference_enabled {
+            ensure!(
+                parts.len() == 3
+                    && parts[0]
+                        .contains("explicit_guidance take precedence over the saved preference")
+                    && parts[1] == preference_part,
+                "notebook stage lost the precedence of the current guidance"
+            );
+        } else {
+            ensure!(
+                parts.len() == 2 && !parts[0].contains("over the saved preference"),
+                "disabled notebook preference changed the stage instructions"
+            );
+        }
+    }
     let reduce: Value = serde_json::from_str(
         model.seen[1]
             .0
@@ -650,6 +672,12 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
             .last()
             .ok_or_else(|| anyhow::anyhow!("map payload absent"))?,
     )?;
+    for frame in [&map, &reduce] {
+        ensure!(
+            frame["request"] == scenario.requests[1] && frame["explicit_guidance"] == guidance,
+            "notebook stage changed the current request or its guidance"
+        );
+    }
     ensure!(
         map.get("historical_images").is_none(),
         "map received image associations"
@@ -685,8 +713,7 @@ fn run_notebook(scenario: &Scenario) -> Result<usize> {
         "reducer digest did not bind attachment assignment"
     );
     ensure!(
-        reduce["request"] == scenario.requests[1]
-            && reduce["history"][0]["text"] == "Earlier image question?"
+        reduce["history"][0]["text"] == "Earlier image question?"
             && reduce["historical_images"] == associations
             && reduce["historical_png_base64_sha256"]
                 == json!(attachments

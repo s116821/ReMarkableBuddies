@@ -197,6 +197,9 @@ impl FrozenNotebookPayloads {
     fn parts(instruction: &str, preference: Option<&str>, payload: &Value) -> Result<Vec<String>> {
         let mut parts = vec![instruction.to_owned()];
         if let Some(text) = preference {
+            parts[0].push_str(
+                " The current request and its explicit_guidance take precedence over the saved preference.",
+            );
             parts.push(crate::config::personalization::receiving_prompt_part(text));
         }
         parts.push(serde_json::to_string(payload)?);
