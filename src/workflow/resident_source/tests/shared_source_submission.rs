@@ -2062,9 +2062,13 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                         3,
                         "disagreement must stop before answer generation"
                     );
+                    assert!(records.iter().any(|record| matches!(record,
+                        Record::OutcomeFact(fact)
+                            if fact.reason == crate::conversation::AttemptReason::TranscriptionDisagreement
+                    )));
                     (
                         Some(ARITHMETIC_QUESTION),
-                        "No usable source selection was found.",
+                        "The selected text could not be read reliably.",
                     )
                 }
                 (false, None) if readback_failed => {

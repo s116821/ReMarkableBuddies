@@ -351,7 +351,13 @@ impl<M: LLMEngine> Orchestrator<M> {
         let (analysis, mut result) = match (proposed_answer, &marked) {
             (Ok(value), _) => value,
             (Err(_), Some(marked)) => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+                return self.preserve_ordinary_marked_question(
+                    attempt,
+                    prepared,
+                    source,
+                    marked,
+                    AttemptReason::NoSelection,
+                );
             }
             (Err(error), None) => return Err(error),
         };
@@ -379,14 +385,27 @@ impl<M: LLMEngine> Orchestrator<M> {
             (Ok(verified), _) => reader_intent::parse_verification_response(&verified)
                 .and_then(|reading| reader_intent::agree(analysis, reading)),
             (Err(error), Some(marked)) if error.is::<crate::llm::ProviderRefused>() => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+                return self.preserve_ordinary_marked_question(
+                    attempt,
+                    prepared,
+                    source,
+                    marked,
+                    AttemptReason::NoSelection,
+                );
             }
             (Err(error), _) => return Err(error),
         };
         let agreement = match (agreement, &marked) {
             (Ok(value), _) => value,
-            (Err(_), Some(marked)) => {
-                return self.preserve_ordinary_marked_question(attempt, prepared, source, marked);
+            (Err(error), Some(marked)) => {
+                let reason = match error {
+                    reader_intent::Refusal::Disagreement => {
+                        AttemptReason::TranscriptionDisagreement
+                    }
+                    _ => AttemptReason::NoSelection,
+                };
+                return self
+                    .preserve_ordinary_marked_question(attempt, prepared, source, marked, reason);
             }
             (Err(error), None) => return Err(error.into()),
         };
@@ -444,6 +463,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         prepared: &Captured,
         source: &OrdinarySource<'_>,
         marked: &MarkedFragment,
+        reason: AttemptReason,
     ) -> Result<()> {
         source.require_current(&mut self.workflow)?;
         let head = attempt.interpret_ordinary_pdf(
@@ -456,7 +476,7 @@ impl<M: LLMEngine> Orchestrator<M> {
         )?;
         let current = head.capture_interpreted(&self.ledger, &attempt.user)?;
         if self.workflow.opened_submission().is_some() {
-            return Err(RefusedSubmission(AttemptReason::NoSelection).into());
+            return Err(RefusedSubmission(reason).into());
         }
         self.present_ordinary_outcome(
             attempt,
