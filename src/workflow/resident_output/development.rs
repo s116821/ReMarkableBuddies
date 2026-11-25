@@ -1304,13 +1304,19 @@ impl ResidentRenderer for Renderer {
             pulse()
         })?;
         lease.step(|pulse: &mut dyn FnMut() -> Result<()>| {
+            let installed = matches!(self.pin.as_ref(), OutputPin::Installed(_));
             let result = (|| -> Result<()> {
-                for ch in text.chars() {
+                for (ch, start) in text_characters_with_start(&text, installed) {
                     pulse()?;
                     self.pin.current()?;
-                    self.keyboard
-                        .borrow_mut()
-                        .string_to_keypresses(&ch.to_string())?;
+                    {
+                        // End the borrow before the guard can re-enter the backend.
+                        let mut keyboard = self.keyboard.borrow_mut();
+                        if start {
+                            keyboard.start_keypresses()?;
+                        }
+                        keyboard.character_to_keypresses(ch)?;
+                    }
                     pulse()?;
                 }
                 Ok(())
@@ -1323,9 +1329,31 @@ impl ResidentRenderer for Renderer {
     }
 }
 
+fn text_characters_with_start(
+    text: &str,
+    installed: bool,
+) -> impl Iterator<Item = (char, bool)> + '_ {
+    text.chars()
+        .enumerate()
+        .map(move |(index, ch)| (ch, !installed || index == 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_text_starts_once_while_development_starts_each_character() {
+        assert_eq!(
+            text_characters_with_start("=^", true).collect::<Vec<_>>(),
+            [('=', true), ('^', false)]
+        );
+        assert_eq!(
+            text_characters_with_start("=^", false).collect::<Vec<_>>(),
+            [('=', true), ('^', true)]
+        );
+        assert_eq!(text_characters_with_start("", true).next(), None);
+    }
 
     #[test]
     fn page_text_checks_the_exact_destination_and_preserves_a_fitting_answer() {
