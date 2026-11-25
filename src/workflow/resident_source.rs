@@ -3234,7 +3234,13 @@ pub(crate) mod tests {
                         text, new_page,
                     ));
             }
-            assert!(new_page && matches!(text, ResidentOutputText::Reader { .. }));
+            assert!(
+                new_page
+                    && matches!(
+                        text,
+                        ResidentOutputText::Reader { .. } | ResidentOutputText::ReaderQuestion(_)
+                    )
+            );
             Ok(!self.refuse_new_reader_text)
         }
 
