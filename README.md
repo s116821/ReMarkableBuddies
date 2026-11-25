@@ -43,8 +43,8 @@ page before the first model call. It reuses the linked adjacent page or inserts
 one there. Stay on the Buddy page to see the answer or a short explanation if
 the request fails. [Preview change](https://github.com/s116821/ReMarkableBuddies/pull/227)
 
-The v0.78.6 resident release verifies the handwritten question before opening
-the answer page. [Release details](https://github.com/s116821/ReMarkableBuddies/releases/tag/v0.78.6)
+With the complete resident installation running v0.78.6, Buddy verifies the
+handwritten question before opening the answer page. [v0.78.6 release notes](https://github.com/s116821/ReMarkableBuddies/releases/tag/v0.78.6)
 
 If you installed the standalone binary archive, prepare a blank page immediately
 after the source before the hold, or use an existing Reader answer page there.
