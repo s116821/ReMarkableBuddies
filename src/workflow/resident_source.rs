@@ -3573,7 +3573,8 @@ pub(crate) mod tests {
                         content_revision: None,
                         order_revision: None,
                         capability_revision: crate::storage::digest(b"profile"),
-                        evidence_procedure: "open-before-model-fixture".into(),
+                        evidence_procedure:
+                            super::resident_output::development::UNIFIED_BINDING_PROCEDURE.into(),
                     },
                     intended_target: Some(stored(target.page().page)),
                     observed_document: stored(target.page().document),

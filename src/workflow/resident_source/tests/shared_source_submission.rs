@@ -1779,6 +1779,7 @@ struct PageFirstModel {
     refuse_at: Option<usize>,
     fail_source_readback: Option<Arc<Store>>,
     verify_circled_operand: bool,
+    fresh_page: bool,
 }
 
 const ARITHMETIC_QUESTION: &str = "What is the answer to this?";
@@ -1851,6 +1852,21 @@ impl crate::LLMEngine for PageFirstModel {
         if self.refuse_at == Some(self.inner.steps.get()) {
             return Err(crate::llm::ProviderRefused.into());
         }
+        if self.inner.submission == Submission::Reader && self.inner.steps.get() == 3 {
+            let instructions = &self.inner.text[0];
+            let request: serde_json::Value = serde_json::from_str(&self.inner.text[1])?;
+            assert_eq!(
+                request["context"]["request_context"]["request"]["text"],
+                QUESTION
+            );
+            if self.fresh_page {
+                let body = format!("ReMarkableBuddies\n\nQ: {QUESTION}\n\nA: \n");
+                let available = 512 - body.len();
+                assert!(instructions.contains(&format!("at most {available} ASCII characters")));
+            } else {
+                assert!(!instructions.contains("The tablet has room for at most"));
+            }
+        }
         if self.verify_circled_operand {
             match self.inner.steps.get() {
                 1 => {
@@ -1908,6 +1924,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             None,
             None,
         ),
+        (None, Submission::Reader, false, false, None, None),
         (None, Submission::Reader, true, false, None, None),
         (None, Submission::Unclear, false, false, None, None),
         (
@@ -2107,6 +2124,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             refuse_at,
             fail_source_readback: readback_failed.then(|| store.clone()),
             verify_circled_operand,
+            fresh_page: !reuse,
         };
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -2323,6 +2341,9 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         } else {
             result.with_context(|| case.clone())?;
             assert_eq!(write_count, 1);
+            if submission == Submission::Reader {
+                assert_eq!(steps.get(), 4);
+            }
             assert!(
                 written.borrow()[0].contains(if submission == Submission::Reader {
                     "Four."

@@ -442,6 +442,7 @@ pub(crate) fn answer_followup_guarded(
 pub(crate) struct FollowupAttachments {
     descriptor: String,
     images: Vec<String>,
+    display_answer_space: Option<usize>,
 }
 
 impl FollowupAttachments {
@@ -449,6 +450,7 @@ impl FollowupAttachments {
         ledger: &crate::conversation::Ledger,
         context: &super::FrozenRequestContext,
         original_only: bool,
+        display_answer_space: Option<usize>,
     ) -> Result<Self> {
         let original = context.source().source_record();
         let original_view = crate::conversation::ContextView::default();
@@ -475,6 +477,7 @@ impl FollowupAttachments {
         Ok(Self {
             descriptor,
             images: images.attachments,
+            display_answer_space,
         })
     }
 }
@@ -507,6 +510,21 @@ fn answer_with_dispatch(
     } else {
         INSTRUCTIONS.to_owned()
     };
+    if let Some(space) = attachments.and_then(|images| images.display_answer_space) {
+        let prior = context.source_memory_context();
+        // A citation can append a reference of unknown length after generation.
+        if prior
+            .source_context()
+            .retrieval()
+            .is_none_or(|r| r.passages.is_empty())
+            && prior.memory().context().is_none_or(|c| c.facts.is_empty())
+            && context.research().sources().is_empty()
+        {
+            instructions.push_str(&format!(
+                " The tablet has room for at most {space} ASCII characters of answer text. Give a complete answer that fits within that space."
+            ));
+        }
+    }
     if is_notebook_ocr(context) {
         instructions.push_str(" The supplied notebook passages are unverified historical OCR from the declared page set. Keep that provenance and avoid inferring completeness beyond the supplied pages or treating the transcription as verified.");
     }
@@ -893,6 +911,7 @@ mod guarded_tests {
             descriptor: r#"{"historical_images":[{"attachment_index":0},{"attachment_index":1}]}"#
                 .into(),
             images: vec!["aW1hZ2UtMQ==".into(), "aW1hZ2UtMg==".into()],
+            display_answer_space: None,
         };
         let mut engine =
             Engine::new(r#"{"status":"answered","text":"fixture answer","citations":[]}"#);

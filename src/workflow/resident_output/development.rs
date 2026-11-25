@@ -27,7 +27,9 @@ pub(crate) const ADAPTER: &str = "fe52512fd08f26bc727357106a7e9e5e0bdacdd0f93c8b
 const LEGACY_TITLE: &str = "=== Reader Buddy Answers ===";
 const LEGACY_INSTALLED_BINDING: &str = "installed-full-admission-fresh-observe-guarded-v1";
 const ADOPTED_BINDING: &str = "installed-explicit-legacy-adoption-v1";
-const UNIFIED_BINDING_PROCEDURE: &str = "installed-full-admission-fresh-observe-unified-display-v1";
+pub(in crate::workflow) const UNIFIED_BINDING_PROCEDURE: &str =
+    "installed-full-admission-fresh-observe-unified-display-v1";
+const KEYBOARD_MAX_CHARACTERS: usize = 512;
 pub(crate) const REPEAT_PROFILE: &str =
     "40b1ddfc7a85d856e8c0091f136196f57dbdef99df29886bcca0947911d68070";
 pub(crate) const REPEAT_ADAPTER: &str =
@@ -1261,11 +1263,29 @@ impl DisplayFormat {
         output: ResidentOutputText<'_>,
         supports_keys: impl Fn(&str) -> bool,
     ) -> Option<String> {
-        let fits =
-            |text: &str| text.len() <= 2048 && text.chars().count() <= 512 && supports_keys(text);
+        let fits = |text: &str| {
+            text.len() <= 2048
+                && text.chars().count() <= KEYBOARD_MAX_CHARACTERS
+                && supports_keys(text)
+        };
         let text = self.format(new, output, fits);
         fits(&text).then_some(text)
     }
+}
+
+#[cfg(feature = "installed-resident-output")]
+pub(in crate::workflow) fn new_unified_ascii_answer_space(
+    binding: &BindingReceipt,
+    empty_answer: ResidentOutputText<'_>,
+) -> Option<usize> {
+    let display =
+        DisplayFormat::Unified.for_binding(binding.acquisition, &binding.source.evidence_procedure);
+    if display != DisplayFormat::Unified {
+        return None;
+    }
+    let body = display.text_for_keyboard(true, empty_answer, str::is_ascii)?;
+    let space = KEYBOARD_MAX_CHARACTERS - body.len();
+    (space > 0).then_some(space)
 }
 
 #[cfg(all(test, feature = "installed-resident-output"))]

@@ -444,6 +444,12 @@ impl<M: LLMEngine> Orchestrator<M> {
             search,
             deadline: source.deadline,
             original_image_only: source.book.is_none(),
+            display_answer_space: if source.book.is_none() {
+                self.workflow
+                    .opened_reader_ascii_answer_space(&result.question, result.selection.center)
+            } else {
+                None
+            },
         };
         self.answer_ordinary_source(
             attempt,
