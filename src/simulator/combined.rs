@@ -660,6 +660,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
     let conversation = Uuid::new_v4();
     ledger.create(conversation, Uuid::new_v4(), 1)?;
     let mut source = fixture_source(Uuid::new_v4());
+    let no_patterns = std::collections::BTreeMap::new();
     let blank = Uuid::new_v4();
     let buddy = Uuid::new_v4();
     let last = Uuid::new_v4();
@@ -678,6 +679,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
         order: &order,
         originals: &originals,
         buddy_pages: &buddy_pages,
+        patterned_paper: &no_patterns,
     };
     source.order_revision = Some(images.order_revision()?);
     // Model the owner's saved-scene sampling independently of the rendered PNGs.
@@ -737,6 +739,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
             order: &order,
             originals: wrong,
             buddy_pages: &buddy_pages,
+            patterned_paper: &no_patterns,
         };
         let Err(error) = dispatch.whole_notebook(
             &ledger,
@@ -1036,7 +1039,7 @@ fn whole_notebook_writer_uses_complete_ordered_images() -> Result<()> {
 fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Result<()> {
     use crate::{
         conversation::notebook::NotebookPlan,
-        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages},
+        retrieval::notebook::{NotebookSourceReceipt, OrderedNotebookImages, PatternedPaper},
         writer::notebook::runner::Status,
     };
 
@@ -1066,6 +1069,10 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
         order: &order,
         originals: &original_images,
         buddy_pages: &std::collections::BTreeSet::from([buddy]),
+        patterned_paper: &std::collections::BTreeMap::from([
+            (blank, PatternedPaper::PaperOnly),
+            (fifth, PatternedPaper::Ink),
+        ]),
     };
     let receipt = NotebookSourceReceipt {
         saved_source_revision: digest(b"independently observed fixture notebook"),
@@ -1150,6 +1157,13 @@ fn whole_notebook_writer_batches_ocr_before_planning_one_complete_draft() -> Res
             .collect::<Vec<_>>(),
         [4, 1, 0, 0, 0]
     );
+    for (batch, pattern) in [json!({"2":"paper-only"}), json!({"6":"ink"})]
+        .into_iter()
+        .enumerate()
+    {
+        let manifest: Value = serde_json::from_str(&model.seen[batch].0[1])?;
+        assert_eq!(manifest["patterned_paper"], pattern);
+    }
     let encoded: Vec<_> = model
         .seen
         .iter()
@@ -1192,13 +1206,13 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
     use crate::{
         handwriting::{self, LocalCorrections, Provider},
         retrieval::notebook::{
-            NotebookSourceReceipt, OrderedNotebookImages, WRITER_VISUAL_REVISION,
+            NotebookSourceReceipt, OrderedNotebookImages, PatternedPaper, WRITER_VISUAL_REVISION,
         },
     };
 
     let fixture = SimulatorLedger::new();
     let ledger = fixture.open_targets()?;
-    let mut source = fixture_source(Uuid::new_v4());
+    let source = fixture_source(Uuid::new_v4());
     let order = [
         source.page,
         Uuid::new_v4(),
@@ -1206,7 +1220,7 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
         Uuid::new_v4(),
         Uuid::new_v4(),
     ];
-    let pngs = [12, 24, 36, 48, 60]
+    let pngs = [12, 255, 36, 48, 60]
         .map(fixture_png)
         .into_iter()
         .collect::<Result<Vec<_>>>()?;
@@ -1215,25 +1229,30 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
         .copied()
         .zip(pngs.iter().map(Vec::as_slice))
         .collect();
-    let images = OrderedNotebookImages {
-        document: source.document,
-        order: &order,
-        originals: &originals,
-        buddy_pages: &Default::default(),
-    };
-    let receipt = NotebookSourceReceipt {
-        saved_source_revision: digest(b"sealed notebook"),
-        ordered_image_sha256: images.image_digest()?,
-    };
-    source.content_revision = Some(receipt.saved_source_revision.clone());
-    source.order_revision = Some(images.order_revision()?);
-    let run = |config: &Config| -> Result<(Model, String)> {
+    let run = |config: &Config,
+               patterned_paper: &std::collections::BTreeMap<_, _>|
+     -> Result<(Model, String)> {
+        let mut source = source.clone();
+        let images = OrderedNotebookImages {
+            document: source.document,
+            order: &order,
+            originals: &originals,
+            buddy_pages: &Default::default(),
+            patterned_paper,
+        };
+        let receipt = NotebookSourceReceipt {
+            saved_source_revision: digest(b"sealed notebook"),
+            ordered_image_sha256: images.image_digest()?,
+        };
+        source.content_revision = Some(receipt.saved_source_revision.clone());
+        source.order_revision = Some(images.order_revision()?);
         let conversation = Uuid::new_v4();
         ledger.create(conversation, Uuid::new_v4(), 1)?;
         let request = scope(&ledger, conversation, &source)?;
-        let pages: Vec<_> = (1..=5).map(|page| json!({
+        let mut pages: Vec<_> = (1..=5).map(|page| json!({
             "page":page, "status":"readable", "writing":format!("Target {page}"), "visual_observation":""
         })).collect();
+        pages[1] = json!({"page":2, "status":"blank", "writing":"", "visual_observation":""});
         let mut model = Model {
             replies: [
                 json!({"pages":&pages[..4]}).to_string(),
@@ -1264,6 +1283,9 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
             anyhow::bail!("notebook archive absent");
         };
         assert_eq!(archive.source_sha256, receipt.ordered_image_sha256);
+        let notebook = archive.load(ledger.store())?;
+        let blank = &notebook.document().units[1];
+        assert_eq!((blank.page, blank.text.as_str()), (Some(2), ""));
         Ok((model, archive.extractor_revision))
     };
 
@@ -1271,7 +1293,8 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
         paths: ledger.store().paths.clone(),
         ..Config::default()
     };
-    let (plain, plain_revision) = run(&config)?;
+    let plain_paper = Default::default();
+    let (plain, plain_revision) = run(&config, &plain_paper)?;
     assert_eq!(
         plain_revision,
         format!("{WRITER_VISUAL_REVISION}{}", digest(b"fixture"))
@@ -1298,14 +1321,14 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
     };
     // The last original is outside the first batch. Neither batch may use it as an example.
     confirm(&pngs[4], "Target must stay excluded");
-    let (empty, empty_revision) = run(&config)?;
+    let (empty, empty_revision) = run(&config, &plain_paper)?;
     assert_eq!(empty.seen[..2], plain.seen[..2]);
     assert_eq!(empty_revision, plain_revision);
 
     let reference = fixture_png(196)?;
     let correction = "Reference handwriting only";
     confirm(&reference, correction);
-    let (personalized, revision) = run(&config)?;
+    let (personalized, revision) = run(&config, &plain_paper)?;
     assert_ne!(revision, plain_revision);
     assert!(revision.starts_with(WRITER_VISUAL_REVISION));
     assert_eq!(personalized.seen.len(), 4);
@@ -1318,6 +1341,37 @@ fn whole_notebook_writer_uses_confirmed_handwriting_only_in_ocr_batches() -> Res
         assert_eq!(attachments[1..], plain.seen[i].1);
     }
     for (texts, attachments) in &personalized.seen[2..] {
+        assert!(attachments.is_empty());
+        assert!(texts.iter().all(|text| !text.contains(correction)));
+    }
+    let paper = std::collections::BTreeMap::from([
+        (order[1], PatternedPaper::PaperOnly),
+        (order[4], PatternedPaper::Ink),
+    ]);
+    let (patterned, patterned_revision) = run(&config, &paper)?;
+    let profile_digest = revision.strip_prefix(WRITER_VISUAL_REVISION).unwrap();
+    assert_eq!(
+        patterned_revision,
+        format!("{WRITER_VISUAL_REVISION}stock-paper-ink-only-v2:{profile_digest}")
+    );
+    for (batch, expected) in [json!({"2":"paper-only"}), json!({"5":"ink"})]
+        .into_iter()
+        .enumerate()
+    {
+        let (texts, attachments) = &patterned.seen[batch];
+        let manifest = texts
+            .iter()
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .find(|value| value["protocol"] == "writer-notebook-page-evidence-v1")
+            .expect("missing original-page manifest");
+        assert_eq!(manifest["patterned_paper"], expected);
+        assert!(texts.iter().any(|text| text.contains(correction)));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("Target must stay excluded")));
+        assert_eq!(attachments, &personalized.seen[batch].1);
+    }
+    for (texts, attachments) in &patterned.seen[2..] {
         assert!(attachments.is_empty());
         assert!(texts.iter().all(|text| !text.contains(correction)));
     }

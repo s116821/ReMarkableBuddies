@@ -1,8 +1,7 @@
 //! Bounded rendering for saved RM2 notebook pages admitted by the source owner.
-use super::{static_png, OrderedNotebookImages, MAX_ORDERED_NOTEBOOK_PAGES};
+use super::{OrderedNotebookImages, PatternedPaper, MAX_ORDERED_NOTEBOOK_PAGES};
 use crate::storage::Uuid;
 use anyhow::{bail, ensure, Context, Result};
-use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
 use remarkable_rm::{
     blocks::iter_blocks,
     primitives::Reader,
@@ -11,25 +10,22 @@ use remarkable_rm::{
         line::read_line,
         tree::{read_scene_tree_block, read_tree_node_block},
     },
-    BlockType, CrdtId, Layer, Line, Page, Pen, RenderOptions, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    BackgroundImage, BlockType, CrdtId, Layer, Line, Page, Pen, PenColor, RenderOptions,
+    DEFAULT_HEIGHT, DEFAULT_WIDTH,
 };
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
-    io::Cursor,
 };
 
 const MAX_SCENE_BYTES: usize = 256 * 1024;
 const MAX_BLOCKS: usize = 512;
 const MAX_POINTS: usize = 8_192;
 const MAX_HEIGHT: u32 = DEFAULT_HEIGHT * 3 / 2;
-// Each accepted asset fits the same page's bounded, sequential decode.
-const MAX_TEMPLATE_PNG: usize = 1024 * 1024;
-const MAX_TEMPLATE_SVG: usize = 32 * 1024;
 const MAX_PNG: usize = 2 * 1024 * 1024;
 const MAX_RETAINED_PNG_BYTES: usize = 8 * 1024 * 1024;
 const EDGE_MARGIN: f32 = 24.0;
-const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+mod paper;
 
 /// Borrowed bytes from the same pinned read used for the saved-source revision.
 pub(crate) struct SavedPage<'a> {
@@ -42,6 +38,7 @@ pub(crate) struct SavedPage<'a> {
 #[derive(Default)]
 pub(crate) struct NotebookRaster {
     originals: Vec<(Uuid, Vec<u8>)>,
+    patterned_paper: BTreeMap<Uuid, PatternedPaper>,
     retained_png_bytes: usize,
 }
 
@@ -59,15 +56,31 @@ impl NotebookRaster {
         );
         progress()?;
         let (scene, height) = saved_scene(page.scene)?;
-        verify_white_template(&page)?;
+        let patterned = paper::is_patterned(page.template_svg, page.template_png, height)?;
         progress()?;
 
-        let png = remarkable_rm::render_page(
+        // Keep white strokes visible while leaving all template pixels out of OCR.
+        let needs_contrast = patterned
+            && scene
+                .layers
+                .iter()
+                .flat_map(|layer| &layer.lines)
+                .any(|line| match line.color_rgba {
+                    Some([red, green, blue, alpha]) => [red, green, blue] == [255; 3] && alpha != 0,
+                    None => line.color == PenColor::White,
+                });
+        let matte = needs_contrast.then(|| BackgroundImage {
+            width: 1,
+            height: 1,
+            rgba: vec![224, 224, 224, 255],
+        });
+        let png = remarkable_rm::render_page_with_background(
             &scene,
             RenderOptions {
                 width: DEFAULT_WIDTH,
                 height,
             },
+            matte.as_ref(),
         )
         .context("saved scene rasterization refused")?;
         ensure!(
@@ -76,6 +89,21 @@ impl NotebookRaster {
         );
         progress()?;
         self.retained_png_bytes += png.len();
+        if patterned {
+            let empty = scene.text.is_none()
+                && scene
+                    .layers
+                    .iter()
+                    .all(|layer| layer.lines.is_empty() && layer.glyphs.is_empty());
+            self.patterned_paper.insert(
+                page.id,
+                if empty {
+                    PatternedPaper::PaperOnly
+                } else {
+                    PatternedPaper::Ink
+                },
+            );
+        }
         self.originals.push((page.id, png));
         Ok(())
     }
@@ -97,96 +125,9 @@ impl NotebookRaster {
             order,
             originals: &originals,
             buddy_pages,
+            patterned_paper: &self.patterned_paper,
         })
     }
-}
-
-fn verify_white_template(page: &SavedPage<'_>) -> Result<()> {
-    ensure!(
-        page.template_svg.is_some() || page.template_png.is_some(),
-        "saved page stock white template unavailable"
-    );
-    if let Some(svg) = page.template_svg {
-        verify_white_svg(svg)?;
-    }
-    if let Some(png) = page.template_png {
-        ensure!(
-            png.len() <= MAX_TEMPLATE_PNG,
-            "saved paper PNG exceeds budget"
-        );
-        static_png(png)?;
-        let mut limits = Limits::default();
-        limits.max_image_width = Some(DEFAULT_WIDTH);
-        limits.max_image_height = Some(DEFAULT_HEIGHT);
-        limits.max_alloc = Some(u64::from(DEFAULT_WIDTH) * u64::from(DEFAULT_HEIGHT) * 8);
-        let decoder = PngDecoder::with_limits(Cursor::new(png), limits)?;
-        ensure!(
-            !decoder.is_apng()?
-                && matches!(
-                    decoder.dimensions(),
-                    (1, 1) | (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-                ),
-            "unsupported saved paper PNG geometry"
-        );
-        let mut pixels = vec![0; usize::try_from(decoder.total_bytes())?];
-        decoder.read_image(&mut pixels)?;
-        ensure!(
-            pixels.iter().all(|&channel| channel == 255),
-            "saved paper PNG is not uniform opaque white"
-        );
-    }
-    Ok(())
-}
-
-fn verify_white_svg(svg: &[u8]) -> Result<()> {
-    ensure!(
-        svg.len() <= MAX_TEMPLATE_SVG,
-        "saved paper SVG exceeds budget"
-    );
-    let xml = roxmltree::Document::parse_with_options(
-        std::str::from_utf8(svg)?,
-        roxmltree::ParsingOptions {
-            nodes_limit: 16,
-            ..roxmltree::ParsingOptions::default()
-        },
-    )?;
-    let root = xml.root_element();
-    ensure!(
-        root.tag_name().namespace() == Some(SVG_NAMESPACE)
-            && root.tag_name().name() == "svg"
-            && root.attributes().all(|attr| attr.namespace().is_none()
-                && matches!(attr.name(), "width" | "height" | "viewBox" | "version"))
-            && root
-                .attribute("viewBox")
-                .is_none_or(|v| v == "0 0 1404 1872")
-            && root.attribute("width").is_none_or(|v| v == "1404")
-            && root.attribute("height").is_none_or(|v| v == "1872"),
-        "unsupported saved paper SVG"
-    );
-    for child in root.children().filter(|node| !node.is_comment()) {
-        if child.is_text() && child.text().is_some_and(|s| s.trim().is_empty()) {
-            continue;
-        }
-        ensure!(
-            child.is_element()
-                && child.tag_name().namespace() == Some(SVG_NAMESPACE)
-                && child.tag_name().name() == "rect"
-                && child
-                    .children()
-                    .all(|node| node.is_text() && node.text().is_some_and(|s| s.trim().is_empty()))
-                && child.attributes().all(|attr| attr.namespace().is_none()
-                    && match attr.name() {
-                        "x" | "y" => attr.value() == "0",
-                        "width" => matches!(attr.value(), "1404" | "100%"),
-                        "height" => matches!(attr.value(), "1872" | "100%"),
-                        "fill" => matches!(attr.value(), "#fff" | "#ffffff" | "white"),
-                        _ => false,
-                    })
-                && child.attribute("fill").is_some(),
-            "saved paper SVG can paint nonwhite content"
-        );
-    }
-    Ok(())
 }
 
 /// Assemble the flat, fully accounted scene once, in the tablet's paint order.

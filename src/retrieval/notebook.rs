@@ -12,7 +12,10 @@ use image::{codecs::png::PngDecoder, ImageDecoder, Limits};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, io::Cursor};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Cursor,
+};
 
 #[cfg(any(test, all(target_os = "linux", feature = "installed-resident-output")))]
 pub(crate) mod saved_render;
@@ -38,6 +41,13 @@ pub struct PageImage<'a> {
     pub png: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PatternedPaper {
+    PaperOnly,
+    Ink,
+}
+
 /// Full-page images and verified output-page identities from the source owner.
 /// The order is the native notebook order, including any Buddy pages.
 pub(crate) struct OrderedNotebookImages<'a> {
@@ -45,6 +55,7 @@ pub(crate) struct OrderedNotebookImages<'a> {
     pub order: &'a [Uuid],
     pub originals: &'a [(Uuid, &'a [u8])],
     pub buddy_pages: &'a BTreeSet<Uuid>,
+    pub patterned_paper: &'a BTreeMap<Uuid, PatternedPaper>,
 }
 
 /// Evidence from the acquisition owner, sealed after verifying that the saved
@@ -59,6 +70,7 @@ pub(crate) struct NotebookSourceReceipt {
 pub(crate) struct OriginalNotebookPages<'a> {
     document: Uuid,
     pages: Vec<PageImage<'a>>,
+    patterned_paper: BTreeMap<u32, PatternedPaper>,
     source_sha256: String,
     pub(crate) target_hashes: BTreeSet<String>,
 }
@@ -90,13 +102,29 @@ impl<'a> OrderedNotebookImages<'a> {
             .iter()
             .map(|(page, png)| (*page, digest(png)))
             .collect();
-        let source = digest(&serde_json::to_vec(&(
-            "native-ordered-notebook-pngs-v1",
-            self.order_revision()?,
-            &originals,
-        ))?);
+        let order_revision = self.order_revision()?;
+        let bytes = if self.patterned_paper.is_empty() {
+            serde_json::to_vec(&(
+                "native-ordered-notebook-pngs-v1",
+                order_revision,
+                &originals,
+            ))?
+        } else {
+            ensure!(
+                self.patterned_paper
+                    .keys()
+                    .all(|page| originals.iter().any(|(original, _)| original == page)),
+                "patterned paper evidence names a non-original page"
+            );
+            serde_json::to_vec(&(
+                "native-ordered-notebook-pngs-and-paper-v2",
+                order_revision,
+                &originals,
+                self.patterned_paper,
+            ))?
+        };
         Ok((
-            source,
+            digest(&bytes),
             originals.into_iter().map(|(_, hash)| hash).collect(),
         ))
     }
@@ -116,6 +144,7 @@ impl<'a> OrderedNotebookImages<'a> {
         let mut seen = BTreeSet::new();
         let mut originals = self.originals.iter();
         let mut pages = Vec::with_capacity(self.originals.len());
+        let mut patterned_paper = BTreeMap::new();
         for (index, &id) in self.order.iter().enumerate() {
             ensure!(
                 !id.is_nil() && seen.insert(id),
@@ -128,10 +157,11 @@ impl<'a> OrderedNotebookImages<'a> {
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("original notebook page missing"))?;
             ensure!(page == id, "original notebook page order changed");
-            pages.push(PageImage {
-                page: (index + 1).try_into()?,
-                png,
-            });
+            let page = (index + 1).try_into()?;
+            if let Some(&paper) = self.patterned_paper.get(&id) {
+                patterned_paper.insert(page, paper);
+            }
+            pages.push(PageImage { page, png });
         }
         ensure!(
             originals.next().is_none() && self.buddy_pages.is_subset(&seen),
@@ -145,6 +175,7 @@ impl<'a> OrderedNotebookImages<'a> {
         Ok(OriginalNotebookPages {
             document: self.document,
             pages,
+            patterned_paper,
             source_sha256,
             target_hashes,
         })
@@ -177,7 +208,14 @@ impl OriginalNotebookPages<'_> {
         let mut units = Vec::new();
         let mut text_bytes = 0;
         for batch in self.pages.chunks(options.max_pages) {
-            let next = writer_visual::extract(batch, context, engine, options, progress)?;
+            let next = writer_visual::extract(
+                batch,
+                &self.patterned_paper,
+                context,
+                engine,
+                options,
+                progress,
+            )?;
             text_bytes += next.iter().map(|unit| unit.text.len()).sum::<usize>();
             ensure!(
                 text_bytes <= crate::writer::notebook::MAX_SELECTED_BYTES,
@@ -185,11 +223,16 @@ impl OriginalNotebookPages<'_> {
             );
             units.extend(next);
         }
+        let paper_revision = if self.patterned_paper.is_empty() {
+            ""
+        } else {
+            "stock-paper-ink-only-v2:"
+        };
         Ok(NormalizedDocument {
             document: self.document,
             format: SourceFormat::Notebook,
             source_sha256: self.source_sha256,
-            extractor_revision: format!("{WRITER_VISUAL_REVISION}{profile_digest}"),
+            extractor_revision: format!("{WRITER_VISUAL_REVISION}{paper_revision}{profile_digest}"),
             units,
         })
     }
