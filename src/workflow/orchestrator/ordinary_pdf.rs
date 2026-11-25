@@ -643,6 +643,11 @@ impl<M: LLMEngine> Orchestrator<M> {
                 |text| Ok(text.len()),
                 Some(head),
                 None,
+                if source.book.is_none() {
+                    crate::conversation::receiving::FollowupMedia::BoundPage
+                } else {
+                    crate::conversation::receiving::FollowupMedia::All
+                },
             )?
         };
         ensure!(

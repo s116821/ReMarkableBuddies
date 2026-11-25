@@ -140,6 +140,15 @@ impl fmt::Display for ReceivingRefusal {
 }
 impl std::error::Error for ReceivingRefusal {}
 
+const ORDINARY_SCOPE: &str = "ordinary-historical";
+const BOUND_PAGE_SCOPE: &str = "ordinary-historical-bound-page";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FollowupMedia {
+    All,
+    BoundPage,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Frame {
@@ -257,10 +266,11 @@ pub(super) fn validate_historical(
 ) -> Result<Vec<Media>> {
     validate_budget(budget)?;
     let mut frame: Frame = serde_json::from_str(json)?;
+    let bound_page = frame.scope == BOUND_PAGE_SCOPE;
     ensure!(
         encoded(&frame, budget.max_encoded_bytes)? == json
             && frame.schema == 1
-            && frame.scope == "ordinary-historical"
+            && matches!(frame.scope.as_str(), ORDINARY_SCOPE | BOUND_PAGE_SCOPE)
             && frame.conversation == conversation,
         "invalid historical frame encoding"
     );
@@ -296,6 +306,25 @@ pub(super) fn validate_historical(
             if matches!(source_record.as_ref(), Record::ArchivedNormalizedSource(_))
     );
     let choice = frame.source.request_source()?;
+    let bound_media = if bound_page {
+        ensure!(
+            !matches!(choice, RequestSource::Original { .. }),
+            "bound-page evidence cannot carry an original-file index"
+        );
+        let media = frame
+            .source
+            .source_record()
+            .map(source_media)
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            frame.missing_media.iter().all(|item| media.contains(item)),
+            "bound-page evidence checked unrelated media"
+        );
+        Some(media)
+    } else {
+        None
+    };
     ensure!(
         original(
             records,
@@ -402,7 +431,7 @@ pub(super) fn validate_historical(
         }
         _ => return Err(ReceivingRefusal::InvalidRetrieval.into()),
     }
-    Ok(media)
+    Ok(bound_media.unwrap_or(media))
 }
 pub(super) fn validate_budget(budget: &ReceivingBudget) -> Result<usize> {
     let tokens = budget
@@ -719,7 +748,7 @@ impl Ledger {
             retrieval,
             token_count,
             records,
-            false,
+            None,
             None,
         )
     }
@@ -735,9 +764,27 @@ impl Ledger {
         retrieval: Option<&dyn Provider>,
         token_count: impl Fn(&str) -> Result<usize>,
         records: Vec<Record>,
-        keep_media: bool,
+        followup_media: Option<FollowupMedia>,
         verified_notebook: Option<&Media>,
     ) -> Result<FrozenRequestContext> {
+        let bound_page = followup_media == Some(FollowupMedia::BoundPage);
+        let bound_media = if bound_page {
+            match &source {
+                RequestSource::NoDocument => Vec::new(),
+                RequestSource::CapturedPage { source_record, .. } => {
+                    let record = records
+                        .iter()
+                        .find(|record| source_id(record) == Some(*source_record))
+                        .ok_or(ReceivingRefusal::OriginalUnavailable)?;
+                    source_media(record)?
+                }
+                RequestSource::Original { .. } => {
+                    return Err(ReceivingRefusal::AssociationMismatch.into());
+                }
+            }
+        } else {
+            Vec::new()
+        };
         let mut context = Self::assemble_request_data(
             conversation,
             request_turn,
@@ -747,11 +794,16 @@ impl Ledger {
             retrieval,
             token_count,
             records,
-            "ordinary-historical",
-            keep_media,
+            if bound_page {
+                BOUND_PAGE_SCOPE
+            } else {
+                ORDINARY_SCOPE
+            },
+            followup_media == Some(FollowupMedia::All),
             verified_notebook.is_some(),
             |media| {
-                verified_notebook == Some(media)
+                (bound_page && !bound_media.contains(media))
+                    || verified_notebook == Some(media)
                     || self
                         .store
                         .open_object(&ObjectRef {

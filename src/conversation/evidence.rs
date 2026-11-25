@@ -415,7 +415,7 @@ impl Ledger {
             token_count,
             capture,
             records,
-            false,
+            None,
             None,
         )
     }
@@ -441,6 +441,7 @@ impl Ledger {
             token_count,
             None,
             None,
+            FollowupMedia::All,
         )
     }
 
@@ -456,6 +457,7 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         followup: Option<FollowupRequestHead>,
         notebook: Option<&crate::retrieval::notebook::SuppliedNotebook<'_>>,
+        media: FollowupMedia,
     ) -> Result<PreparedRequestEvidence> {
         validate_budget(&budget)?;
         let allow_notebook = notebook.is_some();
@@ -601,7 +603,7 @@ impl Ledger {
             token_count,
             capture,
             records,
-            followup.is_some(),
+            followup.is_some().then_some(media),
             verified_notebook.as_ref(),
         )
     }
@@ -675,7 +677,7 @@ impl Ledger {
         token_count: impl Fn(&str) -> Result<usize>,
         capture: Captured,
         records: Vec<Record>,
-        keep_media: bool,
+        followup_media: Option<FollowupMedia>,
         verified_notebook: Option<&Media>,
     ) -> Result<PreparedRequestEvidence> {
         let context = self.assemble_ordinary_request_context(
@@ -687,7 +689,7 @@ impl Ledger {
             retrieval,
             token_count,
             records,
-            keep_media,
+            followup_media,
             verified_notebook,
         )?;
         let mut needed = context

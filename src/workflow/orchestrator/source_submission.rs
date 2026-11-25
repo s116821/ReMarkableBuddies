@@ -99,7 +99,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     .ledger
                     .expected(Namespace::Conversation, conversation)?;
                 const HISTORY_BYTES: usize = 24 * 1024;
-                let context = self.ledger.recent_model_context(
+                let turns = self.ledger.recent_model_turns(
                     conversation,
                     &ContextBudget {
                         max_text_bytes: HISTORY_BYTES,
@@ -114,8 +114,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                             .sum())
                     },
                 )?;
-                let turns: Vec<_> = context
-                    .turns
+                let turns: Vec<_> = turns
                     .into_iter()
                     .map(|turn| (turn.sequence, turn.role, turn.mode, turn.text))
                     .collect();
