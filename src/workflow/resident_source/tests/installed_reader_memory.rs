@@ -275,11 +275,7 @@ fn check_captured_page(case: Case) -> Result<()> {
     let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
     let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
     let result = reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config));
-    let search = peer
-        .map(|(_, worker)| worker.join().expect("search fixture thread panicked"))
-        .transpose();
     let refused = matches!(case, Case::Unavailable | Case::StaleRequest);
-    assert_eq!(fixture.constructions(), usize::from(case == Case::Required));
     if refused {
         let error = result.expect_err("Expected refusal before answering");
         if case == Case::Unavailable {
@@ -295,6 +291,10 @@ fn check_captured_page(case: Case) -> Result<()> {
     } else {
         result?;
     }
+    let search = peer
+        .map(|(_, worker)| worker.join().expect("search fixture thread panicked"))
+        .transpose()?;
+    assert_eq!(fixture.constructions(), usize::from(case == Case::Required));
     let calls = calls.borrow();
     assert_eq!(calls.len(), if refused { 2 } else { 3 });
     for (parts, _) in &calls[..2] {
@@ -334,7 +334,7 @@ fn check_captured_page(case: Case) -> Result<()> {
         values.sort_unstable();
         assert_eq!(values, [GLOBAL, NOTEBOOK]);
     }
-    if let Some(search) = search? {
+    if let Some(search) = search {
         let request = search.to_string();
         assert!(request.contains(question));
         assert!(request.contains(&document.to_string()));
