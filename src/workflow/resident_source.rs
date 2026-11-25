@@ -2446,7 +2446,7 @@ pub(crate) mod tests {
         pub epub: bool,
         pub rendered: Option<Rc<RefCell<Vec<String>>>>,
         pub source_targets: bool,
-        pub edit_book_during_navigation: bool,
+        pub bound_successor_for_book_edit: Option<ConversationId>,
         pub count: usize,
         pub before_round: Option<&'a mut OrdinaryPdfRoundHook<'a>>,
     }
@@ -2470,7 +2470,7 @@ pub(crate) mod tests {
                 rounds.count == 1,
                 "The placement fixture starts from one original page"
             );
-            if rounds.edit_book_during_navigation {
+            if rounds.bound_successor_for_book_edit.is_some() {
                 "reconnect-source-handoff-research-pages"
             } else {
                 "reconnect-source-handoff-writer-insert"
@@ -2512,9 +2512,7 @@ pub(crate) mod tests {
             workflow_with_store(mode, releases, Duration::ZERO, &store);
         let native = Fixture::new();
         native.declare_source(document, page);
-        let successor = rounds
-            .edit_book_during_navigation
-            .then(ConversationId::new_v4);
+        let successor = rounds.bound_successor_for_book_edit;
         if let Some(successor) = successor {
             native.declare_research_successor(successor);
         }
@@ -2618,10 +2616,11 @@ pub(crate) mod tests {
                     usize::from(successor.is_none()),
                     "Expected placement to use its assigned page"
                 );
-                if rounds.edit_book_during_navigation {
+                if successor.is_some() {
                     assert!(
                         position.exists(),
-                        "Expected navigation to the bound Buddy page"
+                        "Expected navigation to the bound Buddy page. Request outcome: {:?}",
+                        results.last()
                     );
                 }
             } else {

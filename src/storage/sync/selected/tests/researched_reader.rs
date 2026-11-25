@@ -1290,7 +1290,7 @@ fn assert_pdf_reuse_between_service_questions(
                 epub: false,
                 rendered: None,
                 source_targets: false,
-                edit_book_during_navigation: false,
+                bound_successor_for_book_edit: None,
                 count: questions.len(),
                 before_round: Some(&mut update_order),
             },
@@ -1523,7 +1523,7 @@ fn ordinary_installed_pdf_uses_exact_passages_and_fences_source_drift() -> Resul
                     case,
                     Case::ProviderRefusalWithTargets | Case::IdenticalTurnSuccessorWithTargets
                 ),
-                edit_book_during_navigation: false,
+                bound_successor_for_book_edit: None,
                 count: 1,
                 before_round: None,
             },
