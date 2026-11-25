@@ -36,12 +36,18 @@ start with a single notebook page.
 
 1. Circle `24 / 6` and write “What is the answer to this?” beside it. You can also highlight a passage or draw another closed shape around your subject.
 2. Hold one finger in the **lower-right corner** for three seconds, then release once.
-3. A successful run puts the question and the answer **4** on a new page immediately after yours. The circle and expression stay on the source page. If the conversation already has an answer page, Buddy can reuse it.
+3. Leave the notebook open. For this example, the adjacent Buddy page should show your question and the answer **4**. The circle and expression stay on your source page.
 
-Buddy captures the page and independently verifies the handwritten question
-before opening the answer page. If you installed the standalone binary archive,
-use its manual workflow. Prepare a blank page immediately after the source
-before the hold, or use an existing Reader answer page in that position.
+The combined development preview captures your source, then opens its Buddy
+page before the first model call. It reuses the linked adjacent page or inserts
+one there. Stay on the Buddy page to see the answer or a short explanation if
+the request fails. [Preview change](https://github.com/s116821/ReMarkableBuddies/pull/227)
+
+With the complete resident installation running v0.78.6, Buddy verifies the
+handwritten question before opening the answer page. [v0.78.6 release notes](https://github.com/s116821/ReMarkableBuddies/releases/tag/v0.78.6)
+
+If you installed the standalone binary archive, prepare a blank page immediately
+after the source before the hold, or use an existing Reader answer page there.
 See [manual answer-page setup](#manual-workflow-cannot-find-an-answer-page).
 
 The circle selects the topic to explain. Answers may use surrounding page content
