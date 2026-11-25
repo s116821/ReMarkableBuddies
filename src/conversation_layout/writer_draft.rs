@@ -10,6 +10,7 @@ pub(crate) fn writer_draft_text(markdown: &str, about: Option<&str>) -> Result<S
             .map(|body| (about, body))
     }) {
         let heading = plain_markdown(&markdown[..title.len() + 2]);
+        let about = crate::conversation::target::about_display_text(about);
         return Ok(format!("{heading}\n\n{about}\n\n{}", plain_markdown(body)));
     }
     Ok(plain_markdown(markdown))
@@ -152,17 +153,31 @@ mod tests {
 
     #[test]
     fn writer_projection_keeps_bound_about_math_and_literal_code() {
-        let about = "About: the **V_1** label";
+        let about = crate::conversation::target::Candidate {
+            subject: r"the **V\_1** label",
+            geometry: Some(crate::conversation::target::geometry::Geometry {
+                components: vec![vec![
+                    [100000, 100000],
+                    [500000, 100000],
+                    [500000, 900000],
+                    [100000, 900000],
+                ]],
+            }),
+            understanding: crate::conversation::target::Understanding::Interpreted,
+        }
+        .about()
+        .unwrap();
+        assert_eq!(about, r"About: the \*\*V\\\_1\*\* label");
         let draft = format!(
             "# **Diagram**\n\n{about}\n\n## Inputs\n\n- **Pump** and ~~unused~~ Tank\n\
              - Use \\*literal\\*, $x_1 = y_2$, and 2*3*4.\n\n\
              `x * y` and [label](https://example.com)\n\n\
              ~~~rust\nlet s = \"**code**\";\n~~~"
         );
-        let display = writer_draft_text(&draft, Some(about)).unwrap();
+        let display = writer_draft_text(&draft, Some(&about)).unwrap();
         assert_eq!(
             display,
-            "Diagram\n\nAbout: the **V_1** label\n\nInputs\n\n- Pump and [crossed out: unused] Tank\n\
+            "Diagram\n\nAbout: the **V\\_1** label\n\nInputs\n\n- Pump and [crossed out: unused] Tank\n\
              - Use *literal*, $x_1 = y_2$, and 2*3*4.\n\n\
              x * y and label (https://example.com)\n\n\
              let s = \"**code**\";"

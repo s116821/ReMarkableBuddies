@@ -45,7 +45,19 @@ impl Save {
         }
     }
 }
-const CIRCLE_NOTE: &str = "Make a note about the circled part.";
+const CIRCLE_NOTE: &str = r"Make a note about the circled **V\_1** label.";
+const CIRCLE_SUBJECT: &str = r"the **V\_1** label";
+const CIRCLE_ABOUT: &str = r"About: the \*\*V\\\_1\*\* label";
+const CIRCLE_DRAFT: &str = concat!(
+    "# Circled note\n\n",
+    r"About: the \*\*V\\\_1\*\* label",
+    "\n\nThe selected equation gives four."
+);
+const CIRCLE_DISPLAY: &str = concat!(
+    "Circled note\n\n",
+    r"About: the **V\_1** label",
+    "\n\nThe selected equation gives four."
+);
 const REGION_TEXT: &str = "Selected equation: 24 / 6 = 4.";
 const INITIAL_CIRCLED_SAVE: usize = 3;
 const EDITED_CIRCLED_SAVE: usize = 4;
@@ -486,7 +498,7 @@ impl crate::LLMEngine for SubmissionModel {
                 if let Some(circled) = self.submission.circled() {
                     let target = match circled {
                         Circled::Selected => serde_json::json!({
-                            "subject": "selected equation",
+                            "subject": CIRCLE_SUBJECT,
                             "geometry": {"components": [[[100000,100000],[500000,100000],[500000,900000],[100000,900000]]]},
                             "understanding": {"status": "interpreted"}
                         }),
@@ -560,10 +572,7 @@ impl crate::LLMEngine for SubmissionModel {
                     assert_eq!(input["request"], CIRCLE_NOTE);
                     assert_eq!(input["history"], serde_json::json!([]));
                     assert_eq!(input["source_units"][0]["text"], REGION_TEXT);
-                    assert_eq!(
-                        input["source_provenance"]["region"]["about"],
-                        "About: selected equation"
-                    );
+                    assert_eq!(input["source_provenance"]["region"]["about"], CIRCLE_ABOUT);
                     Ok("# Circled note\n\nThe selected equation gives four.".into())
                 } else {
                     assert_eq!(input["request"], self.submission.page_request());
@@ -1622,9 +1631,47 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
         } else if writer_request {
             let (exact_request, saved_draft) = if circled == Some(Circled::Selected) {
                 assert!(!position.exists(), "native insertion selected the new page");
-                assert!(records.iter().any(|record| matches!(record, Record::RegionSource(region)
-                    if region.normalized.document.document == document && region.about == "About: selected equation")));
-                (CIRCLE_NOTE, "# Circled note\n\nAbout: selected equation\n\nThe selected equation gives four.")
+                let (region, draft) = (
+                    records
+                        .iter()
+                        .find_map(|record| match record {
+                            Record::RegionSource(region)
+                                if region.normalized.document.document == document
+                                    && region.about == CIRCLE_ABOUT =>
+                            {
+                                Some(region)
+                            }
+                            _ => None,
+                        })
+                        .context("canonical region About absent")?,
+                    records
+                        .iter()
+                        .find_map(|record| match record {
+                            Record::Turn(turn)
+                                if turn.role == Role::Assistant
+                                    && turn.outcome == Outcome::Generated
+                                    && turn.text.as_deref() == Some(CIRCLE_DRAFT) =>
+                            {
+                                Some(turn)
+                            }
+                            _ => None,
+                        })
+                        .context("canonical regional draft absent")?,
+                );
+                let source = crate::conversation::WriterSource::decode(Record::RegionSource(
+                    region.clone(),
+                ))?;
+                let note = crate::writer::note_from_draft(
+                    draft,
+                    &source,
+                    ConversationId::new_v4(),
+                    ConversationId::new_v4(),
+                )?;
+                assert_eq!(
+                    note.markdown,
+                    format!("{CIRCLE_ABOUT}\n\nThe selected equation gives four.")
+                );
+                (CIRCLE_NOTE, CIRCLE_DRAFT)
             } else {
                 assert!(position.exists(), "draft must go onto the adjacent page");
                 (
@@ -1635,10 +1682,10 @@ fn shared_lower_right_submission_routes_reader_and_unqueued_writer() -> Result<(
                     },
                 )
             };
-            let draft_body = if submission == Submission::PageVisual(PageVisual::Mixed) {
-                MIXED_DISPLAY
-            } else {
-                saved_draft.strip_prefix("# ").unwrap()
+            let draft_body = match submission {
+                Submission::PageVisual(PageVisual::Mixed) => MIXED_DISPLAY,
+                Submission::Circled(Circled::Selected) => CIRCLE_DISPLAY,
+                _ => saved_draft.strip_prefix("# ").unwrap(),
             };
             let response = if save == Some(Save::Explicit) {
                 format!("Draft saved. Note export is disabled.\n\n{draft_body}")

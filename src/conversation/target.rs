@@ -6,6 +6,7 @@ use crate::storage::{valid_digest, Media, Namespace, Uuid, MAX_RECORD};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 pub const SCHEMA: u32 = 4;
+const ABOUT_MARKDOWN_ESCAPES: &str = "\\`*_[]<>";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -128,7 +129,7 @@ impl Candidate {
         self.validate()?;
         let mut subject = String::new();
         for c in self.subject.chars() {
-            if "\\`*_[]<>".contains(c) {
+            if ABOUT_MARKDOWN_ESCAPES.contains(c) {
                 subject.push('\\');
             }
             subject.push(c);
@@ -143,6 +144,25 @@ impl Candidate {
             subject
         ))
     }
+}
+
+/// Recover the literal label from the bound Markdown About line for tablet display.
+#[cfg(target_os = "linux")]
+pub(crate) fn about_display_text(markdown_about: &str) -> String {
+    let mut text = String::with_capacity(markdown_about.len());
+    let mut chars = markdown_about.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && chars
+                .peek()
+                .is_some_and(|next| ABOUT_MARKDOWN_ESCAPES.contains(*next))
+        {
+            text.push(chars.next().expect("peeked About escape"));
+        } else {
+            text.push(ch);
+        }
+    }
+    text
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
