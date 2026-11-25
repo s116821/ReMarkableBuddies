@@ -37,6 +37,7 @@ pub(in crate::workflow) struct ResearchRequest<'a> {
     pub(in crate::workflow) directive: ResearchDirective,
     pub(in crate::workflow) search: Option<OrdinarySearch<'a>>,
     pub(in crate::workflow) deadline: Instant,
+    pub(in crate::workflow) original_image_only: bool,
 }
 
 impl<'a> FollowupResearch<'a> {
@@ -56,6 +57,7 @@ impl<'a> FollowupResearch<'a> {
                 directive,
                 search,
                 deadline,
+                original_image_only: false,
             },
         }
     }
@@ -137,7 +139,7 @@ pub(in crate::workflow) fn answer(
     let preference = config.personalization_snapshot()?;
     let count = |text: &str| Ok(text.len());
     check()?;
-    let images = FollowupAttachments::acquire(ledger, &context)?;
+    let images = FollowupAttachments::acquire(ledger, &context, research.original_image_only)?;
     let memory = memory
         .map(|provider| {
             Ok::<_, anyhow::Error>((

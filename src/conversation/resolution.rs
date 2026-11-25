@@ -67,6 +67,101 @@ fn request(records: &[Record], conversation: Uuid, id: Uuid) -> Result<&Turn> {
 }
 
 impl Ledger {
+    #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
+    pub(crate) fn bound_resident_reader_source(
+        &self,
+        request: &Turn,
+        binding: &super::BindingReceipt,
+    ) -> Result<SourceDirective> {
+        use std::collections::BTreeMap;
+        use SourceResolutionRefusal as Refusal;
+
+        ensure!(
+            binding.conversation == request.conversation,
+            Refusal::InvalidSource
+        );
+        let records = self.inspect(request.conversation, false)?;
+        let prior = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::Turn(turn)
+                    if turn.role == Role::User && turn.sequence < request.sequence =>
+                {
+                    Some((turn.id, turn))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let latest = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::RequestEvidence(evidence) => prior
+                    .get(&evidence.request_turn)
+                    .filter(|turn| {
+                        turn.mode == Mode::Reader && turn.outcome == Outcome::Interpreted
+                    })
+                    .map(|turn| (turn.sequence, evidence.recorded_ms, evidence.id, evidence)),
+                _ => None,
+            })
+            .max_by_key(|(sequence, time, id, _)| (*sequence, *time, *id));
+
+        if let Some((_, _, _, evidence)) = latest {
+            return match recorded_source(&evidence.frame_json)? {
+                SourceAssociation::NoDocument => {
+                    Ok(SourceDirective::Explicit(RequestSource::NoDocument))
+                }
+                SourceAssociation::CapturedPage { .. } => Ok(SourceDirective::Inherit {
+                    request_turn: evidence.request_turn,
+                    operation: Some(evidence.operation),
+                    expected: None,
+                }),
+                SourceAssociation::Original {
+                    origin_turn,
+                    source_record,
+                    ..
+                } => {
+                    let Record::ResidentCapture(capture) = source_record.as_ref() else {
+                        return Err(Refusal::InvalidSource.into());
+                    };
+                    ensure!(
+                        records.contains(source_record.as_ref()),
+                        Refusal::ChangedSource
+                    );
+                    Ok(SourceDirective::Explicit(RequestSource::CapturedPage {
+                        origin_turn,
+                        source_record: capture.id,
+                    }))
+                }
+            };
+        }
+
+        // Older installed conversations may have no request-evidence record.
+        // Their insertion receipt identifies the only eligible original page.
+        // A blank-start receipt adds a page but has no originating Reader image.
+        let original = records
+            .iter()
+            .filter_map(|record| match record {
+                Record::ResidentCapture(capture)
+                    if capture.before.document == binding.source.document
+                        && capture.before.page == binding.source.page
+                        && capture.before.page != binding.observed_page =>
+                {
+                    prior
+                        .get(&capture.turn)
+                        .map(|turn| (turn.sequence, capture))
+                }
+                _ => None,
+            })
+            .max_by_key(|(sequence, _)| *sequence);
+        Ok(SourceDirective::Explicit(original.map_or(
+            RequestSource::NoDocument,
+            |(_, capture)| RequestSource::CapturedPage {
+                origin_turn: capture.turn,
+                source_record: capture.id,
+            },
+        )))
+    }
+
     /// Resolve the caller's declaration as ordinary historical data only.
     /// A subsequent receiver must validate its own snapshot and Provider key.
     pub fn resolve_request_source(

@@ -363,6 +363,7 @@ impl<M: LLMEngine> Orchestrator<M> {
             directive,
             search,
             deadline: source.deadline,
+            original_image_only: source.book.is_none(),
         };
         self.answer_ordinary_source(
             attempt,
@@ -481,22 +482,25 @@ impl<M: LLMEngine> Orchestrator<M> {
                 progress: RefCell::new(&mut progress),
             });
             let source_record = attempt.retained_source();
-            let choice = source.book.map_or(
-                RequestSource::CapturedPage {
-                    origin_turn: user,
-                    source_record,
-                },
-                |book| RequestSource::Original {
+            let directive = if let Some(book) = source.book {
+                SourceDirective::Explicit(RequestSource::Original {
                     origin_turn: user,
                     source_record,
                     expected: book.key.clone(),
-                },
-            );
+                })
+            } else if let Some(binding) = attempt.current_reader_answer_page() {
+                ledger.bound_resident_reader_source(&attempt.user, binding)?
+            } else {
+                SourceDirective::Explicit(RequestSource::CapturedPage {
+                    origin_turn: user,
+                    source_record,
+                })
+            };
             ledger.prepare_declared_evidence(
                 conversation,
                 user,
                 None,
-                SourceDirective::Explicit(choice),
+                directive,
                 ReceivingBudget {
                     context: ContextBudget {
                         max_text_bytes: 16 * 1024,

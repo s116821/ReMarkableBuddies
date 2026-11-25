@@ -168,6 +168,161 @@ fn installed_reader_uses_only_its_notebook_and_global_memory_after_transcription
         check_captured_page(case)
             .with_context(|| format!("Captured notebook Reader case {case:?}"))?;
     }
+    check_bound_reader_page(false).context("Reader on an adjacent and current bound page")?;
+    check_bound_reader_page(true).context("Reader after blank start")
+}
+
+fn check_bound_reader_page(blank_start: bool) -> Result<()> {
+    use crate::conversation::{
+        BindingAcquisition, BindingReceipt, ExpectedHeads, SourceObservation,
+    };
+
+    let mode = "reconnect-source-handoff-research-pages";
+    let rounds = if blank_start { 2 } else { 3 };
+    let releases = (0..rounds).map(|_| released(Instant::now())).collect();
+    let (mut workflow, store, base, events, _notify) = workflow(mode, releases, Duration::ZERO);
+    let document = ConversationId::new_v4();
+    let original = ConversationId::new_v4();
+    let buddy = ConversationId::new_v4();
+    let conversation = ConversationId::new_v4();
+    let native = Fixture::new();
+    native.declare_source(document, original);
+    native.declare_research_successor(buddy);
+    let position = native.successor_position();
+    if blank_start {
+        std::fs::write(&position, b"buddy")?;
+    }
+    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
+    let hex = |bytes: [u8; 32]| {
+        bytes
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let ledger = Ledger::new(store.clone());
+    ledger.create(conversation, ConversationId::new_v4(), 1)?;
+    let operation = ConversationId::new_v4();
+    ledger.bind(
+        operation,
+        ledger.expected(Namespace::Conversation, conversation)?,
+        ExpectedHeads::default(),
+        BindingReceipt {
+            operation,
+            conversation,
+            request_fingerprint: "bound-reader-research".into(),
+            adapter_fingerprint: hex(runtime.identity().adapter_sha256),
+            source: SourceObservation {
+                document,
+                page: original,
+                session: "fixture-session".into(),
+                visit: "fixture-visit".into(),
+                content_revision: None,
+                order_revision: None,
+                capability_revision: hex(runtime.identity().profile_sha256),
+                evidence_procedure: "fixture-research-pages".into(),
+            },
+            intended_target: Some(buddy),
+            observed_document: document,
+            observed_page: buddy,
+            expected_order: vec![original, buddy],
+            observed_order: vec![original, buddy],
+            persisted_revision: "fixture-binding".into(),
+            observed_ms: 3,
+            evidence_origin: "installed-native-guarded-v1".into(),
+            acquisition: BindingAcquisition::ExistingAdjacent,
+        },
+    )?;
+    let owner = workflow.resident_source.as_mut().unwrap();
+    owner.selection = InstalledReaderSelection::fixture_with_installed_output();
+    owner.session = Some(Box::new(OwnedSession {
+        runtime,
+        _fixture: native,
+        events,
+        delivery_fault: false,
+        observe_file_change: None,
+        writer_slot: None,
+        writer_slot_fault: false,
+        refinement_slot: None,
+    }));
+
+    let mut config = crate::config::Config {
+        paths: store.paths.clone(),
+        research_policy: Some(Some(ResearchPolicy::Disabled)),
+        ..Default::default()
+    };
+    let profile = ConversationId::new_v4();
+    seed_memory(&store, profile, document)?;
+    config.memory.enabled = true;
+    config.memory.profile = Some(profile);
+    let calls = Rc::new(RefCell::new(vec![]));
+    let model = ReaderModel {
+        parts: vec![],
+        images: vec![],
+        calls: calls.clone(),
+        question: QUESTION,
+        intent: json!({"version":1, "intent":"no-restriction"}),
+        case: Case::Disabled,
+    };
+    let dispatch = crate::workflow::conversation_dispatch::Dispatch::local(&config, &ledger)?;
+    let mut reader = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
+    let mut original_images = Vec::new();
+    let mut origin_turn = None;
+    for round in 0..rounds {
+        reader.run_iteration_with_trigger(true, Some(&dispatch), Some(&config))?;
+        let frames = std::mem::take(&mut *calls.borrow_mut());
+        let [analysis, verification, answer] = frames.as_slice() else {
+            anyhow::bail!("Expected two readings and an answer for round {round}");
+        };
+        assert_eq!(analysis.1, verification.1);
+        let payload: Value = serde_json::from_str(&answer.0[1])?;
+        let request = &payload["context"]["request_context"];
+        assert_eq!(request["request"]["conversation"], json!(conversation));
+        assert_eq!(request["request"]["text"], QUESTION);
+        let memory = &payload["context"]["memory"];
+        if blank_start {
+            assert_eq!(request["source"]["kind"], "no-document");
+            assert!(answer.1.is_empty());
+            assert!(memory["query"]["document"].is_null());
+            assert_eq!(memory["context"]["facts"].as_array().unwrap().len(), 1);
+            assert_eq!(memory["context"]["facts"][0]["fact"]["value"], GLOBAL);
+        } else {
+            assert_eq!(request["source"]["kind"], "captured-page");
+            assert_eq!(
+                request["source"]["source_record"]["record"]["before"]["page"],
+                json!(original)
+            );
+            assert_eq!(memory["query"]["document"], json!(document));
+            if round == 0 {
+                assert_eq!(request["source"]["origin_turn"], request["request"]["id"]);
+                original_images = answer.1.clone();
+                assert!(!original_images.is_empty());
+                origin_turn = Some(request["request"]["id"].clone());
+                std::fs::write(&position, b"buddy")?;
+            } else {
+                assert_eq!(
+                    Some(&request["source"]["origin_turn"]),
+                    origin_turn.as_ref()
+                );
+                assert_ne!(request["request"]["id"], request["source"]["origin_turn"]);
+                assert_ne!(
+                    analysis.1, original_images,
+                    "Buddy and original must use different pixels"
+                );
+                assert_eq!(answer.1, original_images);
+            }
+        }
+    }
+    let records = ledger.inspect(conversation, false)?;
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| matches!(record,
+        Record::ResidentCapture(capture) if capture.before.page == buddy))
+            .count(),
+        2
+    );
+    drop((dispatch, reader, ledger, store));
+    std::fs::remove_dir_all(base)?;
     Ok(())
 }
 
@@ -177,59 +332,24 @@ fn check_captured_page(case: Case) -> Result<()> {
     let (mut workflow, store, base, events, _notify) =
         workflow(mode, vec![released(Instant::now())], Duration::ZERO);
     let document = ConversationId::new_v4();
+    let native = Fixture::new();
+    native.declare_source(document, ConversationId::new_v4());
+    let runtime = native.start_with_store(store.clone(), mode, Duration::from_secs(10))?;
     let owner = workflow.resident_source.as_mut().unwrap();
     owner.selection = InstalledReaderSelection::fixture_with_installed_output();
-    owner.factory = Box::new(OwnedFactory {
-        source: Some((document, ConversationId::new_v4())),
+    owner.session = Some(Box::new(OwnedSession {
+        runtime,
+        _fixture: native,
         events: events.clone(),
-        mode,
-        delay: Duration::ZERO,
-    });
+        delivery_fault: false,
+        observe_file_change: None,
+        writer_slot: None,
+        writer_slot_fault: false,
+        refinement_slot: None,
+    }));
 
     let profile = ConversationId::new_v4();
-    let memory = Arc::new(memory::LocalMemory::new_local(store.clone(), profile)?);
-    for (scope, claim, value) in [
-        (
-            memory::Scope::Document { document },
-            "compass choice",
-            NOTEBOOK,
-        ),
-        (
-            memory::Scope::Document {
-                document: ConversationId::new_v4(),
-            },
-            "compass choice",
-            OTHER,
-        ),
-        (memory::Scope::Global, "compass check", GLOBAL),
-    ] {
-        memory.put(memory::Mutation {
-            operation: ConversationId::new_v4(),
-            expected: Default::default(),
-            fact: memory::Fact {
-                key: memory::Key {
-                    profile,
-                    scope,
-                    fact: ConversationId::new_v4(),
-                },
-                claim: claim.into(),
-                subject: "compass".into(),
-                value: value.into(),
-                tags: vec![],
-                provenance: memory::Provenance {
-                    basis: memory::Basis::UserConfirmed,
-                    description: "Synthetic notebook choice".into(),
-                    conversation: None,
-                    turn: None,
-                    source: None,
-                },
-                confidence_basis_points: 1000,
-                observed_ms: 1,
-                expires_ms: None,
-            },
-        })?;
-    }
-    drop(memory);
+    seed_memory(&store, profile, document)?;
     let mut config = crate::config::Config {
         paths: store.paths.clone(),
         ..Default::default()
@@ -279,13 +399,16 @@ fn check_captured_page(case: Case) -> Result<()> {
     if refused {
         let error = result.expect_err("Expected refusal before answering");
         if case == Case::Unavailable {
-            assert!(error.is::<crate::conversation::receiving::memory::research::ResearchRefusal>());
+            assert!(
+                error.is::<crate::conversation::receiving::memory::research::ResearchRefusal>(),
+                "{case:?}: {error:#}"
+            );
         } else {
             assert!(
                 error
                     .to_string()
                     .contains("changed before source preparation"),
-                "{error:#}"
+                "{case:?}: {error:#}"
             );
         }
     } else {
@@ -372,5 +495,55 @@ fn check_captured_page(case: Case) -> Result<()> {
     }
     drop((ledger, reader, store));
     std::fs::remove_dir_all(base)?;
+    Ok(())
+}
+
+fn seed_memory(
+    store: &Arc<Store>,
+    profile: ConversationId,
+    document: ConversationId,
+) -> Result<()> {
+    let memory = Arc::new(memory::LocalMemory::new_local(store.clone(), profile)?);
+    for (scope, claim, value) in [
+        (
+            memory::Scope::Document { document },
+            "compass choice",
+            NOTEBOOK,
+        ),
+        (
+            memory::Scope::Document {
+                document: ConversationId::new_v4(),
+            },
+            "compass choice",
+            OTHER,
+        ),
+        (memory::Scope::Global, "compass check", GLOBAL),
+    ] {
+        memory.put(memory::Mutation {
+            operation: ConversationId::new_v4(),
+            expected: Default::default(),
+            fact: memory::Fact {
+                key: memory::Key {
+                    profile,
+                    scope,
+                    fact: ConversationId::new_v4(),
+                },
+                claim: claim.into(),
+                subject: "compass".into(),
+                value: value.into(),
+                tags: vec![],
+                provenance: memory::Provenance {
+                    basis: memory::Basis::UserConfirmed,
+                    description: "Synthetic notebook choice".into(),
+                    conversation: None,
+                    turn: None,
+                    source: None,
+                },
+                confidence_basis_points: 1000,
+                observed_ms: 1,
+                expires_ms: None,
+            },
+        })?;
+    }
     Ok(())
 }

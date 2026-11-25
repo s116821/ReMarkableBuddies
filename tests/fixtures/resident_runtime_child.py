@@ -98,13 +98,15 @@ if mode in ("reconnect-source-handoff-indeterminate-successor", "reconnect-sourc
     source_order.append(uuid.uuid4().bytes)
 elif mode == "reconnect-source-handoff-indeterminate-last-page":
     source_order.insert(0, uuid.uuid4().bytes)
+elif mode == "reconnect-source-handoff-research-pages":
+    source_order.append(uuid.UUID((root.parent / "research-successor").read_text()).bytes)
 source_facts = source_document + source_page + struct.pack(">H", len(source_order)) + b"".join(source_order)
 inserted_target = None
 
 def current_source_facts():
     if inserted_target is not None:
         return source_document + inserted_target + struct.pack(">H", 2) + source_page + inserted_target
-    if mode == "reconnect-source-handoff-text-refusal" and (root.parent / "successor-position").is_file():
+    if mode in ("reconnect-source-handoff-text-refusal", "reconnect-source-handoff-research-pages") and (root.parent / "successor-position").is_file():
         return source_document + source_order[1] + struct.pack(">H", 2) + b"".join(source_order)
     order_change = root.parent / "ordinary-pdf-order-change"
     if mode == "reconnect-source-handoff-ordinary-pdf" and order_change.is_file():
@@ -221,8 +223,9 @@ while True:
                     break
                 width, height = 192, 128
                 ordinary_pdf = mode == "reconnect-source-handoff-ordinary-pdf"
+                seed = facts[16:32] if mode == "reconnect-source-handoff-research-pages" else b""
                 pixels = (b"\xcc" * (width * height * 3) if ordinary_pdf else
-                          b"".join(hashlib.sha256(struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
+                          b"".join(hashlib.sha256(seed + struct.pack(">I", i)).digest() for i in range(width * height * 3 // 32)))
                 def chunk(tag, data):
                     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
                 rows = b"".join(b"\x00" + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))

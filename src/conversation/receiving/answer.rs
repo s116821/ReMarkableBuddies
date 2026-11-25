@@ -431,10 +431,19 @@ impl FollowupAttachments {
     pub(crate) fn acquire(
         ledger: &crate::conversation::Ledger,
         context: &super::FrozenRequestContext,
+        original_only: bool,
     ) -> Result<Self> {
-        let view = context.media_view()?;
         let original = context.source().source_record();
-        let images = super::images::resolve_followup(ledger, view, context.request(), original)?;
+        let original_view = crate::conversation::ContextView::default();
+        let mut request;
+        let (view, request) = if original_only {
+            request = context.request().clone();
+            request.sources.clear();
+            (&original_view, &request)
+        } else {
+            (context.media_view()?, context.request())
+        };
+        let images = super::images::resolve_followup(ledger, view, request, original)?;
         let descriptor = super::encoded(
             &serde_json::json!({
                 "historical_images": images.associations,
