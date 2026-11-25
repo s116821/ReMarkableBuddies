@@ -153,13 +153,14 @@ impl WriterSelection {
         Ok((draft, *source, *plan))
     }
     #[cfg(target_os = "linux")]
-    pub(crate) fn presentation(&self) -> Result<(Turn, Uuid)> {
+    pub(crate) fn presentation(&self) -> Result<(Turn, Uuid, Option<String>)> {
         if self.notebook.is_some() {
             let (draft, source, _) = self.notebook_values()?;
-            Ok((draft, source.document))
+            Ok((draft, source.document, None))
         } else {
             let (draft, source) = self.values()?;
-            Ok((draft, source.document.document))
+            let document = source.document.document;
+            Ok((draft, document, source.region.map(|region| region.about)))
         }
     }
 
