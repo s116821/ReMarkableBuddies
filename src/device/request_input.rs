@@ -167,9 +167,19 @@ impl RequestInput {
     }
 
     pub fn poll(&mut self) -> Result<InputProgress> {
+        // Poll even after cancellation so a later observer failure stays fatal.
+        self.sample_quiet()?;
+        Ok(if self.canceled {
+            InputProgress::Canceled
+        } else {
+            InputProgress::Quiet
+        })
+    }
+
+    // Read-only startup can wait on an abandoned guard without renewing its
+    // authority. Sampling never clears sticky cancellation or input loss.
+    pub(crate) fn sample_quiet(&mut self) -> Result<bool> {
         ensure!(!self.lost, "Resident request input integrity lost");
-        // Do not short-circuit after cancellation: a later observer error still
-        // means integrity loss, not another ordinary canceled request.
         let events = match self.observer.poll() {
             Ok(events) => events,
             Err(error) => {
@@ -177,12 +187,9 @@ impl RequestInput {
                 return Err(error);
             }
         };
-        self.canceled |= !events.is_empty() || !self.observer.quiescent();
-        Ok(if self.canceled {
-            InputProgress::Canceled
-        } else {
-            InputProgress::Quiet
-        })
+        let quiet = events.is_empty() && self.observer.quiescent();
+        self.canceled |= !quiet;
+        Ok(quiet)
     }
 
     pub(crate) fn require_quiet(&mut self) -> Result<()> {
@@ -254,15 +261,24 @@ mod tests {
             Interaction::Redo,
             Interaction::Invalidated,
         ] {
-            let mut guard = RequestInput::scripted(vec![
-                Ok(vec![interaction]),
-                quiet(),
-                Err(anyhow::anyhow!("lost observer")),
-            ]);
-            assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
-            assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
-            assert!(guard.poll().is_err());
-            assert!(guard.poll().is_err());
+            for sampled in [false, true] {
+                let mut guard = RequestInput::scripted(vec![
+                    Ok(vec![interaction]),
+                    quiet(),
+                    quiet(),
+                    Err(anyhow::anyhow!("lost observer")),
+                ]);
+                if sampled {
+                    assert!(!guard.sample_quiet().unwrap());
+                    assert!(guard.sample_quiet().unwrap());
+                } else {
+                    assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                    assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                }
+                assert_eq!(guard.poll().unwrap(), InputProgress::Canceled);
+                assert!(guard.poll().is_err());
+                assert!(guard.poll().is_err());
+            }
         }
     }
 
