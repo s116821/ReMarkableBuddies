@@ -219,6 +219,14 @@ while True:
                 send(request[:202] + b"\x03" + digest + reply)
                 continue
             if mode.startswith("reconnect-source-handoff") and request[202:204] == b"\x02\x00":
+                temporary_source = root.parent / "temporary-source.json"
+                if mode == "reconnect-source-handoff-open-first" and temporary_source.is_file():
+                    document, pages, reject = json.loads(temporary_source.read_text())
+                    order = [uuid.UUID(page).bytes for page in pages]
+                    facts = uuid.UUID(document).bytes + order[-1] + struct.pack(">H", len(order)) + b"".join(order)
+                    reply = b"\x03\x03" if reject else b"\x00" + facts
+                    send(request[:202] + b"\x03" + digest + reply)
+                    continue
                 facts = current_source_facts()
                 if mode == "reconnect-source-handoff-open-first" and facts[16:32] != source_page:
                     (root.parent / "observed-open-page").write_text(str(uuid.UUID(bytes=facts[16:32])))

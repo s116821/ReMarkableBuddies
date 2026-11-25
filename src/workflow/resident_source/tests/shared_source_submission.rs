@@ -1506,17 +1506,53 @@ impl crate::LLMEngine for PageFirstModel {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum OversizedObservation {
+    NativeRefusal,
+    FullOrder,
+}
+
 #[test]
 fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_page() -> Result<()> {
-    for (only_mode, submission, reuse, switch_page, refuse_at) in [
-        (Some(Mode::Reader), Submission::Reader, false, false, None),
-        (Some(Mode::Writer), Submission::Reader, false, false, None),
-        (None, Submission::Reader, true, false, None),
-        (None, Submission::CurrentPage, false, false, None),
-        (None, Submission::Reader, false, true, None),
-        (None, Submission::Reader, false, false, Some(0)),
-        (None, Submission::Reader, false, false, Some(3)),
-        (None, Submission::CurrentPage, false, false, Some(1)),
+    for (only_mode, submission, reuse, switch_page, refuse_at, after_oversized) in [
+        (
+            Some(Mode::Reader),
+            Submission::Reader,
+            false,
+            false,
+            None,
+            None,
+        ),
+        (
+            Some(Mode::Writer),
+            Submission::Reader,
+            false,
+            false,
+            None,
+            None,
+        ),
+        (None, Submission::Reader, true, false, None, None),
+        (None, Submission::CurrentPage, false, false, None, None),
+        (None, Submission::Reader, false, true, None, None),
+        (None, Submission::Reader, false, false, Some(0), None),
+        (None, Submission::Reader, false, false, Some(3), None),
+        (None, Submission::CurrentPage, false, false, Some(1), None),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            None,
+            Some(OversizedObservation::NativeRefusal),
+        ),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            None,
+            Some(OversizedObservation::FullOrder),
+        ),
     ] {
         let reader_enabled = only_mode != Some(Mode::Writer);
         let writer_enabled = only_mode != Some(Mode::Reader);
@@ -1541,6 +1577,14 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         let page = ConversationId::new_v4();
         let buddy = ConversationId::new_v4();
         native.declare_source(document, page);
+        let oversized_source = after_oversized.map(|observation| {
+            let order: Vec<_> = (0..18).map(|_| ConversationId::new_v4()).collect();
+            let reject = matches!(observation, OversizedObservation::NativeRefusal);
+            (
+                observation,
+                native.temporary_source(ConversationId::new_v4(), &order, reject),
+            )
+        });
         let document_key = Uuid::parse(&document.to_string()).unwrap();
         let source_key = Uuid::parse(&page.to_string()).unwrap();
         let buddy_key = Uuid::parse(&buddy.to_string()).unwrap();
@@ -1566,7 +1610,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             native.declare_source_order(&[page, buddy]);
         }
         let case = format!(
-            "only mode={only_mode:?}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}"
+            "only mode={only_mode:?}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}, after oversized={after_oversized:?}"
         );
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(10))
@@ -1608,8 +1652,12 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
                 ReaderFacts::new(source_facts.page(), existing_facts.order().to_vec()).unwrap();
         }
         workflow.device = Box::new(
-            RefusingBackend::with_resident_releases(vec![released(Instant::now())])
-                .with_test_output(Box::new(backend)),
+            RefusingBackend::with_resident_releases(
+                (0..1 + usize::from(after_oversized.is_some()))
+                    .map(|_| released(Instant::now()))
+                    .collect(),
+            )
+            .with_test_output(Box::new(backend)),
         );
         let dispatch =
             Dispatch::local(&config, &ledger)?.with_regional_writer_model("fixture".into());
@@ -1631,7 +1679,27 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         };
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
-        let result = service.run_iteration_with_trigger(false, Some(&dispatch), Some(&config));
+        if let Some((observation, path)) = oversized_source {
+            let error = service
+                .run_iteration_with_trigger(false, Some(&dispatch), Some(&config))
+                .expect_err("the SDK cannot capture an 18-page order");
+            let expected = match observation {
+                OversizedObservation::NativeRefusal => "Resident source observation refused",
+                OversizedObservation::FullOrder => "supports at most 17 pages (observed 18)",
+            };
+            assert!(error.to_string().contains(expected), "{error:#}");
+            assert_eq!(events.borrow().as_slice(), &["observe"]);
+            assert_eq!(steps.get(), 0);
+            assert!(!observed_open_page.exists());
+            assert!(written.borrow().is_empty());
+            assert!(super::super::super::resident_client::attempts(&store)?.is_empty());
+            std::fs::remove_file(path)?;
+        }
+        let result = service.run_iteration_with_trigger(
+            after_oversized.is_some(),
+            Some(&dispatch),
+            Some(&config),
+        );
         let opened = ConversationId::parse_str(&std::fs::read_to_string(observed_open_page)?)?;
         assert_ne!(opened, page);
         if reuse {

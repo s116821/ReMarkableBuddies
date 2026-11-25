@@ -39,17 +39,7 @@ impl Fixture {
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.companion = Some(companion);
-        input.arguments = vec![
-            "-S".into(),
-            "-c".into(),
-            include_str!("../../../../tests/fixtures/resident_runtime_child.py").into(),
-            reader_mode.into(),
-            "--system".into(),
-            "two words".into(),
-            "".into(),
-            "$(not-a-command); *".into(),
-            "λ".into(),
-        ];
+        input.arguments = self.child_arguments(reader_mode);
         ResidentRuntime::launch_checked(
             self.store(),
             input,
@@ -424,17 +414,7 @@ impl Fixture {
     ) -> std::result::Result<ResidentRuntime, StartupFailure> {
         let mut input = self.launch();
         input.companion = Some(self.companion_profile("ready"));
-        input.arguments = vec![
-            "-S".into(),
-            "-c".into(),
-            include_str!("../../../../tests/fixtures/resident_runtime_child.py").into(),
-            reader_mode.into(),
-            "--system".into(),
-            "two words".into(),
-            "".into(),
-            "$(not-a-command); *".into(),
-            "\u{03bb}".into(),
-        ];
+        input.arguments = self.child_arguments(reader_mode);
         ResidentRuntime::launch_checked(
             store,
             input,
