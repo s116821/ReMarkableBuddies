@@ -351,6 +351,7 @@ impl<M: LLMEngine> Orchestrator<M> {
                     Mode::Reader
                 },
                 request: None,
+                routing_source: None,
             });
             let result = self.run_source_submission(
                 acquired,
@@ -395,7 +396,8 @@ impl<M: LLMEngine> Orchestrator<M> {
                 && dispatch.shared_source_writer_enabled()
             {
                 use source_submission::SourceIntent;
-                let intent = self.classify_source_submission(capture, dispatch)?;
+                let intent =
+                    self.classify_source_submission(capture, dispatch, opened.as_deref_mut())?;
                 if let (Some(opened), Some((request, stage))) =
                     (opened.as_deref_mut(), intent.writer_exchange())
                 {
@@ -490,21 +492,18 @@ impl<M: LLMEngine> Orchestrator<M> {
         let observed_book = ordinary_pdf::classify(&mut self.workflow, observed_book?)?;
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let mut attempt = if let Some(binding) = self.workflow.opened_submission() {
+            let request = opened.ok_or_else(|| anyhow::anyhow!("Opened Reader request absent"))?;
+            request.mode = crate::conversation::Mode::Reader;
             Attempt::prepare_with_resident_association(
                 &self.ledger,
                 acquired,
-                Some(binding.clone()),
+                Some((binding.clone(), request.exchange)),
             )?
         } else {
             Attempt::prepare(&self.ledger, acquired)?
         };
         #[cfg(not(all(target_os = "linux", feature = "installed-resident-output")))]
         let mut attempt = Attempt::prepare(&self.ledger, acquired)?;
-        #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
-        if let Some(opened) = opened {
-            opened.exchange = attempt.user.exchange;
-            opened.mode = attempt.user.mode.clone();
-        }
         #[cfg(all(target_os = "linux", feature = "installed-resident-output"))]
         let result = match observed_book {
             Some(book) => self.run_ordinary_book(

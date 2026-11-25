@@ -1445,6 +1445,7 @@ struct PageFirstModel {
     source_digest: Rc<RefCell<Option<String>>>,
     first: bool,
     refuse_at: Option<usize>,
+    fail_source_readback: Option<Arc<Store>>,
 }
 
 impl crate::LLMEngine for PageFirstModel {
@@ -1492,6 +1493,9 @@ impl crate::LLMEngine for PageFirstModel {
                     self.source_digest.borrow().as_deref(),
                     Some(digest.as_str())
                 );
+                if let Some(store) = self.fail_source_readback.take() {
+                    store.set_fault(crate::storage::Fault::ReadObject)?;
+                }
             }
         }
         if self.inner.steps.get() == 3 {
@@ -1512,9 +1516,16 @@ enum OversizedObservation {
     FullOrder,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SubmissionFailure {
+    Provider(usize),
+    SourceReadback,
+}
+
 #[test]
 fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_page() -> Result<()> {
-    for (only_mode, submission, reuse, switch_page, refuse_at, after_oversized) in [
+    use SubmissionFailure::{Provider, SourceReadback};
+    for (only_mode, submission, reuse, switch_page, failure, after_oversized) in [
         (
             Some(Mode::Reader),
             Submission::Reader,
@@ -1534,9 +1545,38 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         (None, Submission::Reader, true, false, None, None),
         (None, Submission::CurrentPage, false, false, None, None),
         (None, Submission::Reader, false, true, None, None),
-        (None, Submission::Reader, false, false, Some(0), None),
-        (None, Submission::Reader, false, false, Some(3), None),
-        (None, Submission::CurrentPage, false, false, Some(1), None),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            Some(Provider(0)),
+            None,
+        ),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            Some(Provider(3)),
+            None,
+        ),
+        (
+            None,
+            Submission::CurrentPage,
+            false,
+            false,
+            Some(Provider(1)),
+            None,
+        ),
+        (
+            None,
+            Submission::Reader,
+            false,
+            false,
+            Some(SourceReadback),
+            None,
+        ),
         (
             None,
             Submission::Reader,
@@ -1554,6 +1594,11 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             Some(OversizedObservation::FullOrder),
         ),
     ] {
+        let refuse_at = match failure {
+            Some(Provider(step)) => Some(step),
+            _ => None,
+        };
+        let readback_failed = matches!(failure, Some(SourceReadback));
         let reader_enabled = only_mode != Some(Mode::Writer);
         let writer_enabled = only_mode != Some(Mode::Reader);
         let mode = "reconnect-source-handoff-open-first";
@@ -1610,7 +1655,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             native.declare_source_order(&[page, buddy]);
         }
         let case = format!(
-            "only mode={only_mode:?}, reuse={reuse}, switch={switch_page}, fail at {refuse_at:?}, after oversized={after_oversized:?}"
+            "only mode={only_mode:?}, reuse={reuse}, switch={switch_page}, failure={failure:?}, after oversized={after_oversized:?}"
         );
         let runtime = native
             .start_with_store(store.clone(), mode, Duration::from_secs(10))
@@ -1676,6 +1721,7 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             source_digest: source_digest.clone(),
             first: true,
             refuse_at,
+            fail_source_readback: readback_failed.then(|| store.clone()),
         };
         assert!(workflow.wait_for_idle_batch(None, Some(&config))?);
         let mut service = Orchestrator::new(workflow, model, Ledger::new(store.clone()));
@@ -1712,10 +1758,23 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
         let records = ledger.inspect(conversation, false)?;
         let write_count = written.borrow().len();
         let disabled_reader = submission == Submission::Reader && !reader_enabled;
-        let refuse = refuse_at.is_some() || disabled_reader;
+        let refuse = failure.is_some() || disabled_reader;
         if switch_page || refuse {
             assert!(result.is_err(), "{result:?}");
             let (request, message) = match (switch_page, refuse_at) {
+                (false, None) if readback_failed => {
+                    assert!(format!("{:#}", result.as_ref().unwrap_err())
+                        .contains("injected storage interruption"));
+                    assert_eq!(
+                        records
+                            .iter()
+                            .filter(|r| matches!(r, Record::Turn(t) if t.role == Role::User))
+                            .count(),
+                        1,
+                        "lost readback duplicated the committed user turn"
+                    );
+                    (None, "This request could not be completed.")
+                }
                 (false, None) if disabled_reader => {
                     assert_eq!(steps.get(), 1, "only the shared router may call the model");
                     (
@@ -1776,6 +1835,29 @@ fn ordinary_submission_opens_before_provider_and_writes_only_to_the_observed_pag
             assert!(view.turns.iter().any(|turn| turn.exchange == reply.exchange
                 && turn.role == Role::User
                 && turn.text.as_deref() == request));
+            if refuse_at == Some(0) || disabled_reader || readback_failed {
+                let mut users = records.iter().filter_map(|record| match record {
+                    Record::Turn(turn)
+                        if turn.exchange == reply.exchange && turn.role == Role::User =>
+                    {
+                        Some(turn)
+                    }
+                    _ => None,
+                });
+                let user = users.next().context("routed user turn absent")?;
+                assert!(users.next().is_none(), "routing duplicated the user turn");
+                let [source] = user.sources.as_slice() else {
+                    anyhow::bail!("expected one captured source on the failed routing turn");
+                };
+                let saved = ledger.stored_resident_images(*source)?;
+                assert_eq!(saved.evidence.turn, user.id);
+                assert_eq!(saved.evidence.before.document, document);
+                assert_eq!(saved.evidence.before.page, page);
+                assert_eq!(
+                    source_digest.borrow().as_deref(),
+                    Some(crate::storage::digest(&saved.original_png).as_str())
+                );
+            }
             assert!(ledger
                 .context(conversation, &budget, |_| Ok(1))?
                 .turns
