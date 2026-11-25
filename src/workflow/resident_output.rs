@@ -77,7 +77,7 @@ impl SelectedConversationRequest {
 
 #[derive(Clone, Copy)]
 pub enum ReaderAbout<'a> {
-    /// The complete About line from the validated source-target record.
+    /// The Markdown-escaped About line from the validated source-target record.
     PreparedLine(&'a str),
     Subject(&'a crate::analysis::ReaderSubject),
 }
@@ -241,12 +241,14 @@ pub trait ResidentRenderer {
                 about,
             } => {
                 let about = match about {
-                    Some(ReaderAbout::PreparedLine(line)) => Some(line),
+                    Some(ReaderAbout::PreparedLine(line)) => {
+                        Some(crate::conversation::target::about_display_text(line))
+                    }
                     _ => None,
                 };
                 let body = super::Workflow::compose_qa(question, answer, center);
                 self.render(
-                    &super::Workflow::with_source_description(body, about),
+                    &super::Workflow::with_source_description(body, about.as_deref()),
                     lease,
                 )
             }

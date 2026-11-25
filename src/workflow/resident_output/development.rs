@@ -1234,7 +1234,10 @@ impl DisplayFormat {
         };
         if let Some(about) = about {
             let described = match about {
-                ReaderAbout::PreparedLine(line) => format!("{heading}{line}\n{content}"),
+                ReaderAbout::PreparedLine(line) => {
+                    let label = crate::conversation::target::about_display_text(line);
+                    format!("{heading}{label}\n{content}")
+                }
                 ReaderAbout::Subject(subject) => {
                     let description = match subject {
                         crate::analysis::ReaderSubject::Recognized(subject) => subject.as_str(),
@@ -1446,14 +1449,21 @@ mod tests {
                 crate::workflow::Workflow::compose_qa(question, answer, center)
             )
         );
-        assert_eq!(
-            unified.format(
-                true,
-                reader(Some(ReaderAbout::PreparedLine("About: circled equation"))),
-                |_| true
-            ),
-            format!("ReMarkableBuddies\n\nAbout: circled equation\nQ: {question}\n\nA: {answer}\n")
+        let literal = r"V_1 [R] \_bias";
+        let expected = format!("ReMarkableBuddies\n\nAbout: {literal}\n{qa}");
+        let fits_exactly = |page: &str| page.len() <= expected.len();
+        let raw_subject = crate::analysis::ReaderSubject::Recognized(
+            crate::analysis::ReaderSourceSubject::try_from(literal.to_owned()).unwrap(),
         );
+        for about in [
+            ReaderAbout::PreparedLine(r"About: V\_1 \[R\] \\\_bias"),
+            ReaderAbout::Subject(&raw_subject),
+        ] {
+            assert_eq!(
+                unified.format(true, reader(Some(about)), fits_exactly),
+                expected
+            );
+        }
         assert_eq!(
             older.format(
                 false,
