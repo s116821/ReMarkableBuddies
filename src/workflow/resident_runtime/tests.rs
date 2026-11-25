@@ -42,6 +42,22 @@ impl Fixture {
     }
 
     #[cfg(feature = "installed-resident-output")]
+    pub(crate) fn temporary_source(
+        &self,
+        document: StoreUuid,
+        pages: &[StoreUuid],
+        reject_observation: bool,
+    ) -> PathBuf {
+        let path = self.0.join("temporary-source.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&(document, pages, reject_observation)).unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(feature = "installed-resident-output")]
     pub(crate) fn ordinary_pdf_order_change(&self) -> PathBuf {
         self.0.join("ordinary-pdf-order-change")
     }
