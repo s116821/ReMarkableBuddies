@@ -234,7 +234,7 @@ impl Workflow {
                 .as_mut()
                 .context("resident health owner absent")?;
             let corner = self.device.configure_installed_resident_output(pin)?;
-            owner.activate_at_startup(corner, health)?;
+            owner.activate_at_ordinary_startup(corner, health)?;
         }
         Ok(())
     }
