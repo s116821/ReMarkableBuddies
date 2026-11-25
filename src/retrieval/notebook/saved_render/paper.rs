@@ -104,7 +104,9 @@ fn svg_background(svg: &[u8]) -> Result<Option<BackgroundImage>> {
             "unsupported saved paper SVG content"
         );
         let colour = check_shape(shape)?;
-        all_white &= matches!(colour, "white" | "#fff" | "#ffffff");
+        all_white &= colour == "white"
+            || colour.eq_ignore_ascii_case("#fff")
+            || colour.eq_ignore_ascii_case("#ffffff");
     }
     if all_white {
         return Ok(None);

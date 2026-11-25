@@ -223,6 +223,22 @@ fn saved_render_layers_stock_paper_under_ink_and_keeps_paper_only_pages() -> Res
 }
 
 #[test]
+fn saved_render_accepts_white_hex_in_any_case_with_or_without_png() -> Result<()> {
+    let pixels = image::RgbaImage::from_pixel(1, 1, image::Rgba([255; 4]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    let white = std::str::from_utf8(WHITE)?;
+    for colour in ["#FFFFFF", "#FfF"] {
+        let svg = white.replace("#fff", colour);
+        for variant in [None, Some(png.as_slice())] {
+            assert!(paper::background(Some(svg.as_bytes()), variant, MAX_HEIGHT)?.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn saved_render_checks_pinned_paper_variants_and_refuses_pattern_stretch() -> Result<()> {
     let mut pixels =
         image::RgbaImage::from_pixel(DEFAULT_WIDTH, DEFAULT_HEIGHT, image::Rgba([255; 4]));
