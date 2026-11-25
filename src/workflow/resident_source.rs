@@ -36,6 +36,9 @@ use std::{
 };
 
 pub(super) const ACQUISITION: Duration = Duration::from_secs(90);
+// The pinned SDK's CaptureSource codec and capture validator share this bound.
+#[cfg(feature = "installed-resident-output")]
+const MAX_INSTALLED_CAPTURE_PAGES: usize = 17;
 #[cfg(feature = "installed-resident-output")]
 type OrdinaryBookCapture = (
     ResidentSourceCapture,
@@ -984,6 +987,12 @@ impl ResidentSourceOwner {
             }
         };
         check(Some(&facts))?;
+        #[cfg(feature = "installed-resident-output")]
+        ensure!(
+            !self.installed_output_selected() || facts.order().len() <= MAX_INSTALLED_CAPTURE_PAGES,
+            "Resident source capture supports at most {MAX_INSTALLED_CAPTURE_PAGES} pages (observed {})",
+            facts.order().len()
+        );
         let source = observed_source(self, health, &facts)?;
         if prepare_source {
             check(Some(&facts))?;
