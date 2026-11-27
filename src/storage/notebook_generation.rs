@@ -201,10 +201,11 @@ pub(crate) fn prepare(
         ensure!(
             matches!(association.outcome, Outcome::Completed)
                 || (matches!(association.outcome, Outcome::Failed | Outcome::Canceled)
-                    && association
-                        .attempt
-                        .as_ref()
-                        .is_some_and(|attempt| attempt.no_send)),
+                    && (association.capacities.is_some()
+                        || association
+                            .attempt
+                            .as_ref()
+                            .is_some_and(|attempt| attempt.no_send))),
             "unresolved export prevents notebook preparation"
         );
     }

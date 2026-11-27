@@ -1,4 +1,5 @@
 use super::*;
+mod capacities;
 use crate::{
     config::Personalization,
     conversation::TextScope,

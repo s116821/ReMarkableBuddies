@@ -199,7 +199,7 @@ fn path_hash(kind: &str, path: &Path) -> Checked<String> {
         format!("urn:remarkable-buddies:model-credential-{kind}:v1:{s}").as_bytes(),
     ))
 }
-fn metadata_hash(meta: &fs::Metadata, file: bool) -> String {
+pub(crate) fn metadata_hash(meta: &fs::Metadata, file: bool) -> String {
     let mut values = BTreeMap::from([
         ("device", meta.dev().to_string()),
         ("inode", meta.ino().to_string()),
@@ -228,17 +228,63 @@ fn metadata_values_hash(values: &BTreeMap<&str, String>, file: bool) -> String {
     serde_json::to_writer(&mut bytes, values).expect("fixed metadata serializes");
     digest(&bytes)
 }
-fn owner(meta: &fs::Metadata) -> bool {
+pub(crate) fn owner(meta: &fs::Metadata) -> bool {
     // IDs are process metadata, never credential/provider discovery.
     meta.uid() == unsafe { nix::libc::geteuid() } && meta.gid() == unsafe { nix::libc::getegid() }
 }
-fn parent(path: &Path) -> Checked<fs::Metadata> {
+pub(crate) fn parent(path: &Path) -> Checked<fs::Metadata> {
     files::safe_path(path).map_err(|_| Status::Unsupported)?;
     let meta = fs::symlink_metadata(path).map_err(|_| Status::Unavailable)?;
     if !meta.is_dir() || !owner(&meta) || meta.mode() & 0o7777 != 0o700 {
         return Err(Status::Unsupported);
     }
     Ok(meta)
+}
+
+/// Read one named credential from the private root with the existing owner
+/// and identity checks. Callers supply a compiled prefix and validated name.
+pub(crate) fn read_private(root: &Path, target: &Path, limit: u64) -> Checked<Vec<u8>> {
+    if !clean(root) || target.parent() != Some(root) {
+        return Err(Status::Unsupported);
+    }
+    let root_meta = parent(root)?;
+    let before = fs::symlink_metadata(target).map_err(|_| Status::Unavailable)?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || !owner(&before)
+        || !private_mode(before.mode() & 0o7777)
+        || before.len() > limit
+    {
+        return Err(Status::Unsupported);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(target)
+        .map_err(|_| Status::Unavailable)?;
+    let expected = metadata_hash(&before, true);
+    let opened = || {
+        file.metadata()
+            .map(|meta| metadata_hash(&meta, true))
+            .map_err(|_| Status::Unavailable)
+    };
+    if opened()? != expected {
+        return Err(Status::Unavailable);
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| Status::Unavailable)?;
+    let current = fs::symlink_metadata(target).map_err(|_| Status::Unavailable)?;
+    if bytes.len() as u64 != before.len()
+        || opened()? != expected
+        || metadata_hash(&current, true) != expected
+        || metadata_hash(&parent(root)?, false) != metadata_hash(&root_meta, false)
+    {
+        return Err(Status::Unavailable);
+    }
+    Ok(bytes)
 }
 struct Observation {
     config: Config,

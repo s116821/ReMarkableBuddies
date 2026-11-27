@@ -193,11 +193,29 @@ impl WriterExportInput {
         association: &ExportAssociation,
     ) -> Result<String> {
         let draft = self.selection.draft_value()?;
+        let (correlation, effect) = if let Some(attempt) = &association.capacities {
+            association.validate_attempt()?;
+            ensure!(
+                association.id
+                    == CapacitiesAttempt::association_id(
+                        association.conversation,
+                        attempt.space,
+                        attempt.correlation
+                    ),
+                "foreign Capacities association key"
+            );
+            (attempt.correlation, attempt.id)
+        } else {
+            (
+                association.id,
+                association.attempt.as_ref().context("attempt missing")?.id,
+            )
+        };
         ensure!(
             self.grant.store == ledger.store().as_ref() as *const Store as usize
                 && self.grant.conversation == association.conversation
-                && self.grant.correlation == association.id
-                && self.grant.effect == association.attempt.as_ref().context("attempt missing")?.id
+                && self.grant.correlation == correlation
+                && self.grant.effect == effect
                 && self.grant.draft == draft.id,
             "foreign Writer flow grant"
         );
